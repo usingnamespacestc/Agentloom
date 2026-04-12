@@ -36,11 +36,10 @@ class Settings(BaseSettings):
     workspace_root: str = Field(default="./data/workspaces")
 
     # --- Provider keys (read directly from environment for convenience) ---
-    volcengine_api_key: str | None = Field(default=None, alias="VOLCENGINE_API_KEY")
+    # Provider adapters now resolve keys via ProviderRepository.resolve_api_key,
+    # which reads os.environ directly — kept here only for non-provider uses.
     anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
     tavily_api_key: str | None = Field(default=None, alias="TAVILY_API_KEY")
-    openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
-    deepseek_api_key: str | None = Field(default=None, alias="DEEPSEEK_API_KEY")
 
     # --- Server ---
     host: str = Field(default="0.0.0.0")

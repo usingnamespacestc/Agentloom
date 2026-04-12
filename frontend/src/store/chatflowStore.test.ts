@@ -40,8 +40,7 @@ function seedChatFlow(): ChatFlow {
   return {
     id: "chat-1",
     title: "demo",
-    default_chat_model: null,
-    default_work_model: null,
+    default_model: null,
     root_ids: ["n1"],
     nodes: {
       n1: {
@@ -152,8 +151,7 @@ describe("chatflowStore", () => {
       title: null,
       description: null,
       tags: [],
-      default_chat_model: null,
-      default_work_model: null,
+      default_model: null,
       root_ids: ["a"],
       nodes: {
         a: stubChatNode("a", []),
@@ -247,6 +245,65 @@ describe("chatflowStore", () => {
     const s = useChatFlowStore.getState();
     expect(s.loadState).toBe("error");
     expect(s.errorMessage).toContain("500");
+  });
+
+  it("sendTurn focuses the new child of targetId, not the global latest leaf", async () => {
+    // Fork: a → {b (older), c (newer)}. User is on branch b; submitting
+    // a turn must focus the new child of b, not stay on branch c which
+    // has the later created_at.
+    const chat: ChatFlow = {
+      id: "c",
+      title: null,
+      description: null,
+      tags: [],
+      default_model: null,
+      root_ids: ["a"],
+      nodes: {
+        a: stubChatNode("a", []),
+        b: stubChatNode("b", ["a"], "2026-04-10T00:00:01Z"),
+        c: stubChatNode("c", ["a"], "2026-04-10T00:00:99Z"),
+      },
+    };
+    useChatFlowStore.getState().setChatFlow(chat);
+    useChatFlowStore.getState().pickBranch("a", "b");
+    expect(useChatFlowStore.getState().selectedNodeId).toBe("b");
+
+    // After refresh, the server returns the new real child "x" under b.
+    // c remains the node with the latest created_at in the whole chatflow.
+    const freshChat: ChatFlow = {
+      ...chat,
+      nodes: {
+        ...chat.nodes,
+        x: stubChatNode("x", ["b"], "2026-04-10T00:00:50Z"),
+      },
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+        if (init?.method === "POST" && url.includes("/turns")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ node_id: "x" }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }),
+          );
+        }
+        // GET /api/chatflows/c — refreshChatFlow's fetch.
+        return Promise.resolve(
+          new Response(JSON.stringify(freshChat), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }),
+    );
+
+    await useChatFlowStore.getState().sendTurn("hello", "b");
+
+    // Without the fix, autoLeafForChatFlow would pick "c" (later created_at
+    // at the a-fork). The fix forces focus onto the new child of targetId.
+    expect(useChatFlowStore.getState().selectedNodeId).toBe("x");
   });
 
   it("loadChatFlow populates chatflow on success", async () => {

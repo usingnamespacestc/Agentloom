@@ -561,6 +561,87 @@ main.py
 
 ---
 
+# Round 12 — 节点卡片 / 设置 / 模型默认值打磨 (2026-04-12)
+
+## 画布节点卡片
+
+- 节点卡片宽度 w-48 / w-52，完整显示节点 ID
+- 新增 `NodeIdLine` 组件（`canvas/nodes/NodeIdLine.tsx`）：点击复制 ID，带 "copied!" 900ms 反馈；受 `preferencesStore.showNodeId` 开关控制
+- 两种卡片（ChatFlow / WorkFlow）都在 token 进度条下方渲染节点 ID
+- `layout.ts` 的 `NODE_WIDTH` 192→208 适配新宽度
+
+## 对话面板元信息
+
+- `ConversationView` 新增 `MetaFooter`：
+  - 节点 ID（从消息前移到消息后）
+  - 每轮 token 用量（`↑prompt ↓completion (N cached)` — 加了上下箭头才让用户不再误以为是累计值）
+  - 生成时长（`aggregateWorkflowUsage` / `durationSeconds` / `formatDuration` 辅助函数）
+  - 生成速度（completion_tokens / 秒）
+- 三个新开关：`showTokens`、`showGenTime`、`showGenSpeed`（`preferencesStore` + `Settings` 中 Canvas 页）
+
+## 全局 vs 对话设置
+
+- `Settings.tsx`：标题 "Settings" → "全局设置"；Canvas 页改为 `rows` 数组渲染 4 个 checkbox
+- 新增 `ChatFlowSettings.tsx`：ChatFlow 级设置弹窗。入口按钮 "⚙ 对话设置" 位于右上，与 "全局设置" 并列
+
+## Provider 编辑器打磨
+
+- 修掉"双加"Bug：Test 会先 `createProvider`，再点 Save 又创建一次。改为维护 `persistedId` + `createdInSession` 两个本地状态；一旦 Test 已落库，Save 走 `patchProvider`；Cancel 若本轮创建过则清理孤儿行
+- 移除 Ollama / LMStudio preset：它们是 OpenAI 兼容的特例，不该单独列。改为在 preset 下拉下方展示一段 `local_provider_hint`，告诉用户 "选 Custom + OpenAI 兼容 + /v1 地址 + 无需密钥"
+- "默认"→"收藏"：`providers.pinned` 标签改名，因为模型可以多选，"默认"应该只有一个
+- 新增模型上下文窗口字段（`context_window` 早就在 schema 里，只是没 UI）：
+  - 每个模型行加一个紧凑输入框
+  - 支持 `4096` / `32k` / `128K` / `1m` / `1.5M` 等写法，k=1024、M=1024²，大小写均可
+  - 显示遵循统一规则：>=1M → M，<1M → k（`lib/tokenFormat.ts` 的 `formatTokensKM` 同时给 Settings 和 Canvas TokenBar 用；对话面板保持原始 `↑prompt ↓completion` 不变）
+
+## 默认模型：从 chat/work 分裂到单一字段
+
+走过三步：
+
+1. 先做了 `default_chat_model` + `default_work_model` 两个下拉 + 删掉 "使用系统默认" 选项
+2. 后端实现 `_resolve_default_model`：给一个可能过期的 `ProviderModelRef`，校验是否还在线；过期或为空则回落到 "第一个 pinned → 第一个 available → None"
+3. 用户追问："咱们对话本身也是在工作流里跑，chat/work 分裂逻辑不清楚"——确实，当前代码里 `default_work_model` 根本没地方读；follow-up LLM 走 `parent_llm.model_override` 继承。于是**塌成单一 `default_model`**
+
+最终一个字段路径：
+
+- `ChatFlow.default_model: ProviderModelRef | None` —— schema / DTO / API 一致
+- 创建 ChatFlow 时 `create_chatflow` 自动填入（第一个 pinned → 首个可用）
+- `get_chatflow` 里 lazy-rehydrate：拿到的 `default_model` 若 provider/model 已被删，自动重解并 persist
+- 引擎：`_spawn_turn_node` 把 `chatflow.default_model` 写进 seeded LLM_CALL 的 `model_override`；`_run_llm_call` 把它格式化成 `provider_id:model_id` 交给现有的 `_provider_call_from_settings`
+- Pydantic v2 默认 `extra="ignore"`，老行里残留的 `default_chat_model` / `default_work_model` 字段在 `model_validate` 时直接丢掉，lazy-rehydrate 会补上新的 `default_model`。老 ChatFlow 迁移零改动
+
+## Patch 与 runtime 同步 Bug
+
+用户发现改了 `default_model` 后端有落库，但前端重开时看到的仍是旧值。原因是 `get_chatflow` 优先返回 `runtime.chatflow`（为了让后台任务的结果不被 DB 陈旧态覆盖）。PATCH 端点当时只改 DB 没改 runtime。修复：`patch_chatflow` 里若 engine 有 runtime，把 title/description/tags/default_model 都同步到 `runtime.chatflow` 的内存副本，保证下一条 GET 和下一次 turn submission 都见到新值。
+
+## 根节点不可删除
+
+双层防护：
+
+- 前端 `computeUndeletableIds` 把所有 `parent_ids` 为空的节点加入 undeletable 集（此前只挡了 running 节点及其祖先）—— 卡片上的 × 按钮和右键菜单的删除项都会消失
+- 后端 `ChatFlowEngine.delete_node_cascade`：若目标在 `chat.root_ids` 里，抛 `ValueError("cannot delete root node ...")`；API 层翻译为 HTTP 409
+
+## 标题展示统一
+
+用户指出左边侧边栏未命名对话显示的是"4月12日 14:30"（创建时间），顶栏却显示 "未命名对话"，一会儿时间一会儿文案，不一致。
+
+- `ChatFlow` schema 加 `created_at: datetime = Field(default_factory=utcnow)` 字段；前端 `types/schema.ts` 同步
+- 新建 `lib/chatflowLabel.ts` 的 `chatflowDisplayTitle(cf)`：title trim 后非空就用 title；否则用 `created_at` 格式化；再不行退回 `id.slice(0, 8)`
+- `Sidebar` 删除本地 `untitledLabel`，改用共享 helper
+- `ChatFlowHeader` 的 `EditableTitle` 加 `emptyLabel` prop，展示态用共享 label；输入态的 `placeholder` 保留 "未命名对话" 作为打字提示
+
+## 其他细节
+
+- Pydantic `ChatFlow` 新字段不破坏旧数据：`extra="ignore"` + `default_factory`
+- 前端 `chatflowStore.patchChatFlow` 的类型签名 / 乐观更新 / test 夹具全跟进
+- i18n 清理：删掉 `use_system_default` / `default_chat_model*` / `default_work_model*` / `preset_ollama` / `preset_lmstudio`；新增 `default_model`（+hint）、`context_window`（+hint）、`local_provider_hint`、`canvas_prefs.*`
+
+## `.gitignore` 踩坑
+
+`.gitignore` 里的 Python 规则 `lib/` 把 `frontend/src/lib/` 下任何新文件都一起忽略了（`api.ts`、`sse.ts` 是在规则生效前就 track 的，所以没受影响）。`tokenFormat.ts` 和 `chatflowLabel.ts` 都要 `git add -f` 强加。后续应把该规则改成 `/lib/` 或者更精确的 Python 路径，不然每次在 `src/lib/` 下加文件都会再踩一遍。
+
+---
+
 ## 建议下一步
 
 M9 收尾：

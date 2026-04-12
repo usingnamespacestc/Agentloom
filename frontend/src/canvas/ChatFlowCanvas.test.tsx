@@ -20,8 +20,7 @@ function seed(): ChatFlow {
     title: null,
     description: null,
     tags: [],
-    default_chat_model: null,
-    default_work_model: null,
+    default_model: null,
     root_ids: ["a"],
     nodes: {
       a: {
@@ -129,8 +128,7 @@ describe("ChatFlowCanvas rendering", () => {
           title: null,
           description: null,
           tags: [],
-          default_chat_model: null,
-          default_work_model: null,
+          default_model: null,
           root_ids: [],
           nodes: {},
         }}

@@ -98,8 +98,28 @@
     "branch_of": "Branch {{current}} of {{total}}",
     "thinking": "Thinking"
   },
+  "settings": {
+    "title": "Global settings",
+    "tab_canvas": "Canvas"
+  },
+  "chatflow_settings": {
+    "title": "ChatFlow settings",
+    "default_model": "Default model",
+    "default_model_hint": "Used for every LLM call in this chatflow unless a node overrides it.",
+    "no_models_hint": "No models configured yet. Add a provider and pin at least one model first."
+  },
+  "canvas_prefs": {
+    "show_node_id": "Show node ID",
+    "show_node_id_hint": "Display the raw database node ID in the top-right corner of each node card. Helpful for debugging.",
+    "show_tokens": "Show token usage",
+    "show_tokens_hint": "Display total tokens (prompt + completion, cached separately) for each turn in the conversation panel.",
+    "show_gen_time": "Show generation time",
+    "show_gen_time_hint": "Display wall-clock time from turn start to finish.",
+    "show_gen_speed": "Show generation speed",
+    "show_gen_speed_hint": "Display output tokens per second (completion_tokens / seconds)."
+  },
   "providers": {
-    "title": "Provider Settings",
+    "title": "Providers",
     "add": "Add provider",
     "edit": "Edit",
     "delete": "Delete",
@@ -110,17 +130,27 @@
     "api_key_source": "API Key Source",
     "api_key_env_var": "Environment Variable",
     "api_key_inline": "API Key",
+    "api_key_none": "No key",
+    "api_key_none_hint": "For local servers (Ollama, LM Studio) — no authentication header is sent.",
     "models": "Models",
     "discover_models": "Discover models",
+    "discover_models_hint": "Save first, then discover models",
     "test_connection": "Test connection",
     "test_success": "Connection successful",
     "test_failed": "Connection failed",
-    "pinned": "Default",
+    "pinned": "Favorite",
+    "context_window": "Ctx size",
+    "context_window_hint": "Max context window tokens supported by this model",
     "save": "Save",
     "cancel": "Cancel",
     "no_providers": "No providers configured",
     "rate_limit_bucket": "Rate limit bucket",
     "kind_openai_compat": "OpenAI Compatible",
-    "kind_anthropic_native": "Anthropic Native"
+    "kind_anthropic_native": "Anthropic Native",
+    "preset": "Preset",
+    "preset_custom": "Custom",
+    "preset_openai": "OpenAI",
+    "preset_anthropic": "Anthropic",
+    "local_provider_hint": "For local servers (Ollama, LM Studio, vLLM, etc.): pick \"Custom\", set Type to \"OpenAI Compatible\", use their /v1 URL (e.g. http://localhost:11434/v1 for Ollama, http://localhost:1234/v1 for LM Studio), and choose \"No key\"."
   }
 }

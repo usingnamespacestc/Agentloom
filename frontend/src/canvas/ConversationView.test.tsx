@@ -50,8 +50,7 @@ function twoBranchFlow(): ChatFlow {
     title: null,
     description: null,
     tags: [],
-    default_chat_model: null,
-    default_work_model: null,
+    default_model: null,
     root_ids: ["a"],
     nodes: {
       a: node("a", [], "hello", "hi there", 0),

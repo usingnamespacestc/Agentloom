@@ -15,6 +15,7 @@ import Markdown from "react-markdown";
 import { useTranslation } from "react-i18next";
 
 import { StatusBadge } from "./StatusBadge";
+import { NodeIdLine } from "./NodeIdLine";
 import type { WorkFlowNode } from "@/types/schema";
 
 export interface WorkFlowNodeData extends Record<string, unknown> {
@@ -44,7 +45,7 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
     <div
       data-testid={`workflow-node-${node.id}`}
       className={[
-        "rounded-md border w-44 p-2 text-[11px] shadow-sm",
+        "rounded-md border w-48 p-2 text-[11px] shadow-sm",
         accent,
         isSelected ? "ring-2 ring-blue-300" : "",
       ].join(" ")}
@@ -67,6 +68,8 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
       {node.step_kind === "sub_agent_delegation" && (
         <div className="italic text-gray-500">delegation</div>
       )}
+
+      <NodeIdLine nodeId={node.id} />
 
       {!isLeaf && <Handle type="source" position={Position.Right} />}
     </div>

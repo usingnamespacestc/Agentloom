@@ -6,7 +6,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { ProviderSettings } from "@/components/ProviderSettings";
+import { ChatFlowSettings } from "@/components/ChatFlowSettings";
+import { Settings } from "@/components/Settings";
+import { chatflowDisplayTitle } from "@/lib/chatflowLabel";
 import { useChatFlowStore } from "@/store/chatflowStore";
 
 export function ChatFlowHeader() {
@@ -14,16 +16,17 @@ export function ChatFlowHeader() {
   const chatflow = useChatFlowStore((s) => s.chatflow);
   const patchChatFlow = useChatFlowStore((s) => s.patchChatFlow);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [chatFlowSettingsOpen, setChatFlowSettingsOpen] = useState(false);
 
   if (!chatflow) {
     return (
       <header className="flex items-center justify-between border-b border-gray-200 bg-white px-4 py-2">
         <span className="text-sm text-gray-400">{t("app.no_chatflow")}</span>
         <div className="flex items-center gap-2">
-          <SettingsButton onClick={() => setSettingsOpen(true)} />
+          <SettingsButton onClick={() => setSettingsOpen(true)} title={t("settings.title")} />
           <LanguageToggle i18n={i18n} t={t} />
         </div>
-        <ProviderSettings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+        <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       </header>
     );
   }
@@ -34,6 +37,7 @@ export function ChatFlowHeader() {
       <div className="min-w-0 flex-1">
         <EditableTitle
           value={chatflow.title ?? ""}
+          emptyLabel={chatflowDisplayTitle(chatflow)}
           placeholder={t("app.untitled")}
           onCommit={(v) => void patchChatFlow({ title: v || null })}
         />
@@ -49,13 +53,35 @@ export function ChatFlowHeader() {
         />
       </div>
 
-      {/* Right: settings + language toggle */}
+      {/* Right: chatflow settings + global settings + language toggle */}
       <div className="flex items-center gap-2">
-        <SettingsButton onClick={() => setSettingsOpen(true)} />
+        <ChatFlowSettingsButton
+          onClick={() => setChatFlowSettingsOpen(true)}
+          title={t("chatflow_settings.title")}
+        />
+        <SettingsButton onClick={() => setSettingsOpen(true)} title={t("settings.title")} />
         <LanguageToggle i18n={i18n} t={t} />
       </div>
-      <ProviderSettings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <ChatFlowSettings
+        open={chatFlowSettingsOpen}
+        onClose={() => setChatFlowSettingsOpen(false)}
+      />
     </header>
+  );
+}
+
+function ChatFlowSettingsButton({ onClick, title }: { onClick: () => void; title: string }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex h-7 flex-shrink-0 items-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs text-gray-500 hover:bg-gray-50 hover:text-gray-700"
+      title={title}
+    >
+      <span>{"\u2699"}</span>
+      <span className="text-[11px]">{title}</span>
+    </button>
   );
 }
 
@@ -63,10 +89,12 @@ export function ChatFlowHeader() {
 
 function EditableTitle({
   value,
+  emptyLabel,
   placeholder,
   onCommit,
 }: {
   value: string;
+  emptyLabel: string;
   placeholder: string;
   onCommit: (v: string) => void;
 }) {
@@ -93,9 +121,9 @@ function EditableTitle({
       <h1
         onClick={() => setEditing(true)}
         className="cursor-pointer truncate text-base font-semibold text-gray-900 hover:text-blue-600"
-        title={value || placeholder}
+        title={value || emptyLabel}
       >
-        {value || <span className="font-normal text-gray-400">{placeholder}</span>}
+        {value || <span className="font-normal text-gray-400">{emptyLabel}</span>}
       </h1>
     );
   }
@@ -267,15 +295,16 @@ function TagList({
 
 // ---------------------------------------------------------------- Settings button
 
-function SettingsButton({ onClick }: { onClick: () => void }) {
+function SettingsButton({ onClick, title }: { onClick: () => void; title: string }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded border border-gray-300 bg-white text-sm text-gray-500 hover:bg-gray-50 hover:text-gray-700"
-      title="Settings"
+      className="flex h-7 flex-shrink-0 items-center gap-1 rounded border border-gray-300 bg-white px-2 text-xs text-gray-500 hover:bg-gray-50 hover:text-gray-700"
+      title={title}
     >
-      {"\u2699"}
+      <span>{"\u2699"}</span>
+      <span className="text-[11px]">{title}</span>
     </button>
   );
 }

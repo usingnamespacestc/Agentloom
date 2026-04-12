@@ -289,13 +289,19 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
 
 /**
  * Compute the set of node ids that cannot be deleted.
- * A node is undeletable if it is RUNNING, or if any of its
- * descendants is RUNNING (which makes it an ancestor of a running node).
+ * A node is undeletable if it is a root (the conversation anchor),
+ * if it is RUNNING, or if any of its descendants is RUNNING (which
+ * makes it an ancestor of a running node).
  */
 function computeUndeletableIds(
   nodes: Record<string, ChatFlowNode>,
 ): Set<string> {
   const undeletable = new Set<string>();
+
+  // Roots are the conversation's anchor — never deletable.
+  for (const [id, node] of Object.entries(nodes)) {
+    if (node.parent_ids.length === 0) undeletable.add(id);
+  }
 
   // First, find all running nodes.
   const runningIds: string[] = [];

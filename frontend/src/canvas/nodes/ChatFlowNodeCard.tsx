@@ -19,6 +19,8 @@ import Markdown from "react-markdown";
 import { useTranslation } from "react-i18next";
 
 import { StatusBadge } from "./StatusBadge";
+import { NodeIdLine } from "./NodeIdLine";
+import { formatTokensKM } from "@/lib/tokenFormat";
 import type { ChatFlowNode } from "@/types/schema";
 
 /** Temporary hard-coded context limit — will become per-model config. */
@@ -72,7 +74,7 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
     <div
       data-testid={`chatflow-node-${node.id}`}
       className={[
-        "group/card relative rounded-lg border shadow-sm w-48 p-2.5 text-xs",
+        "group/card relative rounded-lg border shadow-sm w-52 p-2.5 text-xs",
         isRoot ? "bg-blue-50 border-l-[3px] border-l-blue-400" : isLeaf ? "bg-green-50" : "bg-white",
         isSelected ? "border-blue-500 ring-2 ring-blue-200" : isRoot ? "border-blue-200" : isLeaf ? "border-green-200" : "border-gray-300",
         isMerge ? "border-purple-400" : "",
@@ -162,14 +164,11 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
 
       {contextTokens > 0 && <TokenBar tokens={contextTokens} />}
 
+      <NodeIdLine nodeId={node.id} />
+
       {!isLeaf && <Handle type="source" position={Position.Right} />}
     </div>
   );
-}
-
-function formatTokenCount(n: number): string {
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-  return String(n);
 }
 
 function TokenBar({ tokens }: { tokens: number }) {
@@ -177,9 +176,9 @@ function TokenBar({ tokens }: { tokens: number }) {
   const color =
     pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-yellow-400" : "bg-blue-400";
   return (
-    <div className="mt-1.5" title={`${tokens} / ${formatTokenCount(DEFAULT_MAX_CONTEXT_TOKENS)} tokens`}>
+    <div className="mt-1.5" title={`${tokens} / ${formatTokensKM(DEFAULT_MAX_CONTEXT_TOKENS)} tokens`}>
       <div className="flex items-center justify-between text-[9px] text-gray-500 mb-0.5">
-        <span>{formatTokenCount(tokens)}</span>
+        <span>{formatTokensKM(tokens)}</span>
         <span>{pct.toFixed(0)}%</span>
       </div>
       <div className="h-1 w-full rounded-full bg-gray-200">

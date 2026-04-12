@@ -79,7 +79,11 @@ async def create_provider(
         base_url=body.base_url,
         api_key_source=body.api_key_source,  # type: ignore[arg-type]
         api_key_env_var=body.api_key_env_var if body.api_key_source == "env_var" else None,
-        api_key_ciphertext=body.api_key_inline.encode() if body.api_key_inline and body.api_key_source == "inline" else None,
+        api_key_ciphertext=(
+            body.api_key_inline.encode()
+            if body.api_key_inline and body.api_key_source == "inline"
+            else None
+        ),
         available_models=body.available_models,
         rate_limit_bucket=body.rate_limit_bucket,
     )
@@ -128,6 +132,14 @@ async def patch_provider(
         config.api_key_env_var = body.api_key_env_var
     if "api_key_inline" in provided and body.api_key_inline is not None:
         config.api_key_ciphertext = body.api_key_inline.encode()
+    # Enforce cross-field invariants after any source change.
+    if config.api_key_source == "none":
+        config.api_key_env_var = None
+        config.api_key_ciphertext = None
+    elif config.api_key_source == "env_var":
+        config.api_key_ciphertext = None
+    elif config.api_key_source == "inline":
+        config.api_key_env_var = None
     if "available_models" in provided and body.available_models is not None:
         config.available_models = body.available_models
     if "rate_limit_bucket" in provided:

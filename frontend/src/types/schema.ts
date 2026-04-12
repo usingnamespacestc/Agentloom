@@ -162,8 +162,8 @@ export interface ChatFlow {
   tags: string[];
   nodes: Record<NodeId, ChatFlowNode>;
   root_ids: NodeId[];
-  default_chat_model: ProviderModelRef | null;
-  default_work_model: ProviderModelRef | null;
+  default_model: ProviderModelRef | null;
+  created_at: string;
 }
 
 /**

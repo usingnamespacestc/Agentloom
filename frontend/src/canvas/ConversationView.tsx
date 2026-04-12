@@ -35,11 +35,13 @@ import {
   RIGHT_PANEL_MIN,
   useChatFlowStore,
 } from "@/store/chatflowStore";
+import { usePreferencesStore } from "@/store/preferencesStore";
 import type {
   ChatFlow,
   ChatFlowNode,
   NodeId,
   PendingTurn,
+  TokenUsage,
   WorkFlowNode,
 } from "@/types/schema";
 
@@ -364,6 +366,7 @@ function ChatMessageBubble({
   onSelect: () => void;
 }) {
   const { t } = useTranslation();
+  const showNodeId = usePreferencesStore((s) => s.showNodeId);
   const userText = node.user_message?.text ?? "";
   const agentText = node.agent_response.text;
   const isRunning = node.status === "running";
@@ -410,6 +413,108 @@ function ChatMessageBubble({
       )}
       {!userText && !agentText && !isRunning && !isFailed && (
         <div className="text-[12px] italic text-gray-400">—</div>
+      )}
+      <MetaFooter
+        nodeId={showNodeId ? node.id : null}
+        usage={aggregateWorkflowUsage(node)}
+        startedAt={node.started_at}
+        finishedAt={node.finished_at}
+      />
+    </div>
+  );
+}
+
+function aggregateWorkflowUsage(chatNode: ChatFlowNode): TokenUsage | null {
+  let any = false;
+  const acc: TokenUsage = {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+    cached_tokens: 0,
+    reasoning_tokens: 0,
+  };
+  for (const wn of Object.values(chatNode.workflow.nodes)) {
+    const u = wn.usage;
+    if (!u) continue;
+    any = true;
+    acc.prompt_tokens += u.prompt_tokens;
+    acc.completion_tokens += u.completion_tokens;
+    acc.total_tokens += u.total_tokens;
+    acc.cached_tokens += u.cached_tokens;
+    acc.reasoning_tokens += u.reasoning_tokens;
+  }
+  return any ? acc : null;
+}
+
+function durationSeconds(startedAt: string | null, finishedAt: string | null): number | null {
+  if (!startedAt || !finishedAt) return null;
+  const s = Date.parse(startedAt);
+  const f = Date.parse(finishedAt);
+  if (Number.isNaN(s) || Number.isNaN(f) || f <= s) return null;
+  return (f - s) / 1000;
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 1) return `${Math.round(seconds * 1000)}ms`;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return `${m}m${s.toString().padStart(2, "0")}s`;
+}
+
+function MetaFooter({
+  nodeId,
+  usage,
+  startedAt,
+  finishedAt,
+}: {
+  nodeId: string | null;
+  usage: TokenUsage | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+}) {
+  const showTokens = usePreferencesStore((s) => s.showTokens);
+  const showGenTime = usePreferencesStore((s) => s.showGenTime);
+  const showGenSpeed = usePreferencesStore((s) => s.showGenSpeed);
+  const [copied, setCopied] = useState(false);
+
+  const duration = durationSeconds(startedAt, finishedAt);
+  const showUsage = usage !== null;
+  const tokensPart = showTokens && showUsage
+    ? `↑${usage!.prompt_tokens} ↓${usage!.completion_tokens}` +
+      (usage!.cached_tokens > 0 ? ` (${usage!.cached_tokens} cached)` : "")
+    : null;
+  const timePart = showGenTime && duration !== null ? formatDuration(duration) : null;
+  const speedPart = showGenSpeed && duration !== null && showUsage && usage!.completion_tokens > 0
+    ? `${(usage!.completion_tokens / duration).toFixed(1)} tok/s`
+    : null;
+
+  const statsParts = [tokensPart, timePart, speedPart].filter(Boolean) as string[];
+  if (nodeId === null && statsParts.length === 0) return null;
+
+  const onCopyId = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!nodeId) return;
+    try {
+      await navigator.clipboard.writeText(nodeId);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 900);
+    } catch {
+      // ignore
+    }
+  };
+
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-gray-400">
+      {statsParts.length > 0 && <span>{statsParts.join(" · ")}</span>}
+      {nodeId && (
+        <span
+          onClick={onCopyId}
+          className="cursor-pointer select-all truncate font-mono hover:text-blue-500"
+          title={copied ? "copied!" : nodeId}
+        >
+          {copied ? "copied!" : nodeId}
+        </span>
       )}
     </div>
   );
@@ -580,6 +685,7 @@ function WorkFlowIOBubble({
   isSelected: boolean;
   onSelect: () => void;
 }) {
+  const showNodeId = usePreferencesStore((s) => s.showNodeId);
   const kindColor =
     node.step_kind === "llm_call"
       ? "text-sky-600"
@@ -624,6 +730,12 @@ function WorkFlowIOBubble({
       {node.step_kind === "sub_agent_delegation" && (
         <div className="italic text-gray-500">delegation</div>
       )}
+      <MetaFooter
+        nodeId={showNodeId ? node.id : null}
+        usage={node.usage ?? null}
+        startedAt={node.started_at}
+        finishedAt={node.finished_at}
+      />
     </div>
   );
 }

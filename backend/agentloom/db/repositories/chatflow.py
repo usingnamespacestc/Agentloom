@@ -11,7 +11,7 @@ from sqlalchemy import select
 from agentloom.db.models.chatflow import ChatFlowRow
 from agentloom.db.repositories.base import WorkspaceScopedRepository
 from agentloom.schemas import ChatFlow
-from agentloom.schemas.common import FrozenNodeError, NodeStatus
+from agentloom.schemas.common import FrozenNodeError, NodeStatus, ProviderModelRef
 
 
 class ChatFlowNotFoundError(KeyError):
@@ -108,8 +108,15 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         title: str | None = ...,  # type: ignore[assignment]
         description: str | None = ...,  # type: ignore[assignment]
         tags: list[str] | None = ...,  # type: ignore[assignment]
+        default_model: ProviderModelRef | None = ...,  # type: ignore[assignment]
     ) -> None:
-        """Update title / description / tags. Pass ``...`` (default) to skip a field."""
+        """Update metadata fields. Pass ``...`` (default) to skip a field.
+
+        ``title`` / ``description`` / ``tags`` live on top-level columns
+        (for efficient sidebar queries) AND inside the ``payload`` JSON
+        (so ``get()`` which reads only the payload stays in sync).
+        ``default_model`` lives only in the payload.
+        """
         stmt = (
             select(ChatFlowRow)
             .where(ChatFlowRow.workspace_id == self.workspace_id)
@@ -118,12 +125,23 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         row = (await self.session.execute(stmt)).scalar_one_or_none()
         if row is None:
             raise ChatFlowNotFoundError(chatflow_id)
+
+        payload = dict(row.payload)
+
         if title is not ...:
             row.title = title
+            payload["title"] = title
         if description is not ...:
             row.description = description
+            payload["description"] = description
         if tags is not ...:
             row.tags = tags
+            payload["tags"] = tags or []
+        if default_model is not ...:
+            payload["default_model"] = (
+                default_model.model_dump(mode="json") if default_model else None
+            )
+        row.payload = payload
         await self.session.flush()
 
     async def move_to_folder(self, chatflow_id: str, folder_id: str | None) -> None:

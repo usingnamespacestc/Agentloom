@@ -38,8 +38,8 @@ export interface LayoutOptions {
   direction?: LayoutDirection;
 }
 
-/** Approximate card dimensions (w-48 = 192px, typical height ~160px). */
-export const NODE_WIDTH = 192;
+/** Approximate card dimensions (w-52 = 208px, typical height ~160px). */
+export const NODE_WIDTH = 208;
 export const NODE_HEIGHT = 160;
 
 const DEFAULTS: Required<LayoutOptions> = {

@@ -98,8 +98,28 @@
     "branch_of": "第 {{current}} / {{total}} 个分支",
     "thinking": "思考过程"
   },
+  "settings": {
+    "title": "全局设置",
+    "tab_canvas": "画布"
+  },
+  "chatflow_settings": {
+    "title": "对话设置",
+    "default_model": "默认模型",
+    "default_model_hint": "本对话中的所有 LLM 调用都会使用该模型，除非节点单独指定了其他模型。",
+    "no_models_hint": "尚未配置模型。请先添加服务商，并至少将一个模型设为默认。"
+  },
+  "canvas_prefs": {
+    "show_node_id": "显示节点 ID",
+    "show_node_id_hint": "在每个节点卡片右上角显示数据库中存储的原始节点 ID，方便排查问题。",
+    "show_tokens": "显示 Token 用量",
+    "show_tokens_hint": "在对话面板中显示每轮对话消耗的 Token 总数（输入 + 输出，缓存单独标注）。",
+    "show_gen_time": "显示生成时长",
+    "show_gen_time_hint": "显示从开始到完成的挂钟时长。",
+    "show_gen_speed": "显示生成速度",
+    "show_gen_speed_hint": "显示输出 Token 每秒生成速度（completion_tokens / 秒）。"
+  },
   "providers": {
-    "title": "模型服务商设置",
+    "title": "模型服务商",
     "add": "添加服务商",
     "edit": "编辑",
     "delete": "删除",
@@ -110,17 +130,27 @@
     "api_key_source": "密钥来源",
     "api_key_env_var": "环境变量名",
     "api_key_inline": "API 密钥",
+    "api_key_none": "无需密钥",
+    "api_key_none_hint": "用于本地服务（Ollama、LM Studio 等），不会发送鉴权 header。",
     "models": "模型",
     "discover_models": "发现模型",
+    "discover_models_hint": "请先保存，再发现模型",
     "test_connection": "测试连接",
     "test_success": "连接成功",
     "test_failed": "连接失败",
-    "pinned": "默认",
+    "pinned": "收藏",
+    "context_window": "上下文",
+    "context_window_hint": "该模型支持的最大上下文长度（token 数）",
     "save": "保存",
     "cancel": "取消",
     "no_providers": "尚未配置服务商",
     "rate_limit_bucket": "限流桶",
     "kind_openai_compat": "OpenAI 兼容",
-    "kind_anthropic_native": "Anthropic 原生"
+    "kind_anthropic_native": "Anthropic 原生",
+    "preset": "预设",
+    "preset_custom": "自定义",
+    "preset_openai": "OpenAI",
+    "preset_anthropic": "Anthropic",
+    "local_provider_hint": "本地模型服务（Ollama、LM Studio、vLLM 等）请选择\"自定义\"，类型选\"OpenAI 兼容\"，填写 /v1 地址（例如 Ollama 用 http://localhost:11434/v1，LM Studio 用 http://localhost:1234/v1），密钥来源选\"无需密钥\"。"
   }
 }

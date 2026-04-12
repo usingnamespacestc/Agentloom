@@ -36,6 +36,7 @@ import type {
   NodeId,
   NodeStatus,
   PendingTurn,
+  ProviderModelRef,
   WorkFlowEvent,
   WorkFlowNode,
 } from "@/types/schema";
@@ -103,8 +104,13 @@ export interface ChatFlowStoreState {
   moveFolder: (folderId: string, parentId: string | null) => Promise<void>;
   /** Move a chatflow into a folder (null = unfiled). */
   moveChatFlowToFolder: (chatflowId: string, folderId: string | null) => Promise<void>;
-  /** Update title / description / tags on the current chatflow. */
-  patchChatFlow: (patch: { title?: string | null; description?: string | null; tags?: string[] }) => Promise<void>;
+  /** Update title / description / tags / default model on the current chatflow. */
+  patchChatFlow: (patch: {
+    title?: string | null;
+    description?: string | null;
+    tags?: string[];
+    default_model?: ProviderModelRef | null;
+  }) => Promise<void>;
 
   /** Load a chatflow from the server and subscribe to its events. */
   loadChatFlow: (id: string) => Promise<void>;
@@ -356,6 +362,7 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     if ("title" in patch) updated.title = patch.title ?? null;
     if ("description" in patch) updated.description = patch.description ?? null;
     if ("tags" in patch) updated.tags = patch.tags ?? [];
+    if ("default_model" in patch) updated.default_model = patch.default_model ?? null;
     set({ chatflow: updated as typeof cf });
     // Refresh sidebar list too (title may have changed).
     void get().fetchChatFlowList();
@@ -546,6 +553,21 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     //    SSE-triggered refreshes), so we drive it ourselves.
     await new Promise((r) => setTimeout(r, 300));
     await get().refreshChatFlow();
+
+    // 4. Focus the newly-created child of ``targetId`` (the server's
+    //    real node that replaced our optimistic one). refreshChatFlow's
+    //    generic fallback picks the global default-walk leaf, which
+    //    lands on the wrong branch when the user forked off a non-latest
+    //    branch — override it explicitly.
+    const fresh = get().chatflow;
+    if (fresh) {
+      let newest: ChatFlowNode | null = null;
+      for (const n of Object.values(fresh.nodes)) {
+        if (!n.parent_ids.includes(targetId)) continue;
+        if (!newest || n.created_at > newest.created_at) newest = n;
+      }
+      if (newest) get().selectNode(newest.id);
+    }
   },
 
   async enqueueTurn(nodeId, text) {

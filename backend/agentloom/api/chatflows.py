@@ -38,6 +38,7 @@ from agentloom.db.repositories.chatflow import (
     ChatFlowNotFoundError,
     ChatFlowRepository,
 )
+from agentloom.db.repositories.provider import ProviderRepository
 from agentloom.engine.chatflow_engine import (
     ChatFlowEngine,
     DiscardedUpstreamFailure,
@@ -45,7 +46,7 @@ from agentloom.engine.chatflow_engine import (
 from agentloom.engine.events import get_event_bus
 from agentloom.schemas import ChatFlow, PendingTurn, make_chatflow
 from agentloom.schemas.chatflow import PendingTurnSource
-from agentloom.schemas.common import FrozenNodeError
+from agentloom.schemas.common import FrozenNodeError, ProviderModelRef
 from agentloom.tools import default_registry
 from agentloom.tools.base import ToolContext
 
@@ -54,6 +55,43 @@ router = APIRouter(prefix="/api/chatflows", tags=["chatflows"])
 
 def _repo(session: AsyncSession) -> ChatFlowRepository:
     return ChatFlowRepository(session, workspace_id=DEFAULT_WORKSPACE_ID)
+
+
+def _provider_repo(session: AsyncSession) -> ProviderRepository:
+    return ProviderRepository(session, workspace_id=DEFAULT_WORKSPACE_ID)
+
+
+async def _resolve_default_model(
+    prov_repo: ProviderRepository,
+    current: ProviderModelRef | None,
+) -> ProviderModelRef | None:
+    """Validate `current` against live providers; if valid, return it
+    unchanged. If stale or None, pick a new default: first pinned model
+    across all providers, else first available model. Returns None if
+    no providers / no models are configured.
+    """
+    providers = await prov_repo.list_all()
+    if not providers:
+        return None
+
+    if current is not None:
+        for p in providers:
+            if p["id"] != current.provider_id:
+                continue
+            for m in p.get("available_models", []):
+                if m.get("id") == current.model_id:
+                    return current
+            break
+
+    for p in providers:
+        for m in p.get("available_models", []):
+            if m.get("pinned"):
+                return ProviderModelRef(provider_id=p["id"], model_id=m["id"])
+    for p in providers:
+        models = p.get("available_models", [])
+        if models:
+            return ProviderModelRef(provider_id=p["id"], model_id=models[0]["id"])
+    return None
 
 
 def _get_engine(request: Request) -> ChatFlowEngine:
@@ -171,6 +209,8 @@ async def create_chatflow(
     session: AsyncSession = Depends(get_session),
 ) -> CreateChatFlowResponse:
     chat = make_chatflow(title=(body.title if body else None))
+    prov_repo = _provider_repo(session)
+    chat.default_model = await _resolve_default_model(prov_repo, None)
     await _repo(session).create(chat)
     await session.commit()
     return CreateChatFlowResponse(id=chat.id)
@@ -190,10 +230,20 @@ async def get_chatflow(
     if runtime is not None:
         return runtime.chatflow.model_dump(mode="json")
 
+    repo = _repo(session)
     try:
-        chat = await _repo(session).get(chatflow_id)
+        chat = await repo.get(chatflow_id)
     except ChatFlowNotFoundError as exc:
         raise HTTPException(404, f"chatflow {chatflow_id} not found") from exc
+
+    # Lazy-rehydrate stale default (provider/model may have been
+    # deleted since the chatflow was last opened).
+    prov_repo = _provider_repo(session)
+    new_model = await _resolve_default_model(prov_repo, chat.default_model)
+    if new_model != chat.default_model:
+        chat.default_model = new_model
+        await repo.patch_metadata(chatflow_id, default_model=new_model)
+        await session.commit()
     return chat.model_dump(mode="json")
 
 
@@ -222,12 +272,14 @@ class PatchChatFlowRequest(BaseModel):
     title: str | None = None
     description: str | None = None
     tags: list[str] | None = None
+    default_model: ProviderModelRef | None = None
 
 
 @router.patch("/{chatflow_id}")
 async def patch_chatflow(
     chatflow_id: str,
     body: PatchChatFlowRequest,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     repo = _repo(session)
@@ -239,6 +291,8 @@ async def patch_chatflow(
         kwargs["description"] = body.description
     if "tags" in provided:
         kwargs["tags"] = body.tags
+    if "default_model" in provided:
+        kwargs["default_model"] = body.default_model
     if not kwargs:
         return {"ok": True}
     try:
@@ -246,6 +300,22 @@ async def patch_chatflow(
     except ChatFlowNotFoundError as exc:
         raise HTTPException(404, f"chatflow {chatflow_id} not found") from exc
     await session.commit()
+
+    # Mirror into the engine's in-memory runtime so subsequent GETs
+    # and turn submissions see the new values (the runtime is
+    # authoritative over the DB while attached).
+    runtime = _get_engine(request).get_runtime(chatflow_id)
+    if runtime is not None:
+        rt_chat = runtime.chatflow
+        if "title" in provided:
+            rt_chat.title = body.title
+        if "description" in provided:
+            rt_chat.description = body.description
+        if "tags" in provided:
+            rt_chat.tags = body.tags or []
+        if "default_model" in provided:
+            rt_chat.default_model = body.default_model
+
     return {"ok": True}
 
 

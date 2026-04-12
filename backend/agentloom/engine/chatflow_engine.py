@@ -336,6 +336,11 @@ class ChatFlowEngine:
             if node_id not in chat.nodes:
                 raise KeyError(f"node {node_id} not in chatflow")
 
+            # Roots (the greeting, and any future root-level node) are
+            # the anchor of the conversation — never allow removal.
+            if node_id in chat.root_ids:
+                raise ValueError(f"cannot delete root node {node_id}")
+
             subtree = chat.descendants(node_id)
             subtree.add(node_id)
 
@@ -617,6 +622,7 @@ class ChatFlowEngine:
             WorkFlowNode(
                 step_kind=StepKind.LLM_CALL,
                 input_messages=context_wire,
+                model_override=chatflow.default_model,
             )
         )
 

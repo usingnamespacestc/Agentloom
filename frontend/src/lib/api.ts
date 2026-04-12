@@ -7,7 +7,7 @@
  * HTTP failures apart from network failures.
  */
 
-import type { ChatFlow, ChatFlowSummary, Folder, PendingTurn, PendingTurnSource } from "@/types/schema";
+import type { ChatFlow, ChatFlowSummary, Folder, PendingTurn, PendingTurnSource, ProviderModelRef } from "@/types/schema";
 
 export class ApiError extends Error {
   constructor(
@@ -66,7 +66,15 @@ export const api = {
 
   getChatFlow: (id: string) => request<ChatFlow>(`/api/chatflows/${id}`),
 
-  patchChatFlow: (id: string, patch: { title?: string | null; description?: string | null; tags?: string[] }) =>
+  patchChatFlow: (
+    id: string,
+    patch: {
+      title?: string | null;
+      description?: string | null;
+      tags?: string[];
+      default_model?: ProviderModelRef | null;
+    },
+  ) =>
     request<{ ok: boolean }>(`/api/chatflows/${id}`, {
       method: "PATCH",
       body: JSON.stringify(patch),

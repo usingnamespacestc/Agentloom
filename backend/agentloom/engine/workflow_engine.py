@@ -183,7 +183,11 @@ class WorkflowEngine:
                 "ancestor context to build from"
             )
 
-        model = node.model_override.model_id if node.model_override else None
+        if node.model_override:
+            ref = node.model_override
+            model = f"{ref.provider_id}:{ref.model_id}" if ref.provider_id else ref.model_id
+        else:
+            model = None
 
         # Expose every tool the registry considers visible under this
         # node's constraints. Empty list means "no tools" — stays

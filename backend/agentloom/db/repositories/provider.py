@@ -105,8 +105,11 @@ class ProviderRepository(WorkspaceScopedRepository):
         """Resolve the actual API key string from config.
 
         For env_var source, reads the env var. For inline, returns
-        the ciphertext as-is (encryption is a v1.1+ concern).
+        the ciphertext as-is (encryption is a v1.1+ concern). For
+        none, always returns None (keyless local servers).
         """
+        if config.api_key_source == "none":
+            return None
         if config.api_key_source == "env_var":
             var_name = config.api_key_env_var
             return os.environ.get(var_name) if var_name else None

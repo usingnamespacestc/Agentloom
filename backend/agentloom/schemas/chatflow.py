@@ -102,8 +102,8 @@ class ChatFlow(BaseModel):
     tags: list[str] = Field(default_factory=list)
     nodes: dict[NodeId, ChatFlowNode] = Field(default_factory=dict)
     root_ids: list[NodeId] = Field(default_factory=list)
-    default_chat_model: ProviderModelRef | None = None
-    default_work_model: ProviderModelRef | None = None
+    default_model: ProviderModelRef | None = None
+    created_at: datetime = Field(default_factory=utcnow)
 
     def add_node(self, node: ChatFlowNode) -> ChatFlowNode:
         if node.id in self.nodes:

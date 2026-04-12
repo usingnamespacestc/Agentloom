@@ -172,89 +172,66 @@ def _provider_call_from_settings():
     Resolution order:
     1. If a ``model`` string is passed in the format ``provider_id:model_id``,
        look up that provider from the DB.
-    2. Otherwise, look up the first provider registered in the DB.
-    3. Fall back to the VOLCENGINE_API_KEY env var (legacy MVP behaviour).
+    2. Otherwise, use the first provider registered in the DB.
 
     Tests override this by patching the symbol.
     """
-    from agentloom.config import get_settings
     from agentloom.db.base import get_session_maker
     from agentloom.db.models.tenancy import DEFAULT_WORKSPACE_ID
     from agentloom.db.repositories.provider import ProviderRepository
-    from agentloom.providers.openai_compat import OpenAICompatAdapter
     from agentloom.providers.registry import build_adapter
 
-    settings = get_settings()
-
     async def call(messages, tools, model):  # type: ignore[no-untyped-def]
-        # Try DB-configured providers first.
-        try:
-            async with get_session_maker()() as session:
-                repo = ProviderRepository(session, workspace_id=DEFAULT_WORKSPACE_ID)
-                providers = await repo.list_all()
+        async with get_session_maker()() as session:
+            repo = ProviderRepository(session, workspace_id=DEFAULT_WORKSPACE_ID)
+            providers = await repo.list_all()
 
-                if providers:
-                    # If model contains ":", treat prefix as provider_id.
-                    provider_id = None
-                    model_id = model
-                    if model and ":" in model:
-                        provider_id, model_id = model.split(":", 1)
+            if not providers:
+                raise RuntimeError(
+                    "no provider configured; add one via the settings page, "
+                    "or patch agentloom.api.workflows._provider_call_from_settings "
+                    "in tests"
+                )
 
-                    # Find the matching provider (or use first).
-                    chosen = None
-                    if provider_id:
-                        chosen = next((p for p in providers if p["id"] == provider_id), None)
-                    if chosen is None:
-                        chosen = providers[0]
+            # If model contains ":", treat prefix as provider_id.
+            provider_id = None
+            model_id = model
+            if model and ":" in model:
+                provider_id, model_id = model.split(":", 1)
 
-                    config = await repo.get(chosen["id"])
-                    api_key = repo.resolve_api_key(config)
+            chosen = None
+            if provider_id:
+                chosen = next((p for p in providers if p["id"] == provider_id), None)
+            if chosen is None:
+                chosen = providers[0]
 
-                    extra: dict = {}
-                    # Volcengine needs explicit thinking enable.
-                    if "volces.com" in config.base_url or "volcengine" in config.friendly_name.lower():
-                        extra = {"thinking": {"type": "enabled"}}
+            config = await repo.get(chosen["id"])
+            api_key = repo.resolve_api_key(config)
 
-                    adapter = build_adapter(
-                        kind=config.provider_kind.value,
-                        friendly_name=config.friendly_name,
-                        base_url=config.base_url,
-                        api_key=api_key,
-                    )
-                    # Use first pinned model as default if no model specified.
-                    if not model_id:
-                        pinned = [m for m in config.available_models if m.get("pinned") if isinstance(m, dict)]
-                        if not pinned:
-                            pinned = [m for m in config.available_models if m.pinned] if config.available_models else []
-                        model_id = pinned[0].id if pinned else (config.available_models[0].id if config.available_models else None)
+            extra: dict = {}
+            # Volcengine needs explicit thinking enable.
+            if "volces.com" in config.base_url or "volcengine" in config.friendly_name.lower():
+                extra = {"thinking": {"type": "enabled"}}
 
-                    return await adapter.chat(
-                        messages=messages,
-                        tools=tools,
-                        model=model_id,
-                        extra=extra or None,
-                    )
-        except Exception:
-            # Fall through to legacy env-var path.
-            pass
-
-        # Legacy fallback: Volcengine via env var.
-        if not settings.volcengine_api_key:
-            raise RuntimeError(
-                "no provider configured; either add a provider via the "
-                "settings page, set VOLCENGINE_API_KEY, or patch "
-                "agentloom.api.workflows._provider_call_from_settings in tests"
+            adapter = build_adapter(
+                kind=config.provider_kind.value,
+                friendly_name=config.friendly_name,
+                base_url=config.base_url,
+                api_key=api_key,
             )
-        adapter = OpenAICompatAdapter(
-            friendly_name="volcengine",
-            base_url="https://ark.cn-beijing.volces.com/api/coding/v3",
-            api_key=settings.volcengine_api_key,
-        )
-        return await adapter.chat(
-            messages=messages,
-            tools=tools,
-            model=model or "ark-code-latest",
-            extra={"thinking": {"type": "enabled"}},
-        )
+            # Use first pinned model as default if no model specified.
+            if not model_id:
+                pinned_models = config.pinned_models()
+                fallback = pinned_models[0] if pinned_models else (
+                    config.available_models[0] if config.available_models else None
+                )
+                model_id = fallback.id if fallback else None
+
+            return await adapter.chat(
+                messages=messages,
+                tools=tools,
+                model=model_id,
+                extra=extra or None,
+            )
 
     return call

@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { chatflowDisplayTitle } from "@/lib/chatflowLabel";
 import { useChatFlowStore } from "@/store/chatflowStore";
 import type { ChatFlowSummary, Folder } from "@/types/schema";
 
@@ -311,7 +312,7 @@ export function Sidebar() {
       style={{ paddingLeft: 8 + depth * 16 }}
     >
       <div className="min-w-0 flex-1">
-        <div className="truncate font-medium">{cf.title || untitledLabel(cf)}</div>
+        <div className="truncate font-medium">{chatflowDisplayTitle(cf)}</div>
         {cf.updated_at && (
           <div className="mt-0.5 text-[10px] text-gray-400">
             {formatRelativeDate(cf.updated_at)}
@@ -552,19 +553,6 @@ function InputDialog({
 }
 
 // ---------------------------------------------------------------- Helpers
-
-function untitledLabel(cf: ChatFlowSummary): string {
-  if (cf.created_at) {
-    const d = new Date(cf.created_at);
-    return d.toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  }
-  return cf.id.slice(0, 8);
-}
 
 function formatRelativeDate(iso: string): string {
   const d = new Date(iso);

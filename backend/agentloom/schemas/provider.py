@@ -27,7 +27,7 @@ class ModelInfo(BaseModel):
     pinned: bool = False
 
 
-ApiKeySource = Literal["inline", "env_var"]
+ApiKeySource = Literal["inline", "env_var", "none"]
 
 
 class ProviderConfig(BaseModel):
@@ -59,6 +59,10 @@ class ProviderConfig(BaseModel):
         elif self.api_key_source == "env_var":
             if self.api_key_ciphertext is not None:
                 raise ValueError("env_var key source cannot also set api_key_ciphertext")
+        elif self.api_key_source == "none":
+            # Keyless mode (local servers like Ollama, LM Studio).
+            if self.api_key_env_var is not None or self.api_key_ciphertext is not None:
+                raise ValueError("none key source cannot set env_var or ciphertext")
         return self
 
     def pinned_models(self) -> list[ModelInfo]:
