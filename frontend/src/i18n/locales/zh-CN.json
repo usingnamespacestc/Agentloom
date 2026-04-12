@@ -2,7 +2,26 @@
   "app": {
     "title": "Agentloom",
     "tagline": "每一次对话都是一张可分支的 DAG",
-    "switch_language": "切换语言"
+    "switch_language": "切换语言",
+    "untitled": "未命名对话",
+    "add_description": "添加描述…",
+    "add_tag": "添加标签…",
+    "no_chatflow": "请选择或创建一个对话"
+  },
+  "sidebar": {
+    "expand": "展开侧边栏",
+    "collapse": "收起侧边栏",
+    "no_chats": "还没有对话",
+    "delete_confirm": "删除这个对话？此操作无法撤销。",
+    "delete_folder_confirm": "删除此文件夹及其中的所有对话？此操作无法撤销。",
+    "new_folder": "新建文件夹",
+    "folder_name_prompt": "文件夹名称：",
+    "folder_rename_prompt": "新文件夹名称：",
+    "move_to_folder": "移动到文件夹",
+    "confirm": "确定",
+    "root": "所有对话",
+    "folder_empty": "文件夹为空",
+    "drop_to_root": "拖放到此处移至根目录"
   },
   "node": {
     "status": {
@@ -71,6 +90,7 @@
     "running": "运行中…",
     "cancel": "停止",
     "branch_label": "分支",
-    "branch_of": "第 {{current}} / {{total}} 个分支"
+    "branch_of": "第 {{current}} / {{total}} 个分支",
+    "thinking": "思考过程"
   }
 }

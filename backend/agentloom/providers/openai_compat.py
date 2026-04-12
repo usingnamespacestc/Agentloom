@@ -122,6 +122,16 @@ class OpenAICompatAdapter(ProviderAdapter):
         msg = choice.get("message", {}) or {}
         content = msg.get("content") or ""
 
+        # DeepSeek-style reasoning_content / Volcengine thinking_content
+        extras: dict[str, Any] = {}
+        reasoning_content = (
+            msg.get("reasoning_content")
+            or msg.get("thinking_content")
+            or ""
+        )
+        if reasoning_content:
+            extras["thinking"] = reasoning_content
+
         tool_uses: list[ToolUse] = []
         for tc in msg.get("tool_calls") or []:
             func = tc.get("function", {}) or {}
@@ -163,7 +173,7 @@ class OpenAICompatAdapter(ProviderAdapter):
 
         return ChatResponse(
             model=raw.get("model") or fallback_model,
-            message=AssistantMessage(content=content, tool_uses=tool_uses),
+            message=AssistantMessage(content=content, tool_uses=tool_uses, extras=extras),
             usage=usage,
             finish_reason=finish,
             provider_raw=raw,

@@ -31,6 +31,8 @@ import { subscribeEvents, type SSEFactory, type SSESubscription } from "@/lib/ss
 import type {
   ChatFlow,
   ChatFlowNode,
+  ChatFlowSummary,
+  Folder,
   NodeId,
   NodeStatus,
   PendingTurn,
@@ -46,6 +48,15 @@ export const RIGHT_PANEL_MAX = 900;
 const RIGHT_PANEL_DEFAULT = 440;
 
 export interface ChatFlowStoreState {
+  /** Sidebar: list of chatflow summaries. */
+  chatflowList: ChatFlowSummary[];
+  /** Sidebar: list of folders. */
+  folderList: Folder[];
+  /** Whether the sidebar list is loading. */
+  listLoading: boolean;
+  /** Whether the sidebar is collapsed. */
+  sidebarCollapsed: boolean;
+
   chatflow: ChatFlow | null;
   loadState: LoadState;
   errorMessage: string | null;
@@ -73,6 +84,27 @@ export interface ChatFlowStoreState {
 
   sseSubscription: SSESubscription | null;
   sseFactory: SSEFactory | null;
+
+  /** Fetch the chatflow list and folders for the sidebar. */
+  fetchChatFlowList: () => Promise<void>;
+  /** Create a new chatflow and switch to it. */
+  createChatFlow: (title?: string) => Promise<void>;
+  /** Delete a chatflow entirely. */
+  deleteChatFlow: (id: string) => Promise<void>;
+  /** Toggle sidebar collapsed state. */
+  toggleSidebar: () => void;
+  /** Create a new folder (optionally nested under parentId). */
+  createFolder: (name: string, parentId?: string | null) => Promise<void>;
+  /** Rename a folder. */
+  renameFolder: (id: string, name: string) => Promise<void>;
+  /** Delete a folder and all chatflows inside it. */
+  deleteFolder: (id: string) => Promise<void>;
+  /** Move a folder under another folder (null = root). */
+  moveFolder: (folderId: string, parentId: string | null) => Promise<void>;
+  /** Move a chatflow into a folder (null = unfiled). */
+  moveChatFlowToFolder: (chatflowId: string, folderId: string | null) => Promise<void>;
+  /** Update title / description / tags on the current chatflow. */
+  patchChatFlow: (patch: { title?: string | null; description?: string | null; tags?: string[] }) => Promise<void>;
 
   /** Load a chatflow from the server and subscribe to its events. */
   loadChatFlow: (id: string) => Promise<void>;
@@ -131,6 +163,16 @@ export interface ChatFlowStoreState {
 
 const INITIAL: Omit<
   ChatFlowStoreState,
+  | "fetchChatFlowList"
+  | "createChatFlow"
+  | "deleteChatFlow"
+  | "toggleSidebar"
+  | "createFolder"
+  | "renameFolder"
+  | "deleteFolder"
+  | "moveFolder"
+  | "moveChatFlowToFolder"
+  | "patchChatFlow"
   | "loadChatFlow"
   | "setChatFlow"
   | "selectNode"
@@ -151,6 +193,10 @@ const INITIAL: Omit<
   | "setSSEFactory"
   | "reset"
 > = {
+  chatflowList: [],
+  folderList: [],
+  listLoading: false,
+  sidebarCollapsed: false,
   chatflow: null,
   loadState: "idle",
   errorMessage: null,
@@ -238,6 +284,82 @@ function removeOptimistic(get: GetFn, set: SetFn, optId: string): void {
 
 export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
   ...INITIAL,
+
+  async fetchChatFlowList() {
+    set({ listLoading: true });
+    try {
+      const [list, folders] = await Promise.all([
+        api.listChatFlows(),
+        api.listFolders(),
+      ]);
+      set({ chatflowList: list, folderList: folders, listLoading: false });
+    } catch {
+      set({ listLoading: false });
+    }
+  },
+
+  async createChatFlow(title) {
+    const { id } = await api.createChatFlow(title);
+    await get().fetchChatFlowList();
+    await get().loadChatFlow(id);
+  },
+
+  async deleteChatFlow(id) {
+    await api.deleteChatFlow(id);
+    const current = get().chatflow;
+    if (current?.id === id) {
+      get().reset();
+    }
+    await get().fetchChatFlowList();
+  },
+
+  toggleSidebar() {
+    set({ sidebarCollapsed: !get().sidebarCollapsed });
+  },
+
+  async createFolder(name, parentId) {
+    await api.createFolder(name, parentId);
+    await get().fetchChatFlowList();
+  },
+
+  async renameFolder(id, name) {
+    await api.renameFolder(id, name);
+    await get().fetchChatFlowList();
+  },
+
+  async deleteFolder(id) {
+    const current = get().chatflow;
+    const result = await api.deleteFolder(id);
+    // If the active chatflow was inside this folder, reset.
+    if (current && result.deleted_chatflows?.includes(current.id)) {
+      get().reset();
+    }
+    await get().fetchChatFlowList();
+  },
+
+  async moveFolder(folderId, parentId) {
+    await api.moveFolder(folderId, parentId);
+    await get().fetchChatFlowList();
+  },
+
+  async moveChatFlowToFolder(chatflowId, folderId) {
+    await api.moveChatFlowToFolder(chatflowId, folderId);
+    await get().fetchChatFlowList();
+  },
+
+  async patchChatFlow(patch) {
+    const cf = get().chatflow;
+    if (!cf) return;
+    await api.patchChatFlow(cf.id, patch);
+    // Optimistic local update so the header reflects changes immediately.
+    const updated = { ...cf };
+    if ("title" in patch) updated.title = patch.title ?? null;
+    if ("description" in patch) updated.description = patch.description ?? null;
+    if ("tags" in patch) updated.tags = patch.tags ?? [];
+    set({ chatflow: updated as typeof cf });
+    // Refresh sidebar list too (title may have changed).
+    void get().fetchChatFlowList();
+  },
 
   async loadChatFlow(id) {
     const previous = get().sseSubscription;

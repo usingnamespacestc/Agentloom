@@ -211,11 +211,14 @@ class AnthropicNativeAdapter(ProviderAdapter):
     def _parse_response(raw: dict[str, Any], fallback_model: str) -> ChatResponse:
         content_blocks = raw.get("content") or []
         text_parts: list[str] = []
+        thinking_parts: list[str] = []
         tool_uses: list[ToolUse] = []
         for block in content_blocks:
             btype = block.get("type")
             if btype == "text":
                 text_parts.append(block.get("text") or "")
+            elif btype == "thinking":
+                thinking_parts.append(block.get("thinking") or "")
             elif btype == "tool_use":
                 tool_uses.append(
                     ToolUse(
@@ -224,8 +227,8 @@ class AnthropicNativeAdapter(ProviderAdapter):
                         arguments=dict(block.get("input") or {}),
                     )
                 )
-            # Unknown block types (thinking, image, ...) silently
-            # dropped for MVP; adding them later is additive.
+            # Unknown block types (image, ...) silently dropped for
+            # MVP; adding them later is additive.
 
         stop_reason = raw.get("stop_reason") or "end_turn"
         finish_map: dict[str, FinishReason] = {
@@ -251,9 +254,17 @@ class AnthropicNativeAdapter(ProviderAdapter):
             cached_tokens=cache_read,
         )
 
+        extras: dict[str, Any] = {}
+        if thinking_parts:
+            extras["thinking"] = "\n\n".join(thinking_parts)
+
         return ChatResponse(
             model=raw.get("model") or fallback_model,
-            message=AssistantMessage(content="".join(text_parts), tool_uses=tool_uses),
+            message=AssistantMessage(
+                content="".join(text_parts),
+                tool_uses=tool_uses,
+                extras=extras,
+            ),
             usage=usage,
             finish_reason=finish,
             provider_raw=raw,

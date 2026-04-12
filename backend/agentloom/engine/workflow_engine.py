@@ -207,6 +207,7 @@ class WorkflowEngine:
                 SchemaToolUse(id=tu.id, name=tu.name, arguments=dict(tu.arguments))
                 for tu in assistant.tool_uses
             ],
+            extras=dict(assistant.extras) if assistant.extras else {},
         )
         if node.input_messages is None:
             node.input_messages = _provider_to_wire(messages)
@@ -329,7 +330,7 @@ def _wire_to_provider(wires: list[WireMessage]) -> list[Message]:
 def _provider_to_wire(messages: list[Message]) -> list[WireMessage]:
     out: list[WireMessage] = []
     for m in messages:
-        extras: dict[str, Any] = {}
+        extras = dict(m.extras) if m.extras else {}
         if isinstance(m, SystemMessage):
             out.append(WireMessage(role="system", content=m.content, extras=extras))
         elif isinstance(m, UserMessage):

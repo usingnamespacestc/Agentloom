@@ -136,9 +136,30 @@ export interface ChatFlowNode extends NodeBaseFields {
   pending_queue: PendingTurn[];
 }
 
+/** Lightweight summary returned by GET /api/chatflows (list). */
+export interface ChatFlowSummary {
+  id: string;
+  title: string | null;
+  description: string | null;
+  tags: string[];
+  folder_id: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface Folder {
+  id: string;
+  parent_id: string | null;
+  name: string;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
 export interface ChatFlow {
   id: NodeId;
   title: string | null;
+  description: string | null;
+  tags: string[];
   nodes: Record<NodeId, ChatFlowNode>;
   root_ids: NodeId[];
   default_chat_model: ProviderModelRef | null;

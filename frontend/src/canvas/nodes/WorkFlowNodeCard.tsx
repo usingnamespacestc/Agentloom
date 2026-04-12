@@ -9,6 +9,7 @@
  *   lands with M10 once system workflows are implemented
  */
 
+import { useState } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import Markdown from "react-markdown";
 import { useTranslation } from "react-i18next";
@@ -19,6 +20,8 @@ import type { WorkFlowNode } from "@/types/schema";
 export interface WorkFlowNodeData extends Record<string, unknown> {
   node: WorkFlowNode;
   isSelected: boolean;
+  isRoot: boolean;
+  isLeaf: boolean;
 }
 
 const KIND_ACCENT: Record<string, string> = {
@@ -34,7 +37,7 @@ function truncate(text: string, n = 140): string {
 
 export function WorkFlowNodeCard({ data }: NodeProps) {
   const { t } = useTranslation();
-  const { node, isSelected } = data as WorkFlowNodeData;
+  const { node, isSelected, isRoot, isLeaf } = data as WorkFlowNodeData;
   const accent = KIND_ACCENT[node.step_kind] ?? "border-gray-300 bg-white";
 
   return (
@@ -46,7 +49,7 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
         isSelected ? "ring-2 ring-blue-300" : "",
       ].join(" ")}
     >
-      <Handle type="target" position={Position.Left} />
+      {!isRoot && <Handle type="target" position={Position.Left} />}
 
       <div className="flex items-center justify-between mb-1.5">
         <span className="font-semibold text-gray-700">
@@ -65,7 +68,7 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
         <div className="italic text-gray-500">delegation</div>
       )}
 
-      <Handle type="source" position={Position.Right} />
+      {!isLeaf && <Handle type="source" position={Position.Right} />}
     </div>
   );
 }
@@ -73,6 +76,7 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
 function LlmCallBody({ node }: { node: WorkFlowNode }) {
   const { t } = useTranslation();
   const output = node.output_message?.content ?? "";
+  const thinking = node.output_message?.extras?.thinking;
   const usage = node.usage;
   const modelRef = node.model_override;
 
@@ -82,6 +86,9 @@ function LlmCallBody({ node }: { node: WorkFlowNode }) {
         <div className="text-[10px] text-gray-500">
           {t("workflow.model")}: {modelRef.model_id}
         </div>
+      )}
+      {typeof thinking === "string" && thinking && (
+        <ThinkingToggle text={thinking} label={t("conversation.thinking")} />
       )}
       <div className="prose prose-sm max-w-none text-[11px] text-gray-800 break-words">
         {output ? <Markdown>{truncate(output)}</Markdown> : <span className="italic text-gray-400">—</span>}
@@ -93,6 +100,29 @@ function LlmCallBody({ node }: { node: WorkFlowNode }) {
           {usage.cached_tokens > 0 && (
             <span>{t("workflow.cached_tokens")}: {usage.cached_tokens}</span>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ThinkingToggle({ text, label }: { text: string; label: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-gray-600"
+      >
+        <span className="inline-block transition-transform" style={{ transform: open ? "rotate(90deg)" : "rotate(0deg)" }}>
+          ▸
+        </span>
+        {label}
+      </button>
+      {open && (
+        <div className="mt-0.5 rounded border border-gray-100 bg-gray-50 px-1.5 py-1 text-[10px] text-gray-500 break-words max-h-32 overflow-auto">
+          {truncate(text, 500)}
         </div>
       )}
     </div>

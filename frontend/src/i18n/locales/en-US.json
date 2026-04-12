@@ -2,7 +2,26 @@
   "app": {
     "title": "Agentloom",
     "tagline": "Every conversation is a branchable DAG",
-    "switch_language": "Switch language"
+    "switch_language": "Switch language",
+    "untitled": "Untitled chatflow",
+    "add_description": "Add description…",
+    "add_tag": "Add tag…",
+    "no_chatflow": "Select or create a chatflow"
+  },
+  "sidebar": {
+    "expand": "Expand sidebar",
+    "collapse": "Collapse sidebar",
+    "no_chats": "No conversations yet",
+    "delete_confirm": "Delete this conversation? This cannot be undone.",
+    "delete_folder_confirm": "Delete this folder and all conversations inside it? This cannot be undone.",
+    "new_folder": "New folder",
+    "folder_name_prompt": "Folder name:",
+    "folder_rename_prompt": "New folder name:",
+    "move_to_folder": "Move to folder",
+    "confirm": "OK",
+    "root": "All chats",
+    "folder_empty": "This folder is empty",
+    "drop_to_root": "Drop here to move to root"
   },
   "node": {
     "status": {
@@ -71,6 +90,7 @@
     "running": "Running…",
     "cancel": "Stop",
     "branch_label": "Branch",
-    "branch_of": "Branch {{current}} of {{total}}"
+    "branch_of": "Branch {{current}} of {{total}}",
+    "thinking": "Thinking"
   }
 }

@@ -157,6 +157,14 @@ class PatchPositionsRequest(BaseModel):
 # ---------------------------------------------------------------- routes
 
 
+@router.get("")
+async def list_chatflows(
+    session: AsyncSession = Depends(get_session),
+) -> list[dict]:
+    """Return lightweight summaries of all chatflows (no full payload)."""
+    return await _repo(session).list_summaries()
+
+
 @router.post("", response_model=CreateChatFlowResponse)
 async def create_chatflow(
     body: CreateChatFlowRequest | None = None,
@@ -187,6 +195,77 @@ async def get_chatflow(
     except ChatFlowNotFoundError as exc:
         raise HTTPException(404, f"chatflow {chatflow_id} not found") from exc
     return chat.model_dump(mode="json")
+
+
+@router.delete("/{chatflow_id}")
+async def delete_chatflow(
+    chatflow_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Delete an entire chatflow."""
+    # Detach from engine if it has a runtime.
+    engine = _get_engine(request)
+    runtime = engine.get_runtime(chatflow_id)
+    if runtime is not None:
+        await engine.detach(chatflow_id)
+    repo = _repo(session)
+    try:
+        await repo.delete(chatflow_id)
+    except ChatFlowNotFoundError as exc:
+        raise HTTPException(404, f"chatflow {chatflow_id} not found") from exc
+    await session.commit()
+    return {"ok": True}
+
+
+class PatchChatFlowRequest(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    tags: list[str] | None = None
+
+
+@router.patch("/{chatflow_id}")
+async def patch_chatflow(
+    chatflow_id: str,
+    body: PatchChatFlowRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    repo = _repo(session)
+    provided = body.model_fields_set
+    kwargs: dict = {}
+    if "title" in provided:
+        kwargs["title"] = body.title
+    if "description" in provided:
+        kwargs["description"] = body.description
+    if "tags" in provided:
+        kwargs["tags"] = body.tags
+    if not kwargs:
+        return {"ok": True}
+    try:
+        await repo.patch_metadata(chatflow_id, **kwargs)
+    except ChatFlowNotFoundError as exc:
+        raise HTTPException(404, f"chatflow {chatflow_id} not found") from exc
+    await session.commit()
+    return {"ok": True}
+
+
+class MoveFolderRequest(BaseModel):
+    folder_id: str | None = None
+
+
+@router.patch("/{chatflow_id}/folder")
+async def move_chatflow_to_folder(
+    chatflow_id: str,
+    body: MoveFolderRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    repo = _repo(session)
+    try:
+        await repo.move_to_folder(chatflow_id, body.folder_id)
+    except ChatFlowNotFoundError as exc:
+        raise HTTPException(404, f"chatflow {chatflow_id} not found") from exc
+    await session.commit()
+    return {"ok": True}
 
 
 @router.patch("/{chatflow_id}/positions")

@@ -59,6 +59,8 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         _assert_frozen_chatflow_nodes_unchanged(prior, chatflow)
 
         row.title = chatflow.title
+        row.description = chatflow.description
+        row.tags = chatflow.tags or None
         row.payload = chatflow.model_dump(mode="json")
         await self.session.flush()
 
@@ -69,6 +71,85 @@ class ChatFlowRepository(WorkspaceScopedRepository):
             .order_by(ChatFlowRow.created_at.asc())
         )
         return list((await self.session.execute(stmt)).scalars().all())
+
+    async def list_summaries(self) -> list[dict]:
+        """Return lightweight summaries for all chatflows, most recent first."""
+        stmt = (
+            select(
+                ChatFlowRow.id,
+                ChatFlowRow.title,
+                ChatFlowRow.description,
+                ChatFlowRow.tags,
+                ChatFlowRow.folder_id,
+                ChatFlowRow.created_at,
+                ChatFlowRow.updated_at,
+            )
+            .where(ChatFlowRow.workspace_id == self.workspace_id)
+            .order_by(ChatFlowRow.updated_at.desc())
+        )
+        rows = (await self.session.execute(stmt)).all()
+        return [
+            {
+                "id": r.id,
+                "title": r.title,
+                "description": r.description,
+                "tags": r.tags or [],
+                "folder_id": r.folder_id,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+            }
+            for r in rows
+        ]
+
+    async def patch_metadata(
+        self,
+        chatflow_id: str,
+        *,
+        title: str | None = ...,  # type: ignore[assignment]
+        description: str | None = ...,  # type: ignore[assignment]
+        tags: list[str] | None = ...,  # type: ignore[assignment]
+    ) -> None:
+        """Update title / description / tags. Pass ``...`` (default) to skip a field."""
+        stmt = (
+            select(ChatFlowRow)
+            .where(ChatFlowRow.workspace_id == self.workspace_id)
+            .where(ChatFlowRow.id == chatflow_id)
+        )
+        row = (await self.session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            raise ChatFlowNotFoundError(chatflow_id)
+        if title is not ...:
+            row.title = title
+        if description is not ...:
+            row.description = description
+        if tags is not ...:
+            row.tags = tags
+        await self.session.flush()
+
+    async def move_to_folder(self, chatflow_id: str, folder_id: str | None) -> None:
+        """Set folder_id on a chatflow (None = unfiled)."""
+        stmt = (
+            select(ChatFlowRow)
+            .where(ChatFlowRow.workspace_id == self.workspace_id)
+            .where(ChatFlowRow.id == chatflow_id)
+        )
+        row = (await self.session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            raise ChatFlowNotFoundError(chatflow_id)
+        row.folder_id = folder_id
+        await self.session.flush()
+
+    async def delete(self, chatflow_id: str) -> None:
+        stmt = (
+            select(ChatFlowRow)
+            .where(ChatFlowRow.workspace_id == self.workspace_id)
+            .where(ChatFlowRow.id == chatflow_id)
+        )
+        row = (await self.session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            raise ChatFlowNotFoundError(chatflow_id)
+        await self.session.delete(row)
+        await self.session.flush()
 
 
 #: Fields on a ChatFlowNode that may be mutated even after the node is

@@ -19,13 +19,10 @@ describe("App", () => {
     await i18n.changeLanguage("zh-CN");
   });
 
-  it("renders title and tagline", () => {
+  it("shows no-chatflow placeholder when nothing is loaded", () => {
     render(<App />);
     expect(
-      screen.getByRole("heading", { name: /agentloom/i }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/每一次对话都是一张可分支的 DAG/),
+      screen.getByText(/请选择或创建一个对话/),
     ).toBeInTheDocument();
   });
 

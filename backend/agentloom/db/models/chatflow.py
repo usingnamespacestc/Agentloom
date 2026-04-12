@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, PrimaryKeyConstraint, String
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, PrimaryKeyConstraint, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,6 +32,13 @@ class ChatFlowRow(Base):
         String(64), ForeignKey("users.id"), nullable=True, index=True
     )
     title: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tags: Mapped[list[str] | None] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"), nullable=True
+    )
+    folder_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("folders.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     payload: Mapped[dict[str, Any]] = mapped_column(
         JSONB().with_variant(JSON(), "sqlite"), nullable=False
     )

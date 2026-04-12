@@ -1,12 +1,10 @@
 /**
- * M8.5 app shell — horizontal ChatFlow canvas + ConversationView,
- * with drill-down to a full-canvas WorkFlow view.
+ * M8.5 app shell — left sidebar + horizontal ChatFlow canvas +
+ * ConversationView, with drill-down to a full-canvas WorkFlow view.
  *
- * Loads a chatflow by reading the ``?chatflow=<id>`` query param on
- * mount. M9 will add a real routing story.
- *
- * The right panel is a single <ConversationView> that adapts to
- * whichever view mode is active (chatflow vs. workflow drill-down).
+ * The sidebar lists all chatflows and supports create / switch / delete.
+ * A ``?chatflow=<id>`` query param is still honoured on first load for
+ * backward compatibility and share links.
  */
 
 import { useEffect, useMemo } from "react";
@@ -15,10 +13,12 @@ import { useTranslation } from "react-i18next";
 import { ChatFlowCanvas } from "@/canvas/ChatFlowCanvas";
 import { ConversationView } from "@/canvas/ConversationView";
 import { WorkFlowCanvas } from "@/canvas/WorkFlowCanvas";
+import { ChatFlowHeader } from "@/components/ChatFlowHeader";
+import { Sidebar } from "@/components/Sidebar";
 import { useChatFlowStore } from "@/store/chatflowStore";
 
 export default function App() {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const chatflow = useChatFlowStore((s) => s.chatflow);
   const loadState = useChatFlowStore((s) => s.loadState);
   const errorMessage = useChatFlowStore((s) => s.errorMessage);
@@ -36,8 +36,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    // Only enable SSE in the real browser. vitest runs in happy-dom
-    // where EventSource exists but there's nothing to connect to.
     if (typeof window !== "undefined" && typeof EventSource !== "undefined") {
       setSSEFactory((url) => new EventSource(url));
     }
@@ -51,23 +49,11 @@ export default function App() {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex items-center justify-between border-b border-gray-200 bg-white px-4 py-2">
-        <div>
-          <h1 className="text-lg font-semibold text-gray-900">{t("app.title")}</h1>
-          <p className="text-xs text-gray-500">{t("app.tagline")}</p>
-        </div>
-        <button
-          type="button"
-          className="rounded border border-gray-300 bg-white px-3 py-1 text-xs text-gray-700 hover:bg-gray-50"
-          onClick={() =>
-            i18n.changeLanguage(i18n.language === "zh-CN" ? "en-US" : "zh-CN")
-          }
-        >
-          {t("app.switch_language")}
-        </button>
-      </header>
+      <ChatFlowHeader />
 
       <main className="flex min-h-0 flex-1">
+        <Sidebar />
+
         <section className="relative min-w-0 flex-1">
           {loadState === "loading" && (
             <div

@@ -318,6 +318,42 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
   );
 }
 
+/** Collect all thinking text from LLM call WorkNodes in a ChatNode's workflow. */
+function collectThinking(node: ChatFlowNode): string {
+  const parts: string[] = [];
+  for (const wn of Object.values(node.workflow.nodes)) {
+    const thinking = wn.output_message?.extras?.thinking;
+    if (typeof thinking === "string" && thinking) {
+      parts.push(thinking);
+    }
+  }
+  return parts.join("\n\n");
+}
+
+/** Collapsible block for LLM thinking/reasoning content. */
+function ThinkingBlock({ text, label }: { text: string; label: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mb-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1 text-[11px] text-gray-400 hover:text-gray-600"
+      >
+        <span className="inline-block transition-transform" style={{ transform: open ? "rotate(90deg)" : "rotate(0deg)" }}>
+          ▸
+        </span>
+        {label}
+      </button>
+      {open && (
+        <div className="prose prose-sm mt-1 max-w-none rounded border border-gray-100 bg-gray-50 px-3 py-2 text-[12px] text-gray-500 break-words">
+          <Markdown>{text}</Markdown>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ChatMessageBubble({
   node,
   isSelected,
@@ -327,10 +363,12 @@ function ChatMessageBubble({
   isSelected: boolean;
   onSelect: () => void;
 }) {
+  const { t } = useTranslation();
   const userText = node.user_message?.text ?? "";
   const agentText = node.agent_response.text;
   const isRunning = node.status === "running";
   const isFailed = node.status === "failed";
+  const thinking = collectThinking(node);
 
   return (
     <div
@@ -349,6 +387,9 @@ function ChatMessageBubble({
             <Markdown>{userText}</Markdown>
           </div>
         </div>
+      )}
+      {thinking && (
+        <ThinkingBlock text={thinking} label={t("conversation.thinking")} />
       )}
       {agentText && (
         <div className={[

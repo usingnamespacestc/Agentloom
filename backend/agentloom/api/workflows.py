@@ -194,6 +194,7 @@ def _provider_call_from_settings():
             messages=messages,
             tools=tools,
             model=model or "ark-code-latest",
+            extra={"thinking": {"type": "enabled"}},
         )
 
     return call

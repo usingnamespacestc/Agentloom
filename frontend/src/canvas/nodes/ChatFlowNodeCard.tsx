@@ -31,6 +31,8 @@ export interface ChatFlowNodeData extends Record<string, unknown> {
   canDelete: boolean;
   /** Whether deleting this node would cascade (has descendants). */
   isLeaf: boolean;
+  /** Whether this node is a root (no parents). */
+  isRoot: boolean;
   /** Accumulated context tokens from root to this node (inclusive). */
   contextTokens: number;
 }
@@ -44,7 +46,7 @@ function truncate(text: string, n = TRUNCATE): string {
 
 export function ChatFlowNodeCard({ data }: NodeProps) {
   const { t } = useTranslation();
-  const { node, isSelected, canDelete, isLeaf, contextTokens } = data as ChatFlowNodeData;
+  const { node, isSelected, canDelete, isLeaf, isRoot, contextTokens } = data as ChatFlowNodeData;
   const isMerge = node.parent_ids.length >= 2;
   const isGreetingRoot = node.user_message === null;
   const hasWorkflow = Object.keys(node.workflow.nodes).length > 0;
@@ -70,13 +72,14 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
     <div
       data-testid={`chatflow-node-${node.id}`}
       className={[
-        "group/card relative rounded-lg border bg-white shadow-sm w-48 p-2.5 text-xs",
-        isSelected ? "border-blue-500 ring-2 ring-blue-200" : "border-gray-300",
+        "group/card relative rounded-lg border shadow-sm w-48 p-2.5 text-xs",
+        isRoot ? "bg-blue-50 border-l-[3px] border-l-blue-400" : isLeaf ? "bg-green-50" : "bg-white",
+        isSelected ? "border-blue-500 ring-2 ring-blue-200" : isRoot ? "border-blue-200" : isLeaf ? "border-green-200" : "border-gray-300",
         isMerge ? "border-purple-400" : "",
         isDashed ? "border-dashed" : "",
       ].join(" ")}
     >
-      <Handle type="target" position={Position.Left} />
+      {!isRoot && <Handle type="target" position={Position.Left} />}
 
       {/* Delete button — top-right, visible on hover */}
       {canDelete && (
@@ -159,7 +162,7 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
 
       {contextTokens > 0 && <TokenBar tokens={contextTokens} />}
 
-      <Handle type="source" position={Position.Right} />
+      {!isLeaf && <Handle type="source" position={Position.Right} />}
     </div>
   );
 }

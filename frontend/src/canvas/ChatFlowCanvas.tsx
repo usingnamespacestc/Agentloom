@@ -314,6 +314,7 @@ export function buildGraph(
   const undeletable = computeUndeletableIds(chatflow.nodes);
   const leaves = computeLeafIds(chatflow.nodes);
   const ctxTokens = computeContextTokens(chatflow.nodes);
+  const rootSet = new Set(chatflow.root_ids);
   const rfNodes: Node<ChatFlowNodeData>[] = laidOut.map(({ node, position }) => {
     // Prefer server-persisted position over auto-layout.
     const pos =
@@ -329,6 +330,7 @@ export function buildGraph(
         isSelected: node.id === selectedNodeId,
         canDelete: !undeletable.has(node.id),
         isLeaf: leaves.has(node.id),
+        isRoot: rootSet.has(node.id),
         contextTokens: ctxTokens[node.id] ?? 0,
       },
       selectable: false,

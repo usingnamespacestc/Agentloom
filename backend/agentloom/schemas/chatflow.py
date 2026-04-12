@@ -98,6 +98,8 @@ class ChatFlowNode(NodeBase):
 class ChatFlow(BaseModel):
     id: NodeId = Field(default_factory=generate_node_id)
     title: str | None = None
+    description: str | None = None
+    tags: list[str] = Field(default_factory=list)
     nodes: dict[NodeId, ChatFlowNode] = Field(default_factory=dict)
     root_ids: list[NodeId] = Field(default_factory=list)
     default_chat_model: ProviderModelRef | None = None

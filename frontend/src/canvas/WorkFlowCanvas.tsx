@@ -128,11 +128,21 @@ export function buildWorkflowGraph(
     columnWidth: 240,
     rowHeight: 160,
   });
+  const rootSet = new Set(wf.root_ids);
+  const hasChild = new Set<string>();
+  for (const n of Object.values(wf.nodes)) {
+    for (const pid of n.parent_ids) hasChild.add(pid);
+  }
   const rfNodes: Node<WorkFlowNodeData>[] = laidOut.map(({ node, position }) => ({
     id: node.id,
     type: "workflow",
     position,
-    data: { node, isSelected: node.id === selectedNodeId },
+    data: {
+      node,
+      isSelected: node.id === selectedNodeId,
+      isRoot: rootSet.has(node.id),
+      isLeaf: !hasChild.has(node.id),
+    },
     selectable: false,
   }));
   const rfEdges: Edge[] = [];
