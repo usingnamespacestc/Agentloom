@@ -48,6 +48,8 @@ function twoBranchFlow(): ChatFlow {
   return {
     id: "c",
     title: null,
+    description: null,
+    tags: [],
     default_chat_model: null,
     default_work_model: null,
     root_ids: ["a"],

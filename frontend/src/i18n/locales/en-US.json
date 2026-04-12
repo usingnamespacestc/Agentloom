@@ -55,7 +55,12 @@
     "no_selection": "Select a node to view the conversation",
     "delete_cascade": "Delete this node and all descendants",
     "delete_cascade_confirm": "This will delete this node and all its descendant nodes. Continue?",
-    "cancel_action": "Cancel"
+    "cancel_action": "Cancel",
+    "ctx_enter_workflow": "Open workflow",
+    "ctx_retry": "Retry",
+    "ctx_cancel": "Cancel execution",
+    "ctx_delete": "Delete",
+    "ctx_delete_cascade": "Delete with descendants"
   },
   "workflow": {
     "panel_title": "Inner workflow",
@@ -92,5 +97,30 @@
     "branch_label": "Branch",
     "branch_of": "Branch {{current}} of {{total}}",
     "thinking": "Thinking"
+  },
+  "providers": {
+    "title": "Provider Settings",
+    "add": "Add provider",
+    "edit": "Edit",
+    "delete": "Delete",
+    "delete_confirm": "Delete this provider? This cannot be undone.",
+    "name": "Name",
+    "kind": "Type",
+    "base_url": "Base URL",
+    "api_key_source": "API Key Source",
+    "api_key_env_var": "Environment Variable",
+    "api_key_inline": "API Key",
+    "models": "Models",
+    "discover_models": "Discover models",
+    "test_connection": "Test connection",
+    "test_success": "Connection successful",
+    "test_failed": "Connection failed",
+    "pinned": "Default",
+    "save": "Save",
+    "cancel": "Cancel",
+    "no_providers": "No providers configured",
+    "rate_limit_bucket": "Rate limit bucket",
+    "kind_openai_compat": "OpenAI Compatible",
+    "kind_anthropic_native": "Anthropic Native"
   }
 }

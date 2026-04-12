@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from agentloom import __version__
-from agentloom.api import chatflows, folders, health, workflows
+from agentloom.api import chatflows, folders, health, providers, workflows
 from agentloom.config import get_settings
 
 
@@ -41,6 +41,7 @@ def create_app() -> FastAPI:
     app.include_router(workflows.router)
     app.include_router(chatflows.router)
     app.include_router(folders.router)
+    app.include_router(providers.router)
     return app
 
 

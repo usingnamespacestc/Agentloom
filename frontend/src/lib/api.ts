@@ -160,6 +160,76 @@ export const api = {
       method: "DELETE",
     }),
 
+  // ---- providers ----
+  listProviders: () => request<ProviderSummary[]>("/api/providers"),
+
+  createProvider: (body: CreateProviderBody) =>
+    request<{ id: string; friendly_name: string }>("/api/providers", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  getProvider: (id: string) => request<ProviderDetail>(`/api/providers/${id}`),
+
+  patchProvider: (id: string, patch: Partial<CreateProviderBody>) =>
+    request<{ ok: boolean }>(`/api/providers/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+
+  deleteProvider: (id: string) =>
+    request<{ ok: boolean }>(`/api/providers/${id}`, { method: "DELETE" }),
+
+  testProvider: (id: string) =>
+    request<{ ok: boolean; models?: string[]; error?: string }>(
+      `/api/providers/${id}/test`,
+      { method: "POST", body: JSON.stringify({}) },
+    ),
+
+  discoverModels: (id: string) =>
+    request<{ models: ModelInfoDTO[] }>(`/api/providers/${id}/models`, {
+      method: "POST",
+    }),
+
   /** SSE URL for a chatflow — pass to `new EventSource(...)`. */
   eventsUrl: (id: string) => `/api/chatflows/${id}/events`,
 };
+
+// ---- provider types ----
+
+export interface ModelInfoDTO {
+  id: string;
+  context_window: number | null;
+  max_output_tokens: number | null;
+  supports_tools: boolean;
+  supports_streaming: boolean;
+  pinned: boolean;
+}
+
+export interface ProviderSummary {
+  id: string;
+  friendly_name: string;
+  provider_kind: string;
+  base_url: string;
+  available_models: ModelInfoDTO[];
+  api_key_source: string;
+  api_key_env_var: string | null;
+  rate_limit_bucket: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface ProviderDetail extends ProviderSummary {
+  extra_headers: Record<string, string>;
+}
+
+export interface CreateProviderBody {
+  friendly_name: string;
+  provider_kind: string;
+  base_url: string;
+  api_key_source?: string;
+  api_key_env_var?: string | null;
+  api_key_inline?: string | null;
+  available_models?: ModelInfoDTO[];
+  rate_limit_bucket?: string | null;
+}

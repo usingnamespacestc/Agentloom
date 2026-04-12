@@ -55,6 +55,12 @@ import { api } from "@/lib/api";
 import { useChatFlowStore } from "@/store/chatflowStore";
 import type { ChatFlow, ChatFlowNode } from "@/types/schema";
 
+interface ContextMenuState {
+  nodeId: string;
+  x: number;
+  y: number;
+}
+
 const NODE_TYPES = { chatflow: ChatFlowNodeCard };
 
 export interface ChatFlowCanvasProps {
@@ -68,6 +74,11 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
   const enterWorkflow = useChatFlowStore((s) => s.enterWorkflow);
 
   const deleteNode = useChatFlowStore((s) => s.deleteNode);
+  const retryNode = useChatFlowStore((s) => s.retryNode);
+  const cancelNode = useChatFlowStore((s) => s.cancelNode);
+
+  // Context menu state
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
   // Listen for drill-down requests from the node card's ⤢ button. We
   // use a window CustomEvent rather than passing a callback through
@@ -163,7 +174,18 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
 
   const handleNodeClick: NodeMouseHandler = (_event, node) => {
     selectNode(node.id);
+    setContextMenu(null);
   };
+
+  const handleContextMenu: NodeMouseHandler = (event, node) => {
+    event.preventDefault();
+    setContextMenu({ nodeId: node.id, x: event.clientX, y: event.clientY });
+    selectNode(node.id);
+  };
+
+  const handlePaneClick = useCallback(() => {
+    setContextMenu(null);
+  }, []);
 
   if (!chatflow) {
     return (
@@ -194,6 +216,8 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
         edges={edges}
         nodeTypes={NODE_TYPES}
         onNodeClick={handleNodeClick}
+        onNodeContextMenu={handleContextMenu}
+        onPaneClick={handlePaneClick}
         onNodesChange={onNodesChange}
         nodesDraggable
         nodesConnectable={false}
@@ -206,6 +230,46 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
         <Background />
         <Controls showInteractive={false} />
       </ReactFlow>
+
+      {contextMenu && chatflow && (() => {
+        const node = chatflow.nodes[contextMenu.nodeId];
+        if (!node) return null;
+        const undeletable = computeUndeletableIds(chatflow.nodes);
+        const leaves = computeLeafIds(chatflow.nodes);
+        const isLeaf = leaves.has(node.id);
+        const canDel = !undeletable.has(node.id);
+
+        return (
+          <NodeContextMenu
+            x={contextMenu.x}
+            y={contextMenu.y}
+            status={node.status}
+            isLeaf={isLeaf}
+            canDelete={canDel}
+            onEnterWorkflow={() => {
+              enterWorkflow(contextMenu.nodeId);
+              setContextMenu(null);
+            }}
+            onRetry={() => {
+              void retryNode(contextMenu.nodeId);
+              setContextMenu(null);
+            }}
+            onCancel={() => {
+              void cancelNode(contextMenu.nodeId);
+              setContextMenu(null);
+            }}
+            onDelete={() => {
+              if (isLeaf) {
+                void deleteNode(contextMenu.nodeId);
+              } else {
+                setPendingDeleteId(contextMenu.nodeId);
+              }
+              setContextMenu(null);
+            }}
+            onClose={() => setContextMenu(null)}
+          />
+        );
+      })()}
 
       {pendingDeleteId && (
         <ConfirmDialog
@@ -358,6 +422,84 @@ export function buildGraph(
     }
   }
   return { nodes: rfNodes, edges: rfEdges };
+}
+
+// ---------------------------------------------------------------- Context menu
+
+function NodeContextMenu({
+  x,
+  y,
+  status,
+  isLeaf,
+  canDelete,
+  onEnterWorkflow,
+  onRetry,
+  onCancel,
+  onDelete,
+  onClose,
+}: {
+  x: number;
+  y: number;
+  status: string;
+  isLeaf: boolean;
+  canDelete: boolean;
+  onEnterWorkflow: () => void;
+  onRetry: () => void;
+  onCancel: () => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+
+  const items: { label: string; onClick: () => void; danger?: boolean }[] = [];
+
+  // Always show "Enter workflow"
+  items.push({ label: t("chatflow.ctx_enter_workflow"), onClick: onEnterWorkflow });
+
+  // Status-based actions
+  if (status === "failed") {
+    items.push({ label: t("chatflow.ctx_retry"), onClick: onRetry });
+  }
+  if (status === "running") {
+    items.push({ label: t("chatflow.ctx_cancel"), onClick: onCancel });
+  }
+
+  // Delete
+  if (canDelete) {
+    items.push({
+      label: isLeaf ? t("chatflow.ctx_delete") : t("chatflow.ctx_delete_cascade"),
+      onClick: onDelete,
+      danger: true,
+    });
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50"
+      onClick={onClose}
+      onContextMenu={(e) => { e.preventDefault(); onClose(); }}
+    >
+      <div
+        className="absolute min-w-[160px] rounded-lg border border-gray-200 bg-white py-1 shadow-lg"
+        style={{ left: x, top: y }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {items.map((item, i) => (
+          <button
+            key={i}
+            type="button"
+            onClick={item.onClick}
+            className={[
+              "block w-full px-3 py-1.5 text-left text-xs hover:bg-gray-50",
+              item.danger ? "text-red-500 hover:bg-red-50" : "text-gray-700",
+            ].join(" ")}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------- Confirm dialog

@@ -18,6 +18,8 @@ function seed(): ChatFlow {
   return {
     id: "c1",
     title: null,
+    description: null,
+    tags: [],
     default_chat_model: null,
     default_work_model: null,
     root_ids: ["a"],
@@ -91,6 +93,26 @@ describe("buildGraph", () => {
     // b is planned → edge a->b should be dashed.
     expect(edges[0].style?.strokeDasharray).toBe("6 4");
   });
+
+  it("marks root and leaf nodes correctly", () => {
+    const { nodes } = buildGraph(seed(), null);
+    const nodeA = nodes.find((n) => n.id === "a")!;
+    const nodeB = nodes.find((n) => n.id === "b")!;
+    expect(nodeA.data.isRoot).toBe(true);
+    expect(nodeA.data.isLeaf).toBe(false);
+    expect(nodeB.data.isRoot).toBe(false);
+    expect(nodeB.data.isLeaf).toBe(true);
+  });
+
+  it("marks running nodes as undeletable", () => {
+    const cf = seed();
+    cf.nodes["b"].status = "running";
+    const { nodes } = buildGraph(cf, null);
+    // b is running → cannot delete
+    expect(nodes.find((n) => n.id === "b")!.data.canDelete).toBe(false);
+    // a is ancestor of running → also cannot delete
+    expect(nodes.find((n) => n.id === "a")!.data.canDelete).toBe(false);
+  });
 });
 
 describe("ChatFlowCanvas rendering", () => {
@@ -105,6 +127,8 @@ describe("ChatFlowCanvas rendering", () => {
         chatflow={{
           id: "empty",
           title: null,
+          description: null,
+          tags: [],
           default_chat_model: null,
           default_work_model: null,
           root_ids: [],

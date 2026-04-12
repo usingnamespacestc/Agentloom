@@ -6,18 +6,24 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { ProviderSettings } from "@/components/ProviderSettings";
 import { useChatFlowStore } from "@/store/chatflowStore";
 
 export function ChatFlowHeader() {
   const { t, i18n } = useTranslation();
   const chatflow = useChatFlowStore((s) => s.chatflow);
   const patchChatFlow = useChatFlowStore((s) => s.patchChatFlow);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   if (!chatflow) {
     return (
       <header className="flex items-center justify-between border-b border-gray-200 bg-white px-4 py-2">
         <span className="text-sm text-gray-400">{t("app.no_chatflow")}</span>
-        <LanguageToggle i18n={i18n} t={t} />
+        <div className="flex items-center gap-2">
+          <SettingsButton onClick={() => setSettingsOpen(true)} />
+          <LanguageToggle i18n={i18n} t={t} />
+        </div>
+        <ProviderSettings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       </header>
     );
   }
@@ -43,8 +49,12 @@ export function ChatFlowHeader() {
         />
       </div>
 
-      {/* Right: language toggle */}
-      <LanguageToggle i18n={i18n} t={t} />
+      {/* Right: settings + language toggle */}
+      <div className="flex items-center gap-2">
+        <SettingsButton onClick={() => setSettingsOpen(true)} />
+        <LanguageToggle i18n={i18n} t={t} />
+      </div>
+      <ProviderSettings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </header>
   );
 }
@@ -252,6 +262,21 @@ function TagList({
         </button>
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------- Settings button
+
+function SettingsButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded border border-gray-300 bg-white text-sm text-gray-500 hover:bg-gray-50 hover:text-gray-700"
+      title="Settings"
+    >
+      {"\u2699"}
+    </button>
   );
 }
 

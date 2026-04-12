@@ -55,7 +55,12 @@
     "no_selection": "选中一个节点查看对话",
     "delete_cascade": "删除此节点及所有后续节点",
     "delete_cascade_confirm": "将删除此节点及其所有后续节点，是否继续？",
-    "cancel_action": "取消"
+    "cancel_action": "取消",
+    "ctx_enter_workflow": "进入工作流",
+    "ctx_retry": "重试",
+    "ctx_cancel": "取消执行",
+    "ctx_delete": "删除",
+    "ctx_delete_cascade": "删除及所有后续节点"
   },
   "workflow": {
     "panel_title": "内部工作流",
@@ -92,5 +97,30 @@
     "branch_label": "分支",
     "branch_of": "第 {{current}} / {{total}} 个分支",
     "thinking": "思考过程"
+  },
+  "providers": {
+    "title": "模型服务商设置",
+    "add": "添加服务商",
+    "edit": "编辑",
+    "delete": "删除",
+    "delete_confirm": "删除该服务商？此操作无法撤销。",
+    "name": "名称",
+    "kind": "类型",
+    "base_url": "接口地址",
+    "api_key_source": "密钥来源",
+    "api_key_env_var": "环境变量名",
+    "api_key_inline": "API 密钥",
+    "models": "模型",
+    "discover_models": "发现模型",
+    "test_connection": "测试连接",
+    "test_success": "连接成功",
+    "test_failed": "连接失败",
+    "pinned": "默认",
+    "save": "保存",
+    "cancel": "取消",
+    "no_providers": "尚未配置服务商",
+    "rate_limit_bucket": "限流桶",
+    "kind_openai_compat": "OpenAI 兼容",
+    "kind_anthropic_native": "Anthropic 原生"
   }
 }
