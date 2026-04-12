@@ -271,6 +271,39 @@ function computeLeafIds(nodes: Record<string, ChatFlowNode>): Set<string> {
   return leaves;
 }
 
+/** Sum total_tokens across all WorkNodes in a ChatNode's workflow. */
+function nodeTokens(node: ChatFlowNode): number {
+  let sum = 0;
+  for (const wn of Object.values(node.workflow.nodes)) {
+    if (wn.usage) sum += wn.usage.total_tokens;
+  }
+  return sum;
+}
+
+/**
+ * For each ChatNode, compute accumulated context tokens from root to
+ * that node (following parent_ids[0] as the primary path).
+ */
+function computeContextTokens(
+  nodes: Record<string, ChatFlowNode>,
+): Record<string, number> {
+  const cache: Record<string, number> = {};
+
+  function walk(id: string): number {
+    if (id in cache) return cache[id];
+    const node = nodes[id];
+    if (!node) return 0;
+    const own = nodeTokens(node);
+    const parentId = node.parent_ids[0] ?? null;
+    const inherited = parentId ? walk(parentId) : 0;
+    cache[id] = inherited + own;
+    return cache[id];
+  }
+
+  for (const id of Object.keys(nodes)) walk(id);
+  return cache;
+}
+
 /** Pure function so it can be unit-tested without rendering React Flow. */
 export function buildGraph(
   chatflow: ChatFlow | null,
@@ -280,6 +313,7 @@ export function buildGraph(
   const laidOut = layoutDag<ChatFlowNode>(chatflow.nodes, chatflow.root_ids);
   const undeletable = computeUndeletableIds(chatflow.nodes);
   const leaves = computeLeafIds(chatflow.nodes);
+  const ctxTokens = computeContextTokens(chatflow.nodes);
   const rfNodes: Node<ChatFlowNodeData>[] = laidOut.map(({ node, position }) => {
     // Prefer server-persisted position over auto-layout.
     const pos =
@@ -295,6 +329,7 @@ export function buildGraph(
         isSelected: node.id === selectedNodeId,
         canDelete: !undeletable.has(node.id),
         isLeaf: leaves.has(node.id),
+        contextTokens: ctxTokens[node.id] ?? 0,
       },
       selectable: false,
     };

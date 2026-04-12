@@ -21,6 +21,9 @@ import { useTranslation } from "react-i18next";
 import { StatusBadge } from "./StatusBadge";
 import type { ChatFlowNode } from "@/types/schema";
 
+/** Temporary hard-coded context limit — will become per-model config. */
+export const DEFAULT_MAX_CONTEXT_TOKENS = 32_000;
+
 export interface ChatFlowNodeData extends Record<string, unknown> {
   node: ChatFlowNode;
   isSelected: boolean;
@@ -28,6 +31,8 @@ export interface ChatFlowNodeData extends Record<string, unknown> {
   canDelete: boolean;
   /** Whether deleting this node would cascade (has descendants). */
   isLeaf: boolean;
+  /** Accumulated context tokens from root to this node (inclusive). */
+  contextTokens: number;
 }
 
 const TRUNCATE = 90;
@@ -39,7 +44,7 @@ function truncate(text: string, n = TRUNCATE): string {
 
 export function ChatFlowNodeCard({ data }: NodeProps) {
   const { t } = useTranslation();
-  const { node, isSelected, canDelete, isLeaf } = data as ChatFlowNodeData;
+  const { node, isSelected, canDelete, isLeaf, contextTokens } = data as ChatFlowNodeData;
   const isMerge = node.parent_ids.length >= 2;
   const isGreetingRoot = node.user_message === null;
   const hasWorkflow = Object.keys(node.workflow.nodes).length > 0;
@@ -152,7 +157,34 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
         </button>
       )}
 
+      {contextTokens > 0 && <TokenBar tokens={contextTokens} />}
+
       <Handle type="source" position={Position.Right} />
+    </div>
+  );
+}
+
+function formatTokenCount(n: number): string {
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
+
+function TokenBar({ tokens }: { tokens: number }) {
+  const pct = Math.min(100, (tokens / DEFAULT_MAX_CONTEXT_TOKENS) * 100);
+  const color =
+    pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-yellow-400" : "bg-blue-400";
+  return (
+    <div className="mt-1.5" title={`${tokens} / ${formatTokenCount(DEFAULT_MAX_CONTEXT_TOKENS)} tokens`}>
+      <div className="flex items-center justify-between text-[9px] text-gray-500 mb-0.5">
+        <span>{formatTokenCount(tokens)}</span>
+        <span>{pct.toFixed(0)}%</span>
+      </div>
+      <div className="h-1 w-full rounded-full bg-gray-200">
+        <div
+          className={`h-1 rounded-full ${color}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
     </div>
   );
 }
