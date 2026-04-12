@@ -35,7 +35,8 @@
     "enter_workflow_hint": "Click to open this node's workflow",
     "no_selection": "Select a node to view the conversation",
     "delete_cascade": "Delete this node and all descendants",
-    "delete_cascade_confirm": "This will delete this node and all its descendant nodes. Continue?"
+    "delete_cascade_confirm": "This will delete this node and all its descendant nodes. Continue?",
+    "cancel_action": "Cancel"
   },
   "workflow": {
     "panel_title": "Inner workflow",

@@ -82,21 +82,24 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
     return () => window.removeEventListener("agentloom:enter-workflow", handler);
   }, [enterWorkflow]);
 
+  // Delete confirmation state — null means no dialog shown.
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+
   // Listen for delete requests from the node card's ✕ button.
   useEffect(() => {
     const handler = (event: Event) => {
       const ce = event as CustomEvent<{ nodeId: string; isLeaf: boolean }>;
       if (!ce.detail?.nodeId) return;
       const { nodeId, isLeaf } = ce.detail;
-      if (!isLeaf) {
-        const ok = window.confirm(t("chatflow.delete_cascade_confirm"));
-        if (!ok) return;
+      if (isLeaf) {
+        void deleteNode(nodeId);
+      } else {
+        setPendingDeleteId(nodeId);
       }
-      void deleteNode(nodeId);
     };
     window.addEventListener("agentloom:delete-node", handler);
     return () => window.removeEventListener("agentloom:delete-node", handler);
-  }, [deleteNode, t]);
+  }, [deleteNode]);
 
   const [nodes, setNodes] = useState<Node<ChatFlowNodeData>[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
@@ -185,7 +188,7 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
   }
 
   return (
-    <div data-testid="chatflow-canvas" className="h-full w-full">
+    <div data-testid="chatflow-canvas" className="relative h-full w-full">
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -203,6 +206,19 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
         <Background />
         <Controls showInteractive={false} />
       </ReactFlow>
+
+      {pendingDeleteId && (
+        <ConfirmDialog
+          message={t("chatflow.delete_cascade_confirm")}
+          confirmLabel={t("chatflow.delete")}
+          cancelLabel={t("chatflow.cancel_action")}
+          onConfirm={() => {
+            void deleteNode(pendingDeleteId);
+            setPendingDeleteId(null);
+          }}
+          onCancel={() => setPendingDeleteId(null)}
+        />
+      )}
     </div>
   );
 }
@@ -305,4 +321,53 @@ export function buildGraph(
     }
   }
   return { nodes: rfNodes, edges: rfEdges };
+}
+
+// ---------------------------------------------------------------- Confirm dialog
+
+function ConfirmDialog({
+  message,
+  confirmLabel,
+  cancelLabel,
+  onConfirm,
+  onCancel,
+}: {
+  message: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div
+      data-testid="confirm-dialog-overlay"
+      className="absolute inset-0 z-50 flex items-center justify-center bg-black/30"
+      onClick={onCancel}
+    >
+      <div
+        className="w-80 rounded-lg border border-gray-200 bg-white p-5 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <p className="mb-4 text-sm text-gray-700">{message}</p>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            data-testid="confirm-dialog-cancel"
+            onClick={onCancel}
+            className="rounded border border-gray-300 bg-white px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50"
+          >
+            {cancelLabel}
+          </button>
+          <button
+            type="button"
+            data-testid="confirm-dialog-confirm"
+            onClick={onConfirm}
+            className="rounded bg-red-500 px-3 py-1.5 text-xs text-white hover:bg-red-600"
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }

@@ -35,7 +35,8 @@
     "enter_workflow_hint": "点击进入此节点的工作流",
     "no_selection": "选中一个节点查看对话",
     "delete_cascade": "删除此节点及所有后续节点",
-    "delete_cascade_confirm": "将删除此节点及其所有后续节点，是否继续？"
+    "delete_cascade_confirm": "将删除此节点及其所有后续节点，是否继续？",
+    "cancel_action": "取消"
   },
   "workflow": {
     "panel_title": "内部工作流",
