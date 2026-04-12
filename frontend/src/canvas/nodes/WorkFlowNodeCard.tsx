@@ -10,6 +10,7 @@
  */
 
 import { Handle, Position, type NodeProps } from "@xyflow/react";
+import Markdown from "react-markdown";
 import { useTranslation } from "react-i18next";
 
 import { StatusBadge } from "./StatusBadge";
@@ -82,8 +83,8 @@ function LlmCallBody({ node }: { node: WorkFlowNode }) {
           {t("workflow.model")}: {modelRef.model_id}
         </div>
       )}
-      <div className="text-gray-800 break-words whitespace-pre-wrap">
-        {output ? truncate(output) : <span className="italic text-gray-400">—</span>}
+      <div className="prose prose-sm max-w-none text-[11px] text-gray-800 break-words">
+        {output ? <Markdown>{truncate(output)}</Markdown> : <span className="italic text-gray-400">—</span>}
       </div>
       {usage && (
         <div className="text-[10px] text-gray-500 flex gap-2">
@@ -106,16 +107,18 @@ function ToolCallBody({ node }: { node: WorkFlowNode }) {
     <div className="space-y-1">
       <div className="font-mono text-gray-700">{label}</div>
       {result && (
-        <div
-          className={[
-            "text-gray-800 break-words whitespace-pre-wrap",
-            result.is_error ? "text-red-700" : "",
-          ].join(" ")}
-        >
+        <div>
           <span className="text-[10px] text-gray-500 mr-1">
             {result.is_error ? t("workflow.tool_error") : t("workflow.tool_result")}:
           </span>
-          {truncate(result.content)}
+          <div
+            className={[
+              "prose prose-sm max-w-none text-[11px] break-words",
+              result.is_error ? "text-red-700" : "text-gray-800",
+            ].join(" ")}
+          >
+            <Markdown>{truncate(result.content)}</Markdown>
+          </div>
         </div>
       )}
     </div>
