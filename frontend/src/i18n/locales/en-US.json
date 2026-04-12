@@ -1,0 +1,73 @@
+{
+  "app": {
+    "title": "Agentloom",
+    "tagline": "Every conversation is a branchable DAG",
+    "switch_language": "Switch language"
+  },
+  "node": {
+    "status": {
+      "planned": "Planned",
+      "running": "Running",
+      "waiting_for_rate_limit": "Waiting (rate limit)",
+      "succeeded": "Succeeded",
+      "failed": "Failed",
+      "retrying": "Retrying",
+      "cancelled": "Cancelled"
+    },
+    "kind": {
+      "llm_call": "LLM call",
+      "tool_call": "Tool call",
+      "sub_agent_delegation": "Sub-agent"
+    }
+  },
+  "chatflow": {
+    "new": "New chat",
+    "branch": "Branch",
+    "merge": "Merge",
+    "delete": "Delete",
+    "empty": "No chat nodes yet — send a message to start",
+    "user": "User",
+    "agent": "Agent",
+    "loading": "Loading…",
+    "load_failed": "Failed to load chatflow",
+    "select_chatflow": "Select a chatflow",
+    "open_workflow": "Enter workflow",
+    "enter_workflow_hint": "Click to open this node's workflow",
+    "no_selection": "Select a node to view the conversation"
+  },
+  "workflow": {
+    "panel_title": "Inner workflow",
+    "close_panel": "Close",
+    "empty": "This node has no workflow steps",
+    "tool_result": "Tool result",
+    "tool_error": "Tool error",
+    "tokens": "Token usage",
+    "prompt_tokens": "Prompt",
+    "completion_tokens": "Completion",
+    "cached_tokens": "Cached",
+    "model": "Model",
+    "no_selection": "Click a workflow node to inspect",
+    "back_to_chatflow": "Back to conversation",
+    "io_title": "Input / Output",
+    "detail_title": "Node details",
+    "detail_description": "Description",
+    "detail_expected": "Expected outcome",
+    "detail_model": "Model",
+    "detail_status": "Status",
+    "detail_error": "Error",
+    "detail_tool_name": "Tool",
+    "detail_tool_args": "Arguments"
+  },
+  "conversation": {
+    "panel_title": "Conversation",
+    "input_placeholder": "Send a message… (M9)",
+    "input_placeholder_active": "Send a message… (Enter to send, Shift+Enter for newline)",
+    "send": "Send",
+    "retry": "Retry",
+    "delete_failed": "Delete",
+    "running": "Running…",
+    "cancel": "Stop",
+    "branch_label": "Branch",
+    "branch_of": "Branch {{current}} of {{total}}"
+  }
+}

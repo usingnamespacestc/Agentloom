@@ -1,0 +1,407 @@
+"""ChatFlow REST endpoints (M4 + Round A queue).
+
+Surface:
+- ``POST   /api/chatflows``                              create w/ greeting root
+- ``GET    /api/chatflows/{id}``                         read full state
+- ``POST   /api/chatflows/{id}/turns``                   submit + wait (legacy)
+- ``POST   /api/chatflows/{id}/nodes/{nid}/queue``       enqueue pending turn
+- ``PATCH  /api/chatflows/{id}/nodes/{nid}/queue/{tid}`` edit queue item
+- ``DELETE /api/chatflows/{id}/nodes/{nid}/queue/{tid}`` drop queue item
+- ``POST   /api/chatflows/{id}/nodes/{nid}/queue/reorder``
+- ``DELETE /api/chatflows/{id}/nodes/{nid}``             delete FAILED node + queue
+- ``POST   /api/chatflows/{id}/nodes/{nid}/retry``       retry FAILED node
+- ``GET    /api/chatflows/{id}/events``                  SSE stream
+
+All routes scoped to the singleton ``default`` workspace (M21 brings
+real workspace auth).
+
+The ChatFlowEngine is a process-lifetime singleton held on
+``app.state.chatflow_engine`` — queue operations spawn background
+tasks whose runtime state must outlive a single request. Each test
+spins up a fresh FastAPI app so the engine is effectively
+test-scoped for the test suite.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
+from sse_starlette.sse import EventSourceResponse
+
+from agentloom.api import workflows as _workflows_api
+from agentloom.db.base import get_session
+from agentloom.db.models.tenancy import DEFAULT_WORKSPACE_ID
+from agentloom.db.repositories.chatflow import (
+    ChatFlowNotFoundError,
+    ChatFlowRepository,
+)
+from agentloom.engine.chatflow_engine import (
+    ChatFlowEngine,
+    DiscardedUpstreamFailure,
+)
+from agentloom.engine.events import get_event_bus
+from agentloom.schemas import ChatFlow, PendingTurn, make_chatflow
+from agentloom.schemas.chatflow import PendingTurnSource
+from agentloom.schemas.common import FrozenNodeError, NodeHasReferencesError
+from agentloom.tools import default_registry
+from agentloom.tools.base import ToolContext
+
+router = APIRouter(prefix="/api/chatflows", tags=["chatflows"])
+
+
+def _repo(session: AsyncSession) -> ChatFlowRepository:
+    return ChatFlowRepository(session, workspace_id=DEFAULT_WORKSPACE_ID)
+
+
+def _get_engine(request: Request) -> ChatFlowEngine:
+    """Return the process-lifetime ChatFlowEngine, creating it on first
+    request. We stash it on ``app.state`` so integration tests that
+    construct a fresh ``FastAPI`` app per test get a fresh engine.
+    """
+    app = request.app
+    engine = getattr(app.state, "chatflow_engine", None)
+    if engine is None:
+        # Resolve through the module reference so tests that patch
+        # ``workflows._provider_call_from_settings`` also affect this route.
+        engine = ChatFlowEngine(
+            _workflows_api._provider_call_from_settings(),
+            get_event_bus(),
+            tool_registry=default_registry(),
+            tool_context=ToolContext(workspace_id=DEFAULT_WORKSPACE_ID),
+        )
+        app.state.chatflow_engine = engine
+    return engine
+
+
+async def _attached_chatflow(
+    engine: ChatFlowEngine, repo: ChatFlowRepository, chatflow_id: str
+) -> ChatFlow:
+    """Load a chatflow from DB and attach it to the engine.
+
+    Returns the engine's authoritative in-memory copy: if the engine
+    already holds a runtime for this id (from a prior request or a
+    background task), we use that one and discard the DB reload —
+    the runtime is ahead of the DB by any background-task mutations
+    that haven't persisted yet.
+    """
+    try:
+        chat = await repo.get(chatflow_id)
+    except ChatFlowNotFoundError as exc:
+        raise HTTPException(404, f"chatflow {chatflow_id} not found") from exc
+    runtime = await engine.attach(chat)
+    return runtime.chatflow
+
+
+# ---------------------------------------------------------------- schemas
+
+
+class CreateChatFlowRequest(BaseModel):
+    title: str | None = None
+
+
+class CreateChatFlowResponse(BaseModel):
+    id: str
+
+
+class SubmitTurnRequest(BaseModel):
+    text: str
+    parent_id: str | None = None
+
+
+class SubmitTurnResponse(BaseModel):
+    node_id: str
+    status: str
+    agent_response: str
+
+
+class EnqueueRequest(BaseModel):
+    text: str
+    source: PendingTurnSource = "web"
+
+
+class PendingTurnPayload(BaseModel):
+    id: str
+    text: str
+    source: PendingTurnSource
+
+    @classmethod
+    def from_model(cls, pending: PendingTurn) -> "PendingTurnPayload":
+        return cls(id=pending.id, text=pending.text, source=pending.source)
+
+
+class PatchQueueItemRequest(BaseModel):
+    text: str
+
+
+class ReorderQueueRequest(BaseModel):
+    item_ids: list[str]
+
+
+class RetryResponse(BaseModel):
+    node_id: str
+
+
+class NodePosition(BaseModel):
+    id: str
+    x: float
+    y: float
+
+
+class PatchPositionsRequest(BaseModel):
+    positions: list[NodePosition]
+
+
+# ---------------------------------------------------------------- routes
+
+
+@router.post("", response_model=CreateChatFlowResponse)
+async def create_chatflow(
+    body: CreateChatFlowRequest | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> CreateChatFlowResponse:
+    chat = make_chatflow(title=(body.title if body else None))
+    await _repo(session).create(chat)
+    await session.commit()
+    return CreateChatFlowResponse(id=chat.id)
+
+
+@router.get("/{chatflow_id}")
+async def get_chatflow(
+    chatflow_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    # If a runtime is already attached, it's authoritative — prefer
+    # its in-memory copy over the stale DB row so the client sees
+    # mutations produced by background tasks that haven't persisted.
+    engine = _get_engine(request)
+    runtime = engine.get_runtime(chatflow_id)
+    if runtime is not None:
+        return runtime.chatflow.model_dump(mode="json")
+
+    try:
+        chat = await _repo(session).get(chatflow_id)
+    except ChatFlowNotFoundError as exc:
+        raise HTTPException(404, f"chatflow {chatflow_id} not found") from exc
+    return chat.model_dump(mode="json")
+
+
+@router.patch("/{chatflow_id}/positions")
+async def patch_positions(
+    chatflow_id: str,
+    body: PatchPositionsRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    engine = _get_engine(request)
+    repo = _repo(session)
+    chat = await _attached_chatflow(engine, repo, chatflow_id)
+    for pos in body.positions:
+        node = chat.nodes.get(pos.id)
+        if node is not None:
+            node.position_x = pos.x
+            node.position_y = pos.y
+    await repo.save(chat)
+    await session.commit()
+    return {"ok": True}
+
+
+@router.post("/{chatflow_id}/turns", response_model=SubmitTurnResponse)
+async def submit_turn(
+    chatflow_id: str,
+    body: SubmitTurnRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> SubmitTurnResponse:
+    engine = _get_engine(request)
+    repo = _repo(session)
+    chat = await _attached_chatflow(engine, repo, chatflow_id)
+
+    try:
+        chat_node = await engine.submit_user_turn(
+            chat, body.text, parent_id=body.parent_id
+        )
+    except KeyError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except DiscardedUpstreamFailure as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+    await repo.save(chat)
+    await session.commit()
+    return SubmitTurnResponse(
+        node_id=chat_node.id,
+        status=chat_node.status.value,
+        agent_response=chat_node.agent_response.text,
+    )
+
+
+@router.post(
+    "/{chatflow_id}/nodes/{node_id}/queue",
+    response_model=PendingTurnPayload,
+)
+async def enqueue_queue_item(
+    chatflow_id: str,
+    node_id: str,
+    body: EnqueueRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> PendingTurnPayload:
+    engine = _get_engine(request)
+    repo = _repo(session)
+    chat = await _attached_chatflow(engine, repo, chatflow_id)
+    if node_id not in chat.nodes:
+        raise HTTPException(404, f"node {node_id} not in chatflow {chatflow_id}")
+    pending = await engine.enqueue(
+        chat.id, node_id, body.text, source=body.source
+    )
+    await repo.save(chat)
+    await session.commit()
+    return PendingTurnPayload.from_model(pending)
+
+
+@router.patch("/{chatflow_id}/nodes/{node_id}/queue/{item_id}")
+async def patch_queue_item(
+    chatflow_id: str,
+    node_id: str,
+    item_id: str,
+    body: PatchQueueItemRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    engine = _get_engine(request)
+    repo = _repo(session)
+    chat = await _attached_chatflow(engine, repo, chatflow_id)
+    if node_id not in chat.nodes:
+        raise HTTPException(404, f"node {node_id} not in chatflow {chatflow_id}")
+    try:
+        await engine.patch_queue_item(chat.id, node_id, item_id, body.text)
+    except KeyError as exc:
+        raise HTTPException(404, f"queue item {item_id} not found") from exc
+    await repo.save(chat)
+    await session.commit()
+    return {"ok": True}
+
+
+@router.delete("/{chatflow_id}/nodes/{node_id}/queue/{item_id}")
+async def delete_queue_item(
+    chatflow_id: str,
+    node_id: str,
+    item_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    engine = _get_engine(request)
+    repo = _repo(session)
+    chat = await _attached_chatflow(engine, repo, chatflow_id)
+    if node_id not in chat.nodes:
+        raise HTTPException(404, f"node {node_id} not in chatflow {chatflow_id}")
+    try:
+        await engine.delete_queue_item(chat.id, node_id, item_id)
+    except KeyError as exc:
+        raise HTTPException(404, f"queue item {item_id} not found") from exc
+    await repo.save(chat)
+    await session.commit()
+    return {"ok": True}
+
+
+@router.post("/{chatflow_id}/nodes/{node_id}/queue/reorder")
+async def reorder_queue(
+    chatflow_id: str,
+    node_id: str,
+    body: ReorderQueueRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    engine = _get_engine(request)
+    repo = _repo(session)
+    chat = await _attached_chatflow(engine, repo, chatflow_id)
+    if node_id not in chat.nodes:
+        raise HTTPException(404, f"node {node_id} not in chatflow {chatflow_id}")
+    try:
+        await engine.reorder_queue(chat.id, node_id, body.item_ids)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    await repo.save(chat)
+    await session.commit()
+    return {"ok": True}
+
+
+@router.delete("/{chatflow_id}/nodes/{node_id}")
+async def delete_failed_node(
+    chatflow_id: str,
+    node_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    engine = _get_engine(request)
+    repo = _repo(session)
+    chat = await _attached_chatflow(engine, repo, chatflow_id)
+    if node_id not in chat.nodes:
+        raise HTTPException(404, f"node {node_id} not in chatflow {chatflow_id}")
+    try:
+        await engine.delete_failed_node(chat.id, node_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except NodeHasReferencesError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    try:
+        await repo.save(chat)
+    except FrozenNodeError as exc:
+        # If the node somehow came back as succeeded mid-delete, the
+        # repository-side guard kicks in; surface it as a 409.
+        raise HTTPException(409, str(exc)) from exc
+    await session.commit()
+    return {"ok": True}
+
+
+@router.post("/{chatflow_id}/nodes/{node_id}/retry", response_model=RetryResponse)
+async def retry_failed_node(
+    chatflow_id: str,
+    node_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> RetryResponse:
+    engine = _get_engine(request)
+    repo = _repo(session)
+    chat = await _attached_chatflow(engine, repo, chatflow_id)
+    if node_id not in chat.nodes:
+        raise HTTPException(404, f"node {node_id} not in chatflow {chatflow_id}")
+    try:
+        sibling = await engine.retry_failed_node(chat.id, node_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    await repo.save(chat)
+    await session.commit()
+    return RetryResponse(node_id=sibling.id)
+
+
+@router.post("/{chatflow_id}/nodes/{node_id}/cancel")
+async def cancel_running_node(
+    chatflow_id: str,
+    node_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    engine = _get_engine(request)
+    repo = _repo(session)
+    chat = await _attached_chatflow(engine, repo, chatflow_id)
+    if node_id not in chat.nodes:
+        raise HTTPException(404, f"node {node_id} not in chatflow {chatflow_id}")
+    await engine.cancel_running_node(chat.id, node_id)
+    await repo.save(chat)
+    await session.commit()
+    return {"ok": True}
+
+
+@router.get("/{chatflow_id}/events")
+async def chatflow_events(chatflow_id: str) -> EventSourceResponse:
+    bus = get_event_bus()
+
+    async def event_stream() -> AsyncIterator[dict]:
+        async for event in bus.subscribe(chatflow_id):
+            yield {"event": event.kind, "data": event.model_dump_json()}
+
+    return EventSourceResponse(event_stream())

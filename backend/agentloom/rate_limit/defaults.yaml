@@ -1,0 +1,66 @@
+# Agentloom default rate limit configuration.
+#
+# Encodes the real-world limits we researched on 2026-04-10 for the
+# services Agentloom is primarily tested against. Users can override
+# this file by pointing AGENTLOOM_RATE_LIMIT_CONFIG at their own YAML.
+#
+# Limits are deliberately SET BELOW the published ceilings to leave
+# headroom for the user's direct (non-Agentloom) usage of the same key.
+#
+# Sliding windows use seconds. 18000s = 5h. 2592000s = 30d.
+
+buckets:
+  # ----------------------------------------------------------------- global
+  - name: global
+    concurrent: 64
+    description: "Platform-wide concurrent cap, shared across every provider"
+
+  # -------------------------------------------------------- volcengine ark
+  # Published: Coding Plan Lite ≈ 1200 requests / rolling 5h window.
+  # We use 1000 to leave 200 as headroom for the user's manual usage.
+  # No official RPM; we self-impose ~3 RPM to avoid bursty 429 storms
+  # that other users have reported on the Lite tier.
+  - name: provider:volcengine
+    parent: global
+    concurrent: 2
+    rpm: 3
+    sliding_window_requests: 1000
+    sliding_window_seconds: 18000
+    description: "Volcengine Ark — Coding Plan Lite (researched 2026-04-10)"
+
+  - name: provider:volcengine.model:ark-code-latest
+    parent: provider:volcengine
+    concurrent: 2
+    description: "ark-code-latest (256K ctx / 32K max output)"
+
+  # -------------------------------------------------------------- tavily
+  # Published: Development tier = 100 RPM default endpoints, 1000 calls/month.
+  # We budget 50 RPM and 900 calls / 30d to leave headroom.
+  - name: provider:tavily
+    parent: global
+    concurrent: 10
+    rpm: 50
+    sliding_window_requests: 900
+    sliding_window_seconds: 2592000
+    description: "Tavily Development tier (researched 2026-04-10)"
+
+  - name: provider:tavily.endpoint:research
+    parent: provider:tavily
+    rpm: 15
+    description: "Tavily research endpoint is 20 RPM; we budget 15"
+
+  # -------------------------------------------------------------- anthropic
+  # Placeholder — not actively used yet. Generous defaults; adjust when
+  # we land the Anthropic-native adapter (M5).
+  - name: provider:anthropic
+    parent: global
+    concurrent: 8
+    rpm: 60
+    description: "Anthropic native (defaults pending real-tier research)"
+
+  # -------------------------------------------------------------- openai-compat generic
+  - name: provider:openai-compat-generic
+    parent: global
+    concurrent: 8
+    rpm: 60
+    description: "Fallback bucket for user-added OpenAI-compat providers"
