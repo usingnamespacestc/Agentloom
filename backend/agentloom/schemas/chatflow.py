@@ -126,6 +126,37 @@ class ChatFlow(BaseModel):
         if node_id in self.root_ids:
             self.root_ids.remove(node_id)
 
+    def children(self, node_id: NodeId) -> list[NodeId]:
+        """Return immediate children of *node_id* (sorted by created_at)."""
+        kids = [
+            n for n in self.nodes.values() if node_id in n.parent_ids
+        ]
+        kids.sort(key=lambda n: (n.created_at, n.id))
+        return [n.id for n in kids]
+
+    def descendants(self, node_id: NodeId) -> set[NodeId]:
+        """Return all transitive descendants of *node_id* (not including itself)."""
+        result: set[NodeId] = set()
+        stack = list(self.children(node_id))
+        while stack:
+            nid = stack.pop()
+            if nid in result:
+                continue
+            result.add(nid)
+            stack.extend(self.children(nid))
+        return result
+
+    def remove_subtree(self, node_id: NodeId) -> list[NodeId]:
+        """Remove *node_id* and all its descendants. Returns the list of removed ids."""
+        to_remove = self.descendants(node_id)
+        to_remove.add(node_id)
+        for rid in to_remove:
+            if rid in self.nodes:
+                del self.nodes[rid]
+            if rid in self.root_ids:
+                self.root_ids.remove(rid)
+        return list(to_remove)
+
     def ancestors(self, node_id: NodeId) -> list[NodeId]:
         if node_id not in self.nodes:
             raise KeyError(node_id)

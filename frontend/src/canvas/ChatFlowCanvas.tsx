@@ -67,6 +67,8 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
   const selectNode = useChatFlowStore((s) => s.selectNode);
   const enterWorkflow = useChatFlowStore((s) => s.enterWorkflow);
 
+  const deleteNode = useChatFlowStore((s) => s.deleteNode);
+
   // Listen for drill-down requests from the node card's ⤢ button. We
   // use a window CustomEvent rather than passing a callback through
   // React Flow's node-data channel because data flows back out of
@@ -79,6 +81,22 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
     window.addEventListener("agentloom:enter-workflow", handler);
     return () => window.removeEventListener("agentloom:enter-workflow", handler);
   }, [enterWorkflow]);
+
+  // Listen for delete requests from the node card's ✕ button.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const ce = event as CustomEvent<{ nodeId: string; isLeaf: boolean }>;
+      if (!ce.detail?.nodeId) return;
+      const { nodeId, isLeaf } = ce.detail;
+      if (!isLeaf) {
+        const ok = window.confirm(t("chatflow.delete_cascade_confirm"));
+        if (!ok) return;
+      }
+      void deleteNode(nodeId);
+    };
+    window.addEventListener("agentloom:delete-node", handler);
+    return () => window.removeEventListener("agentloom:delete-node", handler);
+  }, [deleteNode, t]);
 
   const [nodes, setNodes] = useState<Node<ChatFlowNodeData>[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
@@ -189,6 +207,54 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
   );
 }
 
+/**
+ * Compute the set of node ids that cannot be deleted.
+ * A node is undeletable if it is RUNNING, or if any of its
+ * descendants is RUNNING (which makes it an ancestor of a running node).
+ */
+function computeUndeletableIds(
+  nodes: Record<string, ChatFlowNode>,
+): Set<string> {
+  const undeletable = new Set<string>();
+
+  // First, find all running nodes.
+  const runningIds: string[] = [];
+  for (const [id, node] of Object.entries(nodes)) {
+    if (node.status === "running") {
+      runningIds.push(id);
+      undeletable.add(id);
+    }
+  }
+
+  // For each running node, walk up the ancestor chain and mark undeletable.
+  for (const rid of runningIds) {
+    const stack = [...nodes[rid].parent_ids];
+    while (stack.length > 0) {
+      const pid = stack.pop()!;
+      if (undeletable.has(pid)) continue;
+      undeletable.add(pid);
+      const parent = nodes[pid];
+      if (parent) stack.push(...parent.parent_ids);
+    }
+  }
+
+  return undeletable;
+}
+
+function computeLeafIds(nodes: Record<string, ChatFlowNode>): Set<string> {
+  const hasChild = new Set<string>();
+  for (const node of Object.values(nodes)) {
+    for (const pid of node.parent_ids) {
+      hasChild.add(pid);
+    }
+  }
+  const leaves = new Set<string>();
+  for (const id of Object.keys(nodes)) {
+    if (!hasChild.has(id)) leaves.add(id);
+  }
+  return leaves;
+}
+
 /** Pure function so it can be unit-tested without rendering React Flow. */
 export function buildGraph(
   chatflow: ChatFlow | null,
@@ -196,6 +262,8 @@ export function buildGraph(
 ): { nodes: Node<ChatFlowNodeData>[]; edges: Edge[] } {
   if (!chatflow) return { nodes: [], edges: [] };
   const laidOut = layoutDag<ChatFlowNode>(chatflow.nodes, chatflow.root_ids);
+  const undeletable = computeUndeletableIds(chatflow.nodes);
+  const leaves = computeLeafIds(chatflow.nodes);
   const rfNodes: Node<ChatFlowNodeData>[] = laidOut.map(({ node, position }) => {
     // Prefer server-persisted position over auto-layout.
     const pos =
@@ -206,7 +274,12 @@ export function buildGraph(
       id: node.id,
       type: "chatflow",
       position: pos,
-      data: { node, isSelected: node.id === selectedNodeId },
+      data: {
+        node,
+        isSelected: node.id === selectedNodeId,
+        canDelete: !undeletable.has(node.id),
+        isLeaf: leaves.has(node.id),
+      },
       selectable: false,
     };
   });

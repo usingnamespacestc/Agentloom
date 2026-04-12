@@ -105,14 +105,10 @@ def _assert_frozen_chatflow_nodes_unchanged(prior: ChatFlow, new: ChatFlow) -> N
             continue
         new_node = new.nodes.get(nid)
         if new_node is None:
-            # Deletion is allowed only for FAILED nodes (the retry /
-            # cleanup path). SUCCEEDED nodes are part of the dialogue
-            # record and must stay.
-            if prior_node.status == NodeStatus.FAILED:
-                continue
-            raise FrozenNodeError(
-                f"ChatFlow node {nid} is succeeded and may not be deleted"
-            )
+            # Deletion of frozen nodes is allowed — the cascade-delete
+            # and failed-node-cleanup paths both remove nodes before
+            # calling save.
+            continue
         prior_dump = _strip_frozen_exempt(prior_node.model_dump(mode="json"))
         new_dump = _strip_frozen_exempt(new_node.model_dump(mode="json"))
         if new_dump != prior_dump:

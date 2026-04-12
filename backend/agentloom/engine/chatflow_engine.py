@@ -322,6 +322,57 @@ class ChatFlowEngine:
             await self._publish_queue_updated(runtime, node_id)
         await self._save(runtime)
 
+    async def delete_node_cascade(
+        self, chatflow_id: str, node_id: str
+    ) -> list[str]:
+        """Delete a node and all its descendants.
+
+        Raises ``ValueError`` if the node itself or any descendant is
+        currently RUNNING. Returns the list of removed node ids.
+        """
+        runtime = self._require_runtime(chatflow_id)
+        async with runtime.lock:
+            chat = runtime.chatflow
+            if node_id not in chat.nodes:
+                raise KeyError(f"node {node_id} not in chatflow")
+
+            subtree = chat.descendants(node_id)
+            subtree.add(node_id)
+
+            # Block deletion when any node in the subtree is running.
+            for nid in subtree:
+                n = chat.nodes.get(nid)
+                if n and n.status == NodeStatus.RUNNING:
+                    raise ValueError(
+                        f"cannot delete: node {nid} is currently running"
+                    )
+
+            # Discard pending queues + resolve futures.
+            for nid in subtree:
+                n = chat.nodes.get(nid)
+                if n and n.pending_queue:
+                    self._fail_pending(
+                        runtime,
+                        n.pending_queue,
+                        DiscardedUpstreamFailure(
+                            f"node {nid} deleted by user"
+                        ),
+                    )
+
+            removed = chat.remove_subtree(node_id)
+
+        # Publish one deletion event per removed node.
+        for nid in removed:
+            await self._bus.publish(
+                WorkflowEvent(
+                    workflow_id=chat.id,
+                    kind="chat.node.deleted",
+                    node_id=nid,
+                )
+            )
+        await self._save(runtime)
+        return removed
+
     async def delete_failed_node(self, chatflow_id: str, node_id: str) -> None:
         """Delete a FAILED node and discard its pending queue.
 

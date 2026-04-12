@@ -45,7 +45,7 @@ from agentloom.engine.chatflow_engine import (
 from agentloom.engine.events import get_event_bus
 from agentloom.schemas import ChatFlow, PendingTurn, make_chatflow
 from agentloom.schemas.chatflow import PendingTurnSource
-from agentloom.schemas.common import FrozenNodeError, NodeHasReferencesError
+from agentloom.schemas.common import FrozenNodeError
 from agentloom.tools import default_registry
 from agentloom.tools.base import ToolContext
 
@@ -330,31 +330,31 @@ async def reorder_queue(
 
 
 @router.delete("/{chatflow_id}/nodes/{node_id}")
-async def delete_failed_node(
+async def delete_node(
     chatflow_id: str,
     node_id: str,
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
+    """Delete a node and all its descendants (cascade).
+
+    Returns 409 if any node in the subtree is currently RUNNING.
+    """
     engine = _get_engine(request)
     repo = _repo(session)
     chat = await _attached_chatflow(engine, repo, chatflow_id)
     if node_id not in chat.nodes:
         raise HTTPException(404, f"node {node_id} not in chatflow {chatflow_id}")
     try:
-        await engine.delete_failed_node(chat.id, node_id)
+        removed = await engine.delete_node_cascade(chat.id, node_id)
     except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    except NodeHasReferencesError as exc:
         raise HTTPException(409, str(exc)) from exc
     try:
         await repo.save(chat)
     except FrozenNodeError as exc:
-        # If the node somehow came back as succeeded mid-delete, the
-        # repository-side guard kicks in; surface it as a 409.
         raise HTTPException(409, str(exc)) from exc
     await session.commit()
-    return {"ok": True}
+    return {"ok": True, "removed": removed}
 
 
 @router.post("/{chatflow_id}/nodes/{node_id}/retry", response_model=RetryResponse)

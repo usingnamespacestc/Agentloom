@@ -24,6 +24,10 @@ import type { ChatFlowNode } from "@/types/schema";
 export interface ChatFlowNodeData extends Record<string, unknown> {
   node: ChatFlowNode;
   isSelected: boolean;
+  /** Whether this node can be deleted (false when running or ancestor of running). */
+  canDelete: boolean;
+  /** Whether deleting this node would cascade (has descendants). */
+  isLeaf: boolean;
 }
 
 const TRUNCATE = 90;
@@ -35,7 +39,7 @@ function truncate(text: string, n = TRUNCATE): string {
 
 export function ChatFlowNodeCard({ data }: NodeProps) {
   const { t } = useTranslation();
-  const { node, isSelected } = data as ChatFlowNodeData;
+  const { node, isSelected, canDelete, isLeaf } = data as ChatFlowNodeData;
   const isMerge = node.parent_ids.length >= 2;
   const isGreetingRoot = node.user_message === null;
   const hasWorkflow = Object.keys(node.workflow.nodes).length > 0;
@@ -48,17 +52,39 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
     );
   };
 
+  const onDelete = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    window.dispatchEvent(
+      new CustomEvent("agentloom:delete-node", {
+        detail: { nodeId: node.id, isLeaf },
+      }),
+    );
+  };
+
   return (
     <div
       data-testid={`chatflow-node-${node.id}`}
       className={[
-        "rounded-lg border bg-white shadow-sm w-48 p-2.5 text-xs",
+        "group/card relative rounded-lg border bg-white shadow-sm w-48 p-2.5 text-xs",
         isSelected ? "border-blue-500 ring-2 ring-blue-200" : "border-gray-300",
         isMerge ? "border-purple-400" : "",
         isDashed ? "border-dashed" : "",
       ].join(" ")}
     >
       <Handle type="target" position={Position.Left} />
+
+      {/* Delete button — top-right, visible on hover */}
+      {canDelete && (
+        <button
+          type="button"
+          onClick={onDelete}
+          data-testid={`chatflow-node-${node.id}-delete`}
+          className="absolute -top-2 -right-2 z-10 hidden h-5 w-5 items-center justify-center rounded-full border border-red-300 bg-red-50 text-[10px] text-red-500 shadow-sm hover:bg-red-100 hover:text-red-700 group-hover/card:flex"
+          title={isLeaf ? t("chatflow.delete") : t("chatflow.delete_cascade")}
+        >
+          ✕
+        </button>
+      )}
 
       <div className="flex items-center justify-between mb-1.5">
         <StatusBadge status={node.status} />
