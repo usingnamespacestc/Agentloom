@@ -50,10 +50,12 @@ import "@xyflow/react/dist/style.css";
 import { useTranslation } from "react-i18next";
 
 import { layoutDag } from "./layout";
+import { ModelRibbonLayer } from "./ModelRibbonLayer";
+import { MODEL_KINDS, colorForModel, edgeModel } from "./effectiveModel";
 import { ChatFlowNodeCard, type ChatFlowNodeData } from "./nodes/ChatFlowNodeCard";
 import { api } from "@/lib/api";
 import { useChatFlowStore } from "@/store/chatflowStore";
-import type { ChatFlow, ChatFlowNode } from "@/types/schema";
+import type { ChatFlow, ChatFlowNode, NodeId } from "@/types/schema";
 
 interface ContextMenuState {
   nodeId: string;
@@ -72,10 +74,26 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
   const selectedNodeId = useChatFlowStore((s) => s.selectedNodeId);
   const selectNode = useChatFlowStore((s) => s.selectNode);
   const enterWorkflow = useChatFlowStore((s) => s.enterWorkflow);
-
   const deleteNode = useChatFlowStore((s) => s.deleteNode);
   const retryNode = useChatFlowStore((s) => s.retryNode);
   const cancelNode = useChatFlowStore((s) => s.cancelNode);
+  const setHoveredEdge = useChatFlowStore((s) => s.setHoveredEdge);
+  const hoveredEdge = useChatFlowStore((s) => s.hoveredEdge);
+
+  // Cursor position for the edge-hover tooltip — only tracked while an
+  // edge is hovered, so we don't pay for global mousemove the rest of
+  // the time. Stored as viewport (clientX/clientY) coords because the
+  // tooltip uses `position: fixed`.
+  const [cursorPos, setCursorPos] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (!hoveredEdge) {
+      setCursorPos(null);
+      return;
+    }
+    const onMove = (e: MouseEvent) => setCursorPos({ x: e.clientX, y: e.clientY });
+    window.addEventListener("mousemove", onMove);
+    return () => window.removeEventListener("mousemove", onMove);
+  }, [hoveredEdge]);
 
   // Context menu state
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -219,6 +237,10 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
         onNodeContextMenu={handleContextMenu}
         onPaneClick={handlePaneClick}
         onNodesChange={onNodesChange}
+        onEdgeMouseEnter={(_, edge) =>
+          setHoveredEdge({ parent: edge.source, child: edge.target })
+        }
+        onEdgeMouseLeave={() => setHoveredEdge(null)}
         nodesDraggable
         nodesConnectable={false}
         edgesFocusable={false}
@@ -229,7 +251,17 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
       >
         <Background />
         <Controls showInteractive={false} />
+        <ModelRibbonLayer chatflow={chatflow} />
       </ReactFlow>
+
+      {hoveredEdge && cursorPos && chatflow && (
+        <EdgeModelTooltip
+          chatflow={chatflow}
+          edge={hoveredEdge}
+          x={cursorPos.x}
+          y={cursorPos.y}
+        />
+      )}
 
       {contextMenu && chatflow && (() => {
         const node = chatflow.nodes[contextMenu.nodeId];
@@ -391,6 +423,7 @@ export function buildGraph(
       node.position_x != null && node.position_y != null
         ? { x: node.position_x, y: node.position_y }
         : position;
+    const isRoot = rootSet.has(node.id);
     return {
       id: node.id,
       type: "chatflow",
@@ -400,7 +433,7 @@ export function buildGraph(
         isSelected: node.id === selectedNodeId,
         canDelete: !undeletable.has(node.id),
         isLeaf: leaves.has(node.id),
-        isRoot: rootSet.has(node.id),
+        isRoot,
         contextTokens: ctxTokens[node.id] ?? 0,
       },
       selectable: false,
@@ -553,6 +586,59 @@ function ConfirmDialog({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Tooltip that appears next to the cursor while an edge is hovered,
+ * listing the model used on that edge for each ModelKind. Today there
+ * is only one row (`llm`); future per-kind models slot in by extending
+ * `MODEL_KINDS` in `effectiveModel.ts`.
+ *
+ * Positioning is `position: fixed` in viewport coords so the tooltip
+ * doesn't get clipped by React Flow's overflow-hidden viewport. The
+ * 12px offset keeps it from sitting under the cursor and intercepting
+ * the next mouseleave.
+ */
+function EdgeModelTooltip({
+  chatflow,
+  edge,
+  x,
+  y,
+}: {
+  chatflow: ChatFlow;
+  edge: { parent: NodeId; child: NodeId };
+  x: number;
+  y: number;
+}) {
+  const { t } = useTranslation();
+  const rows = MODEL_KINDS.map((kind) => {
+    const m = edgeModel(chatflow, edge.parent, edge.child, kind);
+    return {
+      kind,
+      label: t(`composer_model.kind_${kind}`),
+      modelLabel: m ? m.model_id : t("composer_model.button_inherit"),
+      color: colorForModel(m),
+    };
+  });
+
+  return (
+    <div
+      data-testid="edge-model-tooltip"
+      className="pointer-events-none fixed z-50 rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-[11px] shadow-lg"
+      style={{ left: x + 12, top: y + 12 }}
+    >
+      {rows.map((row) => (
+        <div key={row.kind} className="flex items-center gap-1.5 whitespace-nowrap">
+          <span
+            className="inline-block h-2 w-2 rounded-full"
+            style={{ background: row.color }}
+          />
+          <span className="text-gray-500">{row.label}</span>
+          <span className="font-mono text-gray-800">{row.modelLabel}</span>
+        </div>
+      ))}
     </div>
   );
 }

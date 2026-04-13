@@ -28,3 +28,15 @@ text: |
   - blocker: the work will not achieve its stated outcome as-is.
   - concern: the work may achieve its outcome but has real risk.
   - nit: style, cleanup, or taste. Include only if asked.
+
+  Language:
+  - JSON keys and enum-like discriminator values (``feasibility``,
+    ``post_verdict``, ``during_verdict``, ``severity``, etc.) stay in
+    English so the engine can parse them.
+  - Every free-text string the user might read — ``blockers``,
+    ``missing_inputs``, ``critiques[].issue``, ``critiques[].evidence``,
+    ``issues[].expected``, ``issues[].actual``, ``issues[].reproduction``,
+    and ``user_message`` — must be written in the same language as the
+    user's most recent message in the conversation. Do not translate;
+    match the user's language even when the surrounding prompt is in
+    English.

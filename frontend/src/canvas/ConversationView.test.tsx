@@ -26,9 +26,10 @@ function node(
     id,
     parent_ids: parents,
     description: { text: "", provenance: "unset", updated_at: iso },
+    inputs: null,
     expected_outcome: null,
     status: "succeeded",
-    model_override: null,
+    resolved_model: null,
     locked: false,
     error: null,
     position_x: null,
@@ -51,12 +52,14 @@ function twoBranchFlow(): ChatFlow {
     description: null,
     tags: [],
     default_model: null,
+    default_execution_mode: 'direct',
     root_ids: ["a"],
     nodes: {
       a: node("a", [], "hello", "hi there", 0),
       b: node("b", ["a"], "path b", "response b", 1),
       c: node("c", ["a"], "path c", "response c", 2),
     },
+    created_at: "2026-04-10T00:00:00Z",
   };
 }
 

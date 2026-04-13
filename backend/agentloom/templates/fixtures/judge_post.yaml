@@ -1,6 +1,11 @@
 builtin_id: judge_post
 name: "Judge (post)"
-description: "Terminal-boundary verdict on whether the WorkFlow achieved its stated outcome."
+description: >
+  Universal exit gate. Reviews whatever the WorkFlow produced (a
+  finished llm_call, a judge_pre halt, a judge_during halt, or an
+  upstream node error) and decides accept/retry/fail. On halt paths
+  it also writes the user-facing message that the ChatFlow will
+  surface as the agent's reply.
 params_schema:
   workflow_description:
     type: string
@@ -11,10 +16,23 @@ params_schema:
   workflow_expected_outcome:
     type: string
     required: true
-  workflow_output_summary:
+  upstream_kind:
     type: string
     required: true
-    description: "Summary of the terminal WorkNode outputs (engine-built)."
+    description: >
+      What produced the WorkFlow's terminal state. One of:
+      ``completed`` (llm_call finished normally), ``judge_pre_halt``
+      (judge_pre vetoed before any llm_call ran),
+      ``judge_during_halt`` (judge_during exhausted its revise budget),
+      ``node_error`` (an upstream node failed). Used by the judge to
+      pick the right tone.
+  upstream_summary:
+    type: string
+    required: true
+    description: >
+      Free-text summary of the upstream state — the llm_call's output,
+      a judge_pre verdict's blockers/missing_inputs, etc. The judge
+      reads this as the source-of-truth for what to tell the user.
   worknode_catalog:
     type: string
     required: false
@@ -23,7 +41,7 @@ params_schema:
       cite a location when flagging an issue.
 plan:
   description:
-    text: "judge_post terminal verdict"
+    text: "judge_post universal exit gate"
     provenance: pure_agent
   execution_mode: direct
   nodes:
@@ -32,26 +50,52 @@ plan:
       step_kind: judge_call
       judge_variant: post
       description:
-        text: "Did the WorkFlow meet its expected outcome?"
+        text: "Decide accept/retry/fail and write the user-facing reply if needed."
         provenance: pure_agent
       input_messages:
         - role: system
           content: |
             {% include '_critique_base' %}
 
-            You are running the *post* pass. Decide:
-              - accept: output meets expected_outcome with no blocking issues.
-              - retry:  fixable gap — specific issues must be resolved by
-                        rerunning one or more WorkNodes.
-              - fail:   structurally cannot succeed as built; hand back to user.
+            You are running the *post* pass — the WorkFlow's universal
+            exit gate. Every WorkFlow run, however it terminated, ends
+            with you deciding what (if anything) the user sees.
 
-            When an issue exists, locate it on a specific WorkNode id
-            from the catalog so the UI can jump there.
+            Decide ``post_verdict``:
+              - accept: the WorkFlow's output meets the expected outcome
+                with no blocking issues. The terminal llm_call's own
+                output will reach the user verbatim — do not write a
+                ``user_message`` in this case.
+              - retry:  fixable gap — specific issues should be resolved
+                        by rerunning one or more WorkNodes. Write a
+                        ``user_message`` explaining the gap and asking
+                        the user how to proceed.
+              - fail:   the WorkFlow cannot succeed as built (or a halt
+                        condition fired before completion). Write a
+                        ``user_message`` explaining the situation and
+                        asking the user for the next step.
+
+            ``upstream_kind`` tells you why you were invoked:
+              - ``completed``: an llm_call produced output you should
+                judge against the expected outcome.
+              - ``judge_pre_halt``: judge_pre vetoed before any work ran.
+                The upstream summary is the verdict it returned. Default
+                to ``fail``; the user_message should restate the blockers
+                / missing inputs in plain language and ask for clarification.
+              - ``judge_during_halt``: judge_during ran out of revise
+                budget. Default to ``retry`` or ``fail`` depending on
+                whether the partial work is salvageable.
+              - ``node_error``: an upstream node raised. Default to
+                ``fail``; the user_message should describe the failure.
+
+            When an issue exists on a specific WorkNode, locate it on
+            the catalog so the UI can jump there.
 
             Return JSON:
               {"post_verdict": "accept"|"retry"|"fail",
                "issues": [{"location": worknode_id, "expected": str,
-                           "actual": str, "reproduction": str}, ...]}.
+                           "actual": str, "reproduction": str}, ...],
+               "user_message": str | null}.
             No other prose.
         - role: user
           content: |
@@ -65,7 +109,9 @@ plan:
             ----------------
             {{ worknode_catalog }}
 
-            Output summary
-            --------------
-            {{ workflow_output_summary }}
+            Upstream kind: {{ upstream_kind }}
+
+            Upstream summary
+            ----------------
+            {{ upstream_summary }}
   root_ids: ["judge_post_root"]

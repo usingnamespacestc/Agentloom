@@ -11,7 +11,12 @@ from sqlalchemy import select
 from agentloom.db.models.chatflow import ChatFlowRow
 from agentloom.db.repositories.base import WorkspaceScopedRepository
 from agentloom.schemas import ChatFlow
-from agentloom.schemas.common import FrozenNodeError, NodeStatus, ProviderModelRef
+from agentloom.schemas.common import (
+    ExecutionMode,
+    FrozenNodeError,
+    NodeStatus,
+    ProviderModelRef,
+)
 
 
 class ChatFlowNotFoundError(KeyError):
@@ -109,13 +114,15 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         description: str | None = ...,  # type: ignore[assignment]
         tags: list[str] | None = ...,  # type: ignore[assignment]
         default_model: ProviderModelRef | None = ...,  # type: ignore[assignment]
+        default_execution_mode: ExecutionMode | None = ...,  # type: ignore[assignment]
     ) -> None:
         """Update metadata fields. Pass ``...`` (default) to skip a field.
 
         ``title`` / ``description`` / ``tags`` live on top-level columns
         (for efficient sidebar queries) AND inside the ``payload`` JSON
         (so ``get()`` which reads only the payload stays in sync).
-        ``default_model`` lives only in the payload.
+        ``default_model`` and ``default_execution_mode`` live only in the
+        payload.
         """
         stmt = (
             select(ChatFlowRow)
@@ -141,6 +148,9 @@ class ChatFlowRepository(WorkspaceScopedRepository):
             payload["default_model"] = (
                 default_model.model_dump(mode="json") if default_model else None
             )
+        if default_execution_mode is not ...:
+            if default_execution_mode is not None:
+                payload["default_execution_mode"] = default_execution_mode.value
         row.payload = payload
         await self.session.flush()
 

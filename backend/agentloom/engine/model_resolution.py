@@ -1,20 +1,20 @@
-"""Resolve the effective model for a WorkNode by walking the
-``next_model_override`` chain (ADR-022, §4.10 of requirements).
+"""Resolve the effective model for a WorkNode.
 
-Semantics
----------
-- A node's own ``model_override`` is an explicit pin for *that node
-  only* — it does not propagate to descendants.
-- A node's ``next_model_override`` is the pointer descendants inherit
-  unless they (or an intermediate ancestor) sets their own.
+ChatFlow-level model inheritance used to live here too (walking
+``next_model_override`` up the WorkFlow DAG). That was removed when
+model selection moved from per-node overrides to a per-turn choice in
+the ChatFlow composer (§4.10 rework):
 
-The resolver walks ancestors in reverse topological order and returns
-the first non-null value it finds. If none is set, the caller should
-fall back to ``ChatFlow.default_model`` (out of scope here — this
-function only sees one WorkFlow).
+- The ChatFlow composer captures the user's pick and the engine
+  snapshots it onto the new ChatNode's ``resolved_model``.
+- At spawn time the engine stamps each WorkFlowNode's
+  ``model_override`` with that resolved value, and propagates it across
+  retries / tool-call follow-ups.
 
-This lives next to the engine (not in ``schemas/``) because it's purely
-runtime resolution logic — the schema is an inert carrier of fields.
+So by the time this resolver runs, every WorkNode has its
+``model_override`` set. This function is kept as a thin accessor in
+case we later need per-WorkNode overrides for the per-call-type split
+(see memory ``project_agentloom_per_call_type_models``).
 """
 
 from __future__ import annotations
@@ -30,25 +30,9 @@ def effective_model_for(
     """Return the :class:`ProviderModelRef` that should be used when
     invoking *node_id* in *workflow*.
 
-    Resolution order:
-
-    1. ``node.model_override`` — explicit pin on the node itself.
-    2. Nearest ancestor with ``next_model_override`` set (walking
-       parents; if a node has multiple parents the first non-null
-       wins, with deterministic traversal via
-       :meth:`WorkFlow.ancestors`).
-    3. ``None`` — caller falls back to ChatFlow / workspace default.
+    Resolution today is just ``node.model_override``. Returning ``None``
+    tells the caller to fall back to the workspace / provider default.
 
     Raises :class:`KeyError` if *node_id* is not in *workflow*.
     """
-    node = workflow.get(node_id)
-    if node.model_override is not None:
-        return node.model_override
-
-    # ``workflow.ancestors`` returns topological order with root first,
-    # so reversing gives nearest-ancestor-first.
-    for aid in reversed(workflow.ancestors(node_id)):
-        ancestor = workflow.get(aid)
-        if ancestor.next_model_override is not None:
-            return ancestor.next_model_override
-    return None
+    return workflow.get(node_id).model_override

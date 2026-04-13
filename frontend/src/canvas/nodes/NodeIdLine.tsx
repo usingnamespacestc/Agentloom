@@ -1,8 +1,10 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { usePreferencesStore } from "@/store/preferencesStore";
 
 export function NodeIdLine({ nodeId }: { nodeId: string }) {
+  const { t } = useTranslation();
   const showNodeId = usePreferencesStore((s) => s.showNodeId);
   const [copied, setCopied] = useState(false);
 
@@ -23,9 +25,9 @@ export function NodeIdLine({ nodeId }: { nodeId: string }) {
     <div
       onClick={onClick}
       className="mt-1 cursor-pointer truncate font-mono text-[9px] text-gray-400 hover:text-blue-500"
-      title={copied ? "copied!" : nodeId}
+      title={copied ? t("common.copied") : nodeId}
     >
-      {copied ? "copied!" : nodeId}
+      {copied ? t("common.copied") : nodeId}
     </div>
   );
 }

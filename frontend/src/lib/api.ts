@@ -7,7 +7,7 @@
  * HTTP failures apart from network failures.
  */
 
-import type { ChatFlow, ChatFlowSummary, Folder, PendingTurn, PendingTurnSource, ProviderModelRef } from "@/types/schema";
+import type { ChatFlow, ChatFlowSummary, ExecutionMode, Folder, PendingTurn, PendingTurnSource, ProviderModelRef } from "@/types/schema";
 
 export class ApiError extends Error {
   constructor(
@@ -73,6 +73,7 @@ export const api = {
       description?: string | null;
       tags?: string[];
       default_model?: ProviderModelRef | null;
+      default_execution_mode?: ExecutionMode;
     },
   ) =>
     request<{ ok: boolean }>(`/api/chatflows/${id}`, {
@@ -89,19 +90,31 @@ export const api = {
       body: JSON.stringify({ folder_id: folderId }),
     }),
 
-  submitTurn: (id: string, text: string, parentId?: string) =>
+  submitTurn: (
+    id: string,
+    text: string,
+    parentId?: string,
+    spawnModel?: ProviderModelRef | null,
+  ) =>
     request<SubmitTurnResponse>(`/api/chatflows/${id}/turns`, {
       method: "POST",
       body: JSON.stringify({
         text,
         parent_id: parentId ?? null,
+        spawn_model: spawnModel ?? null,
       }),
     }),
 
-  enqueueTurn: (chatflowId: string, nodeId: string, text: string, source: PendingTurnSource = "web") =>
+  enqueueTurn: (
+    chatflowId: string,
+    nodeId: string,
+    text: string,
+    source: PendingTurnSource = "web",
+    spawnModel?: ProviderModelRef | null,
+  ) =>
     request<PendingTurn>(`/api/chatflows/${chatflowId}/nodes/${nodeId}/queue`, {
       method: "POST",
-      body: JSON.stringify({ text, source }),
+      body: JSON.stringify({ text, source, spawn_model: spawnModel ?? null }),
     }),
 
   patchQueueItem: (chatflowId: string, nodeId: string, itemId: string, text: string) =>
@@ -141,6 +154,19 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ positions }),
     }),
+
+  patchWorkflowPositions: (
+    chatflowId: string,
+    chatNodeId: string,
+    positions: { id: string; x: number; y: number }[],
+  ) =>
+    request<{ ok: boolean }>(
+      `/api/chatflows/${chatflowId}/nodes/${chatNodeId}/workflow/positions`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ positions }),
+      },
+    ),
 
   // ---- folders ----
   listFolders: () => request<Folder[]>("/api/folders"),

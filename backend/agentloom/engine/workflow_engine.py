@@ -20,10 +20,8 @@ from collections.abc import Awaitable, Callable
 from agentloom.engine.events import EventBus, WorkflowEvent
 from agentloom.engine.judge_formatter import (
     format_judge_post_prompt,
-    format_judge_pre_prompt,
     format_revise_budget_halt_prompt,
     judge_post_needs_user_input,
-    judge_pre_needs_user_input,
 )
 from agentloom.engine.judge_parser import JudgeParseError, parse_judge_verdict
 from agentloom.engine.model_resolution import effective_model_for
@@ -47,6 +45,13 @@ ProviderCall = Callable[
     [list[Message], list[ToolDefinition], str | None],
     Awaitable[ChatResponse],
 ]
+
+#: Callback fired after a node transitions to SUCCEEDED. The hook is
+#: free to mutate ``workflow`` (typically: add new nodes that the next
+#: ``execute()`` iteration will pick up). Used to keep the inner DAG
+#: dynamic — e.g. judge_pre's verdict decides whether the WorkFlow
+#: continues with an llm_call or routes straight to judge_post.
+PostNodeHook = Callable[[WorkFlow, WorkFlowNode], None]
 
 #: Sentinel so we can distinguish ``chatflow_tool_loop_budget=None``
 #: ("chatflow exists and says unlimited") from "no chatflow was passed
@@ -87,6 +92,10 @@ class WorkflowEngine:
         #: sub_agent_delegation will spin up its own engine, so each
         #: recursion level counts independently.
         self._revise_count: int = 0
+        #: Per-``execute()`` hook fired on every node success. Lets the
+        #: caller (typically ChatFlowEngine) grow the DAG dynamically —
+        #: e.g. spawn judge_post once judge_pre/llm_call has settled.
+        self._post_node_hook: PostNodeHook | None = None
 
     async def execute(
         self,
@@ -94,6 +103,7 @@ class WorkflowEngine:
         *,
         chatflow_tool_loop_budget: int | None | object = _UNSET,
         chatflow_auto_mode_revise_budget: int | None | object = _UNSET,
+        post_node_hook: PostNodeHook | None = None,
     ) -> WorkFlow:
         """Run every planned node in topological order. Mutates and
         returns the workflow.
@@ -123,6 +133,7 @@ class WorkflowEngine:
             workflow.auto_mode_revise_budget, chatflow_auto_mode_revise_budget
         )
         self._revise_count = 0
+        self._post_node_hook = post_node_hook
         broken: set[str] = set()
         done: set[str] = set()
 
@@ -217,6 +228,12 @@ class WorkflowEngine:
                 data={"usage": node.usage.model_dump() if node.usage else None},
             )
         )
+
+        # Let the caller grow the DAG before the next iteration picks
+        # up the new nodes (Option B: judge_pre / llm_call completion
+        # decides whether to spawn judge_post or an llm_call follow-up).
+        if self._post_node_hook is not None:
+            self._post_node_hook(workflow, node)
 
     async def _invoke_and_freeze(
         self,
@@ -351,15 +368,14 @@ class WorkflowEngine:
             # FAILED. The raw output_message is already on the node.
             raise RuntimeError(f"judge parse failed: {exc}") from exc
 
-        # If the verdict requires user clarification, stash a rendered
-        # prompt on the WorkFlow — the outer execute() loop will halt,
-        # and the ChatFlow engine will open a new ChatNode whose
-        # agent_response is this prompt. judge_during is monitoring-
-        # mode only in MVP (ADR-020) — it never sets this field.
+        # Option B: judge_post is the WorkFlow's universal exit gate —
+        # only it writes ``pending_user_prompt``. judge_pre's verdict
+        # is consumed by the post-node hook (set by ChatFlowEngine),
+        # which decides whether to spawn an llm_call or route straight
+        # to a halt-mode judge_post. judge_during stays monitoring-only
+        # except for the auto-mode revise budget halt below.
         verdict = node.judge_verdict
-        if node.judge_variant == JudgeVariant.PRE and judge_pre_needs_user_input(verdict):
-            workflow.pending_user_prompt = format_judge_pre_prompt(verdict)
-        elif node.judge_variant == JudgeVariant.POST and judge_post_needs_user_input(verdict):
+        if node.judge_variant == JudgeVariant.POST and judge_post_needs_user_input(verdict):
             workflow.pending_user_prompt = format_judge_post_prompt(verdict)
         elif node.judge_variant == JudgeVariant.DURING and verdict.during_verdict == "revise":
             # Monitoring mode (ADR-020) — the WorkFlow keeps running on

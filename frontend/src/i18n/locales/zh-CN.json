@@ -88,6 +88,10 @@
     "detail_error": "错误",
     "detail_tool_name": "工具名",
     "detail_tool_args": "工具参数",
+    "detail_id": "节点 ID",
+    "detail_input_messages": "输入消息",
+    "detail_output_message": "输出消息",
+    "detail_judge_verdict": "评审结论",
     "pending_user_prompt": "Agent 需要澄清",
     "judge_variant_pre": "pre",
     "judge_variant_during": "during",
@@ -96,6 +100,9 @@
     "missing_inputs": "缺失输入",
     "critiques": "评审意见",
     "issues": "问题"
+  },
+  "common": {
+    "copied": "已复制"
   },
   "conversation": {
     "panel_title": "对话",
@@ -108,17 +115,36 @@
     "cancel": "停止",
     "branch_label": "分支",
     "branch_of": "第 {{current}} / {{total}} 个分支",
-    "thinking": "思考过程"
+    "thinking": "思考过程",
+    "queue_remove": "从队列中移除"
   },
   "settings": {
     "title": "全局设置",
     "tab_canvas": "画布"
   },
+  "composer_model": {
+    "title": "本轮使用模型",
+    "kind_llm": "LLM 调用",
+    "inherit_option": "（继承上一节点）",
+    "button_label": "模型",
+    "button_inherit": "继承",
+    "hint": "本次发送会使用此模型，并保持选择直到你再次更改。"
+  },
   "chatflow_settings": {
     "title": "对话设置",
     "default_model": "默认模型",
     "default_model_hint": "本对话中的所有 LLM 调用都会使用该模型，除非节点单独指定了其他模型。",
-    "no_models_hint": "尚未配置模型。请先添加服务商，并至少将一个模型设为默认。"
+    "no_models_hint": "尚未配置模型。请先添加服务商，并至少将一个模型设为默认。",
+    "execution_mode": "执行模式",
+    "execution_mode_direct_short": "直接",
+    "execution_mode_semi_auto_short": "半自动",
+    "execution_mode_auto_short": "全自动",
+    "execution_mode_direct": "无 plan（直接 ReAct）",
+    "execution_mode_semi_auto": "Semi-auto plan（带 pre/post judge）",
+    "execution_mode_auto": "Auto plan（含 during judge，可被 budget 拦下）",
+    "execution_mode_direct_hint": "新对话轮次直接走 ReAct 循环，不生成 plan，没有 judge 节点。最快也最不可控。",
+    "execution_mode_semi_auto_hint": "先生成 plan，pre/post judge 拦住明显问题；judge 不通过会让 Agent 反过来问你。",
+    "execution_mode_auto_hint": "在 semi-auto 之上再加 during judge 持续监控；连续 revise 超过预算时停下问你。"
   },
   "canvas_prefs": {
     "show_node_id": "显示节点 ID",

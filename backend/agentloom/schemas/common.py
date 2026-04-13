@@ -165,10 +165,16 @@ class NodeBase(BaseModel):
     inputs: EditableText | None = None
     expected_outcome: EditableText | None = None
     status: NodeStatus = NodeStatus.PLANNED
-    model_override: ProviderModelRef | None = None
-    #: Model that descendants inherit (§4.10). ``None`` = inherit from
-    #: ancestors; the effective model is resolved by walking up parents.
-    next_model_override: ProviderModelRef | None = None
+    #: The model this node actually ran with, set at spawn time from the
+    #: composer's choice (if the user picked one) or inherited from the
+    #: primary parent's ``resolved_model``. Immutable after spawn — edits
+    #: to an ancestor never rewrite history. Conceptually this is the
+    #: model carried by the incoming edge (parent→this); we store it on
+    #: the child since Agentloom's DAG has no first-class edge objects.
+    #: ``None`` means "not yet resolved" (still PLANNED in certain
+    #: bootstrap paths, or pre-existing nodes from before this field
+    #: existed — UI falls back to the chatflow default).
+    resolved_model: ProviderModelRef | None = None
     locked: bool = False
     error: str | None = None
 
@@ -278,3 +284,11 @@ class JudgeVerdict(BaseModel):
     # --- judge_post ---
     post_verdict: Literal["accept", "retry", "fail"] | None = None
     issues: list[Issue] = Field(default_factory=list)
+    #: User-facing prose written by judge_post when the WorkFlow halts.
+    #: judge_post is the universal exit gate (Option B) — it decides
+    #: what the user sees regardless of whether the halt came from a
+    #: judge_pre veto, a judge_during retry-budget exhaustion, a node
+    #: error, or its own retry/fail verdict. Only meaningful when
+    #: ``post_verdict != "accept"``; for accept the terminal llm_call's
+    #: own output reaches the user untouched.
+    user_message: str | None = None

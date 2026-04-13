@@ -18,9 +18,10 @@ function stubChatNode(
     id,
     parent_ids: parents,
     description: { text: "", provenance: "unset", updated_at: created },
+    inputs: null,
     expected_outcome: null,
     status: "succeeded",
-    model_override: null,
+    resolved_model: null,
     locked: false,
     error: null,
     position_x: null,
@@ -40,16 +41,21 @@ function seedChatFlow(): ChatFlow {
   return {
     id: "chat-1",
     title: "demo",
+    description: null,
+    tags: [],
     default_model: null,
+    default_execution_mode: 'direct',
     root_ids: ["n1"],
+    created_at: "2026-04-10T00:00:00Z",
     nodes: {
       n1: {
         id: "n1",
         parent_ids: [],
         description: { text: "", provenance: "unset", updated_at: "2026-04-10T00:00:00Z" },
+        inputs: null,
         expected_outcome: null,
         status: "running",
-        model_override: null,
+        resolved_model: null,
         locked: false,
         error: null,
         position_x: null,
@@ -68,9 +74,11 @@ function seedChatFlow(): ChatFlow {
               id: "w1",
               parent_ids: [],
               description: { text: "", provenance: "unset", updated_at: "2026-04-10T00:00:00Z" },
-              expected_outcome: null,
+              inputs: null,
+        expected_outcome: null,
               status: "running",
               model_override: null,
+              resolved_model: null,
               locked: false,
               error: null,
               position_x: null,
@@ -152,6 +160,7 @@ describe("chatflowStore", () => {
       description: null,
       tags: [],
       default_model: null,
+      default_execution_mode: 'direct',
       root_ids: ["a"],
       nodes: {
         a: stubChatNode("a", []),
@@ -160,6 +169,7 @@ describe("chatflowStore", () => {
         d: stubChatNode("d", ["b"], "2026-04-10T00:00:03Z"),
         e: stubChatNode("e", ["b"], "2026-04-10T00:00:04Z"),
       },
+      created_at: "2026-04-10T00:00:00Z",
     };
     useChatFlowStore.getState().setChatFlow(chat);
     // setChatFlow auto-selects latest leaf — that's c (the latest direct child of a).
@@ -257,12 +267,14 @@ describe("chatflowStore", () => {
       description: null,
       tags: [],
       default_model: null,
+      default_execution_mode: 'direct',
       root_ids: ["a"],
       nodes: {
         a: stubChatNode("a", []),
         b: stubChatNode("b", ["a"], "2026-04-10T00:00:01Z"),
         c: stubChatNode("c", ["a"], "2026-04-10T00:00:99Z"),
       },
+      created_at: "2026-04-10T00:00:00Z",
     };
     useChatFlowStore.getState().setChatFlow(chat);
     useChatFlowStore.getState().pickBranch("a", "b");

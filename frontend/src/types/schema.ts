@@ -35,6 +35,9 @@ export type StepKind = (typeof STEP_KINDS)[number];
 
 export type JudgeVariant = "pre" | "during" | "post";
 
+export const EXECUTION_MODES = ["direct", "semi_auto", "auto"] as const;
+export type ExecutionMode = (typeof EXECUTION_MODES)[number];
+
 export interface Critique {
   issue: string;
   severity: "blocker" | "concern" | "nit";
@@ -59,6 +62,10 @@ export interface JudgeVerdict {
   // post
   post_verdict: "accept" | "retry" | "fail" | null;
   issues: Issue[];
+  // Universal exit-gate prose. Written by judge_post (Option B) when
+  // the workflow halts; the ChatFlow layer surfaces it as the agent's
+  // reply. Null on accept paths.
+  user_message: string | null;
 }
 
 export type EditProvenance = "pure_user" | "pure_agent" | "mixed" | "unset";
@@ -111,9 +118,14 @@ export interface NodeBaseFields {
   id: NodeId;
   parent_ids: NodeId[];
   description: EditableText;
+  inputs: EditableText | null;
   expected_outcome: EditableText | null;
   status: NodeStatus;
-  model_override: ProviderModelRef | null;
+  /** Snapshot of the model carried by the incoming edge (parent→this),
+   * stamped at spawn from the composer's pick or inherited from the
+   * primary parent. Immutable after spawn — edits to an ancestor never
+   * rewrite history. Null for legacy rows that predate this field. */
+  resolved_model: ProviderModelRef | null;
   locked: boolean;
   error: string | null;
   position_x: number | null;
@@ -127,6 +139,10 @@ export interface NodeBaseFields {
 export interface WorkFlowNode extends NodeBaseFields {
   step_kind: StepKind;
   tool_constraints: ToolConstraints | null;
+  /** Pin for this WorkNode's LLM call. Set by the engine at spawn time
+   * from the enclosing ChatNode's resolved_model and propagated across
+   * retries. Not user-facing. */
+  model_override: ProviderModelRef | null;
 
   // llm_call
   input_messages?: WireMessage[] | null;
@@ -168,6 +184,9 @@ export interface PendingTurn {
   source: PendingTurnSource;
   on_upstream_failure: "discard" | "continue";
   created_at: string;
+  /** Composer's model pick for the turn this PendingTurn represents.
+   * Travels with the queued turn so the choice survives the chain walk. */
+  spawn_model: ProviderModelRef | null;
 }
 
 export interface ChatFlowNode extends NodeBaseFields {
@@ -204,6 +223,7 @@ export interface ChatFlow {
   nodes: Record<NodeId, ChatFlowNode>;
   root_ids: NodeId[];
   default_model: ProviderModelRef | null;
+  default_execution_mode: ExecutionMode;
   created_at: string;
 }
 

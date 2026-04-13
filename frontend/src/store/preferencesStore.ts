@@ -7,6 +7,8 @@
 
 import { create } from "zustand";
 
+import type { ProviderModelRef } from "@/types/schema";
+
 const STORAGE_KEY = "agentloom_prefs_v1";
 
 export interface Preferences {
@@ -20,6 +22,11 @@ export interface Preferences {
   showGenTime: boolean;
   /** Show generation speed (completion_tokens / seconds). */
   showGenSpeed: boolean;
+  /** Last model the user picked in the chat composer. Sticky across
+   * turns and sessions: each new turn defaults to this until the user
+   * explicitly changes it. ``null`` falls back to inheritance from the
+   * primary parent's resolved_model. */
+  composerModel: ProviderModelRef | null;
 }
 
 const DEFAULTS: Preferences = {
@@ -28,6 +35,7 @@ const DEFAULTS: Preferences = {
   showTokens: false,
   showGenTime: false,
   showGenSpeed: false,
+  composerModel: null,
 };
 
 function load(): Preferences {
@@ -55,6 +63,7 @@ interface PreferencesStore extends Preferences {
   setShowTokens: (value: boolean) => void;
   setShowGenTime: (value: boolean) => void;
   setShowGenSpeed: (value: boolean) => void;
+  setComposerModel: (value: ProviderModelRef | null) => void;
 }
 
 export const usePreferencesStore = create<PreferencesStore>((set, get) => ({
@@ -78,5 +87,9 @@ export const usePreferencesStore = create<PreferencesStore>((set, get) => ({
   setShowGenSpeed(value) {
     set({ showGenSpeed: value });
     save({ ...get(), showGenSpeed: value });
+  },
+  setComposerModel(value) {
+    set({ composerModel: value });
+    save({ ...get(), composerModel: value });
   },
 }));

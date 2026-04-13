@@ -24,6 +24,7 @@ import { useTranslation } from "react-i18next";
 
 import { layoutDag } from "./layout";
 import { WorkFlowNodeCard, type WorkFlowNodeData } from "./nodes/WorkFlowNodeCard";
+import { api } from "@/lib/api";
 import { useChatFlowStore } from "@/store/chatflowStore";
 import type { ChatFlowNode, WorkFlowNode } from "@/types/schema";
 
@@ -35,17 +36,38 @@ export interface WorkFlowCanvasProps {
 
 export function WorkFlowCanvas({ chatNode }: WorkFlowCanvasProps) {
   const { t } = useTranslation();
+  const chatflowId = useChatFlowStore((s) => s.chatflow?.id ?? null);
   const workflowSelectedNodeId = useChatFlowStore((s) => s.workflowSelectedNodeId);
   const selectWorkflowNode = useChatFlowStore((s) => s.selectWorkflowNode);
 
   const [nodes, setNodes] = useState<Node<WorkFlowNodeData>[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const dragPositions = useRef<Record<string, { x: number; y: number }>>({});
+  const dirtyPositions = useRef<Set<string>>(new Set());
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastChatNodeId = useRef<string | null>(null);
+
+  // Mirrors ChatFlowCanvas's persistence: drag positions live in a ref
+  // (so SSE reconciliation doesn't snap them back) and a 500ms-debounced
+  // PATCH ships dirty ids to the backend.
+  const flushPositions = useCallback(() => {
+    if (!chatflowId || !chatNode || dirtyPositions.current.size === 0) return;
+    const positions = [...dirtyPositions.current]
+      .map((id) => {
+        const pos = dragPositions.current[id];
+        return pos ? { id, x: pos.x, y: pos.y } : null;
+      })
+      .filter(Boolean) as { id: string; x: number; y: number }[];
+    dirtyPositions.current.clear();
+    if (positions.length > 0) {
+      void api.patchWorkflowPositions(chatflowId, chatNode.id, positions);
+    }
+  }, [chatflowId, chatNode]);
 
   useEffect(() => {
     if (chatNode?.id !== lastChatNodeId.current) {
       dragPositions.current = {};
+      dirtyPositions.current.clear();
       lastChatNodeId.current = chatNode?.id ?? null;
     }
     const laid = buildWorkflowGraph(chatNode, workflowSelectedNodeId);
@@ -63,10 +85,16 @@ export function WorkFlowCanvas({ chatNode }: WorkFlowCanvasProps) {
     for (const c of filtered) {
       if (c.type === "position" && c.position) {
         dragPositions.current[c.id] = c.position;
+        dirtyPositions.current.add(c.id);
       }
     }
     setNodes((ns) => applyNodeChanges(filtered, ns) as Node<WorkFlowNodeData>[]);
-  }, []);
+
+    if (dirtyPositions.current.size > 0) {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(flushPositions, 500);
+    }
+  }, [flushPositions]);
 
   const handleNodeClick: NodeMouseHandler = (_event, node) => {
     selectWorkflowNode(node.id);
@@ -94,21 +122,8 @@ export function WorkFlowCanvas({ chatNode }: WorkFlowCanvasProps) {
     );
   }
 
-  const pendingPrompt = chatNode.workflow.pending_user_prompt;
-
   return (
     <div data-testid="workflow-canvas" className="relative h-full w-full">
-      {pendingPrompt && (
-        <div
-          data-testid="workflow-pending-banner"
-          className="absolute left-3 right-3 top-3 z-10 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-[12px] text-amber-900 shadow-sm"
-        >
-          <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
-            {t("workflow.pending_user_prompt")}
-          </div>
-          <div className="whitespace-pre-wrap break-words">{pendingPrompt}</div>
-        </div>
-      )}
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -146,18 +161,24 @@ export function buildWorkflowGraph(
   for (const n of Object.values(wf.nodes)) {
     for (const pid of n.parent_ids) hasChild.add(pid);
   }
-  const rfNodes: Node<WorkFlowNodeData>[] = laidOut.map(({ node, position }) => ({
-    id: node.id,
-    type: "workflow",
-    position,
-    data: {
-      node,
-      isSelected: node.id === selectedNodeId,
-      isRoot: rootSet.has(node.id),
-      isLeaf: !hasChild.has(node.id),
-    },
-    selectable: false,
-  }));
+  const rfNodes: Node<WorkFlowNodeData>[] = laidOut.map(({ node, position }) => {
+    const pos =
+      node.position_x != null && node.position_y != null
+        ? { x: node.position_x, y: node.position_y }
+        : position;
+    return {
+      id: node.id,
+      type: "workflow",
+      position: pos,
+      data: {
+        node,
+        isSelected: node.id === selectedNodeId,
+        isRoot: rootSet.has(node.id),
+        isLeaf: !hasChild.has(node.id),
+      },
+      selectable: false,
+    };
+  });
   const rfEdges: Edge[] = [];
   for (const { node } of laidOut) {
     for (const parentId of node.parent_ids) {

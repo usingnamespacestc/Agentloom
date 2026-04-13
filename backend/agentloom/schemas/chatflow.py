@@ -69,6 +69,11 @@ class PendingTurn(BaseModel):
     source_metadata: dict[str, Any] = Field(default_factory=dict)
     on_upstream_failure: UpstreamFailurePolicy = "discard"
     created_at: datetime = Field(default_factory=utcnow)
+    #: Model the user picked in the composer when this turn was queued.
+    #: ``None`` → the child inherits from its primary parent's
+    #: ``resolved_model``. Travels with the PendingTurn so a queued turn
+    #: keeps its model choice even as the tip advances down the chain.
+    spawn_model: ProviderModelRef | None = None
 
 
 class ChatFlowNode(NodeBase):

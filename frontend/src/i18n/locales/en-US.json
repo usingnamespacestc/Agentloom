@@ -88,6 +88,10 @@
     "detail_error": "Error",
     "detail_tool_name": "Tool",
     "detail_tool_args": "Arguments",
+    "detail_id": "Node ID",
+    "detail_input_messages": "Input messages",
+    "detail_output_message": "Output message",
+    "detail_judge_verdict": "Judge verdict",
     "pending_user_prompt": "Agent needs clarification",
     "judge_variant_pre": "pre",
     "judge_variant_during": "during",
@@ -96,6 +100,9 @@
     "missing_inputs": "Missing inputs",
     "critiques": "Critiques",
     "issues": "Issues"
+  },
+  "common": {
+    "copied": "Copied"
   },
   "conversation": {
     "panel_title": "Conversation",
@@ -108,17 +115,36 @@
     "cancel": "Stop",
     "branch_label": "Branch",
     "branch_of": "Branch {{current}} of {{total}}",
-    "thinking": "Thinking"
+    "thinking": "Thinking",
+    "queue_remove": "Remove from queue"
   },
   "settings": {
     "title": "Global settings",
     "tab_canvas": "Canvas"
   },
+  "composer_model": {
+    "title": "Model for this turn",
+    "kind_llm": "LLM call",
+    "inherit_option": "(inherit from previous node)",
+    "button_label": "Model",
+    "button_inherit": "Inherit",
+    "hint": "This model is used for this turn and is remembered until you change it again."
+  },
   "chatflow_settings": {
     "title": "ChatFlow settings",
     "default_model": "Default model",
     "default_model_hint": "Used for every LLM call in this chatflow unless a node overrides it.",
-    "no_models_hint": "No models configured yet. Add a provider and pin at least one model first."
+    "no_models_hint": "No models configured yet. Add a provider and pin at least one model first.",
+    "execution_mode": "Execution mode",
+    "execution_mode_direct_short": "Direct",
+    "execution_mode_semi_auto_short": "Semi",
+    "execution_mode_auto_short": "Auto",
+    "execution_mode_direct": "No plan (direct ReAct)",
+    "execution_mode_semi_auto": "Semi-auto plan (with pre/post judge)",
+    "execution_mode_auto": "Auto plan (with during judge, halts on budget)",
+    "execution_mode_direct_hint": "New turns go straight to the ReAct loop. No plan, no judges. Fastest, least controlled.",
+    "execution_mode_semi_auto_hint": "Plan first, with pre/post judges to catch obvious issues. A failing judge bounces back to ask you.",
+    "execution_mode_auto_hint": "Adds the during judge on top of semi-auto. Halts and asks you when revise exceeds budget."
   },
   "canvas_prefs": {
     "show_node_id": "Show node ID",

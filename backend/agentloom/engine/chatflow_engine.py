@@ -45,7 +45,8 @@ from typing import Any
 
 from agentloom.channels.base import ExternalTurn
 from agentloom.engine.events import EventBus, WorkflowEvent
-from agentloom.engine.workflow_engine import ProviderCall, WorkflowEngine
+from agentloom.engine.workflow_engine import PostNodeHook, ProviderCall, WorkflowEngine
+from agentloom.schemas.common import JudgeVariant, JudgeVerdict
 from agentloom.schemas import (
     ChatFlow,
     ChatFlowNode,
@@ -58,14 +59,43 @@ from agentloom.schemas.chatflow import PendingTurnSource, UpstreamFailurePolicy
 from agentloom.schemas.common import (
     EditableText,
     ExecutionMode,
-    JudgeVariant,
     NodeStatus,
+    ProviderModelRef,
     utcnow,
 )
 from agentloom.schemas.workflow import WireMessage
+from agentloom.templates.instantiate import instantiate_fixture
+from agentloom.templates.loader import fragments_as_texts, load_fixtures
 from agentloom.tools.base import ToolContext, ToolRegistry
 
 log = logging.getLogger(__name__)
+
+def _chat_inherited_model(
+    chatflow: ChatFlow,
+    parent_ids: list[str],
+) -> ProviderModelRef | None:
+    """Return the model a new child should inherit when its spawning
+    turn didn't specify one — i.e. the primary parent's already-snapshot
+    ``resolved_model``, or the chatflow default if we're bootstrapping.
+
+    Since resolved_model is immutable after spawn (§4.10 rework), the
+    walk degenerates to a single lookup on ``parents[0]``; we keep the
+    defensive multi-hop walk for the edge case where a transitional
+    node might still be missing its snapshot (old DB rows predating
+    this field).
+    """
+    seen: set[str] = set()
+    cursor = parent_ids[0] if parent_ids else None
+    while cursor is not None and cursor not in seen:
+        seen.add(cursor)
+        ancestor = chatflow.nodes.get(cursor)
+        if ancestor is None:
+            break
+        if ancestor.resolved_model is not None:
+            return ancestor.resolved_model
+        cursor = ancestor.parent_ids[0] if ancestor.parent_ids else None
+    return chatflow.default_model
+
 
 #: Optional persistence hook. When supplied, the engine calls it with
 #: the mutated ChatFlow after every state change (turn completion,
@@ -194,6 +224,18 @@ class ChatFlowEngine:
         self._runtimes: dict[str, ChatFlowRuntime] = {}
         self._registry_lock = asyncio.Lock()
 
+        # Load builtin workflow templates from disk (sync). The engine
+        # uses these to materialize judge_pre / judge_post inside
+        # ``_spawn_turn_node`` without needing an AsyncSession. Per the
+        # judge-params pragma memory, the params we feed are naive
+        # stock strings until NodeBaseFields gains a real ``inputs``
+        # field; revisit then.
+        templates, fragments = load_fixtures()
+        self._fixture_plans: dict[str, dict[str, Any]] = {
+            fx.builtin_id: fx.plan for fx in templates
+        }
+        self._fixture_includes: dict[str, str] = fragments_as_texts(fragments)
+
     # ------------------------------------------------------------------ registry
 
     async def attach(self, chatflow: ChatFlow) -> ChatFlowRuntime:
@@ -231,6 +273,7 @@ class ChatFlowEngine:
         source: PendingTurnSource = "test",
         source_metadata: dict[str, Any] | None = None,
         on_upstream_failure: UpstreamFailurePolicy = "discard",
+        spawn_model: ProviderModelRef | None = None,
     ) -> ChatFlowNode:
         """Submit a user turn and wait until its node finishes.
 
@@ -250,6 +293,7 @@ class ChatFlowEngine:
             source=source,
             source_metadata=source_metadata or {},
             on_upstream_failure=on_upstream_failure,
+            spawn_model=spawn_model,
         )
         future: asyncio.Future[ChatFlowNode] = asyncio.get_running_loop().create_future()
 
@@ -289,6 +333,7 @@ class ChatFlowEngine:
         source: PendingTurnSource = "web",
         source_metadata: dict[str, Any] | None = None,
         on_upstream_failure: UpstreamFailurePolicy = "discard",
+        spawn_model: ProviderModelRef | None = None,
     ) -> PendingTurn:
         """Append a PendingTurn to the live tip of the chain rooted
         at ``node_id``.
@@ -307,6 +352,7 @@ class ChatFlowEngine:
             source=source,
             source_metadata=source_metadata or {},
             on_upstream_failure=on_upstream_failure,
+            spawn_model=spawn_model,
         )
         async with runtime.lock:
             if node_id not in runtime.chatflow.nodes:
@@ -580,6 +626,7 @@ class ChatFlowEngine:
                 parent_ids=[parent_id],
                 user_message_text=pending.text,
                 pending_queue=[],
+                spawn_model=pending.spawn_model,
             )
             await self._publish_node_created(runtime, node.id)
             self._launch_execute(
@@ -596,6 +643,7 @@ class ChatFlowEngine:
                 parent_ids=[],
                 user_message_text=pending.text,
                 pending_queue=[],
+                spawn_model=pending.spawn_model,
             )
             await self._publish_node_created(runtime, node.id)
             self._launch_execute(
@@ -640,6 +688,7 @@ class ChatFlowEngine:
             parent_ids=[node_id],
             user_message_text=pending.text,
             pending_queue=tail,
+            spawn_model=pending.spawn_model,
         )
         await self._publish_node_created(runtime, child.id)
         await self._publish_queue_updated(runtime, node_id)
@@ -653,6 +702,7 @@ class ChatFlowEngine:
         parent_ids: list[str],
         user_message_text: str,
         pending_queue: list[PendingTurn],
+        spawn_model: ProviderModelRef | None = None,
     ) -> ChatFlowNode:
         """Create a PLANNED ChatFlowNode and attach it to the chatflow.
 
@@ -660,16 +710,30 @@ class ChatFlowEngine:
 
         - ``direct``: single ``llm_call`` whose ``input_messages`` is the
           built conversation context + new user turn.
-        - ``semi_auto`` / ``auto``: optional ``judge_pre`` root → ``llm_call``
-          → optional ``judge_post`` chain. The judge_pre halts the
-          WorkFlow via ``pending_user_prompt`` (wired in M10.3) if it
-          says the task needs user clarification; otherwise the llm_call
-          produces the answer and judge_post reviews it. Plan phase and
-          judge_during are handled in later milestones (M10.2b/M10.4).
+        - ``semi_auto`` / ``auto``: only ``judge_pre`` is spawned upfront.
+          Option B (universal-exit-gate): the ``llm_call`` and
+          ``judge_post`` are spawned dynamically by the post-node hook
+          built in :meth:`_build_post_node_hook` based on judge_pre's
+          verdict. This keeps the visible DAG honest — no orphan dashed
+          nodes hanging around when judge_pre vetoes — and lets
+          judge_post own all user-facing prose regardless of which
+          path halted.
         """
         chatflow = runtime.chatflow
         context_wire = _build_chat_context(chatflow, parent_ids)
         context_wire.append(WireMessage(role="user", content=user_message_text))
+
+        # Pin this node's model. If the composer explicitly chose one
+        # (``spawn_model``), honor it; otherwise inherit from the primary
+        # parent's already-snapshotted ``resolved_model`` (or chatflow
+        # default when bootstrapping). The result is stamped on the
+        # ChatNode and propagated into its inner WorkFlow's LLM call
+        # so chat-level model selection flows end-to-end.
+        resolved = (
+            spawn_model
+            if spawn_model is not None
+            else _chat_inherited_model(chatflow, parent_ids)
+        )
 
         mode = chatflow.default_execution_mode
         switches = derive_switches_from_mode(mode)
@@ -681,33 +745,17 @@ class ChatFlowEngine:
             judge_post_enabled=switches.judge_post,
         )
 
-        parent_for_llm: list[str] = []
         if switches.judge_pre:
-            pre = inner.add_node(
-                WorkFlowNode(
-                    step_kind=StepKind.JUDGE_CALL,
-                    judge_variant=JudgeVariant.PRE,
-                    input_messages=list(context_wire),
-                )
-            )
-            parent_for_llm = [pre.id]
-
-        llm = inner.add_node(
-            WorkFlowNode(
-                step_kind=StepKind.LLM_CALL,
-                parent_ids=parent_for_llm,
-                input_messages=list(context_wire),
-                model_override=chatflow.default_model,
-            )
-        )
-
-        if switches.judge_post:
+            # Only the pre-judge runs upfront; the rest of the chain is
+            # spawned dynamically once we know the verdict.
+            self._spawn_judge_pre(inner, user_message_text, context_wire)
+        else:
             inner.add_node(
                 WorkFlowNode(
-                    step_kind=StepKind.JUDGE_CALL,
-                    judge_variant=JudgeVariant.POST,
-                    parent_ids=[llm.id],
-                    judge_target_id=llm.id,
+                    step_kind=StepKind.LLM_CALL,
+                    parent_ids=[],
+                    input_messages=list(context_wire),
+                    model_override=resolved,
                 )
             )
 
@@ -716,9 +764,202 @@ class ChatFlowEngine:
             user_message=EditableText.by_user(user_message_text),
             workflow=inner,
             pending_queue=list(pending_queue),
+            resolved_model=resolved,
         )
         chatflow.add_node(chat_node)
         return chat_node
+
+    # ------------------------------------------------------------- judge spawns
+    #
+    # Both helpers materialize the corresponding builtin template into a
+    # standalone WorkFlow, lift its single judge_call node into the inner
+    # WorkFlow, then append the real conversation context after the
+    # template-rendered system+user pair so the judge sees the actual
+    # exchange — not just the trio.
+    #
+    # Per the judge-params pragma memory: we feed naive stock strings
+    # for ``inputs`` and ``expected_outcome`` because NodeBaseFields
+    # doesn't yet carry them as first-class fields. When the schema
+    # rework lands, switch to the real values.
+
+    def _spawn_judge_pre(
+        self,
+        inner: WorkFlow,
+        user_message_text: str,
+        context_wire: list[WireMessage],
+    ) -> WorkFlowNode:
+        templated = instantiate_fixture(
+            self._fixture_plans["judge_pre"],
+            {
+                "description": user_message_text,
+                "inputs": "(prior conversation context — see messages below)",
+                "expected_outcome": (
+                    "Helpful, accurate response to the user's request"
+                ),
+            },
+            includes=self._fixture_includes,
+        )
+        node = _single_node(templated)
+        node.parent_ids = []
+        node.input_messages = [*(node.input_messages or []), *context_wire]
+        return inner.add_node(node)
+
+    def _spawn_judge_post(
+        self,
+        inner: WorkFlow,
+        *,
+        user_message_text: str,
+        context_wire: list[WireMessage],
+        parent_node: WorkFlowNode,
+        upstream_kind: str,
+        upstream_summary: str,
+        worknode_catalog: str,
+    ) -> WorkFlowNode:
+        """Materialize the universal-exit-gate judge_post.
+
+        ``parent_node`` is whichever node we're routing into judge_post:
+        a terminal llm_call on the happy path, or judge_pre / a future
+        judge_during on a halt path. ``upstream_kind`` and
+        ``upstream_summary`` give the judge enough context to write the
+        user-facing message in its own voice — see judge_post.yaml.
+        """
+        templated = instantiate_fixture(
+            self._fixture_plans["judge_post"],
+            {
+                "workflow_description": user_message_text,
+                "workflow_inputs": (
+                    "(prior conversation context — see messages below)"
+                ),
+                "workflow_expected_outcome": (
+                    "Helpful, accurate response to the user's request"
+                ),
+                "upstream_kind": upstream_kind,
+                "upstream_summary": upstream_summary,
+                "worknode_catalog": worknode_catalog,
+            },
+            includes=self._fixture_includes,
+        )
+        node = _single_node(templated)
+        node.parent_ids = [parent_node.id]
+        node.judge_target_id = parent_node.id
+        node.input_messages = [*(node.input_messages or []), *context_wire]
+        return inner.add_node(node)
+
+    def _build_post_node_hook(
+        self,
+        chat_node: ChatFlowNode,
+        chatflow: ChatFlow,
+    ) -> "PostNodeHook":
+        """Closure that grows the inner DAG dynamically.
+
+        Fired by ``WorkflowEngine`` after every node success. We only
+        act on (a) judge_pre completion — decide between the happy path
+        (spawn an llm_call) or the halt path (spawn judge_post directly),
+        and (b) terminal llm_call completion — when judge_post is
+        enabled and the llm_call has no pending tool_uses, attach
+        judge_post for the post-mortem.
+        """
+        switches = derive_switches_from_mode(chat_node.workflow.execution_mode)
+        user_message_text = (
+            chat_node.user_message.text if chat_node.user_message else ""
+        )
+        # context_wire is the same shape we'd build at spawn time —
+        # rebuild it here so the hook stays a pure closure over chat_node.
+        context_wire = _build_chat_context(chatflow, list(chat_node.parent_ids))
+        context_wire.append(WireMessage(role="user", content=user_message_text))
+
+        def hook(workflow: WorkFlow, node: WorkFlowNode) -> None:
+            if node.step_kind == StepKind.JUDGE_CALL:
+                if node.judge_variant == JudgeVariant.PRE:
+                    self._after_judge_pre(
+                        workflow,
+                        node,
+                        user_message_text=user_message_text,
+                        context_wire=context_wire,
+                        chatflow=chatflow,
+                        switches=switches,
+                        resolved_model=chat_node.resolved_model,
+                    )
+                # judge_post halt → pending_user_prompt is set inside
+                # WorkflowEngine._run_judge_call; nothing to do here.
+                # judge_during is not in scope yet (M10.4).
+                return
+            if node.step_kind == StepKind.LLM_CALL and switches.judge_post:
+                # Only attach judge_post when this llm_call is terminal —
+                # i.e. it didn't request more tools. The tool-loop helper
+                # already spawned a follow-up llm_call when there were
+                # pending tool_uses; that follow-up will fire this hook
+                # again and we'll evaluate freshness then.
+                if node.output_message and node.output_message.tool_uses:
+                    return
+                self._spawn_judge_post(
+                    workflow,
+                    user_message_text=user_message_text,
+                    context_wire=context_wire,
+                    parent_node=node,
+                    upstream_kind="completed",
+                    upstream_summary=(
+                        node.output_message.content if node.output_message else ""
+                    ),
+                    worknode_catalog=(
+                        f"{node.id}: terminal llm_call producing the agent's reply"
+                    ),
+                )
+
+        return hook
+
+    def _after_judge_pre(
+        self,
+        workflow: WorkFlow,
+        judge_pre_node: WorkFlowNode,
+        *,
+        user_message_text: str,
+        context_wire: list[WireMessage],
+        chatflow: ChatFlow,
+        switches: ExecutionSwitches,
+        resolved_model: ProviderModelRef | None,
+    ) -> None:
+        """Branch on judge_pre's verdict: happy path spawns an llm_call,
+        halt path goes straight to judge_post in halt-summary mode."""
+        verdict = judge_pre_node.judge_verdict
+        halt = verdict is None or _judge_pre_should_halt(verdict)
+
+        if halt:
+            if not switches.judge_post:
+                # Auto/semi_auto without judge_post is unusual but
+                # possible if the user toggled it off — fall back to the
+                # legacy formatter so the user still gets a clarifying
+                # prompt. Preserves behavior even on weird mode mixes.
+                from agentloom.engine.judge_formatter import format_judge_pre_prompt
+                if verdict is not None:
+                    workflow.pending_user_prompt = format_judge_pre_prompt(verdict)
+                return
+            self._spawn_judge_post(
+                workflow,
+                user_message_text=user_message_text,
+                context_wire=context_wire,
+                parent_node=judge_pre_node,
+                upstream_kind="judge_pre_halt",
+                upstream_summary=_render_judge_pre_halt(verdict)
+                if verdict is not None
+                else "(judge_pre returned no parseable verdict)",
+                worknode_catalog=(
+                    f"{judge_pre_node.id}: judge_pre that vetoed the run"
+                ),
+            )
+            return
+
+        # Happy path: judge_pre cleared the run. Spawn the llm_call;
+        # the post-node hook will attach judge_post once it completes
+        # (and any tool loop has terminated).
+        workflow.add_node(
+            WorkFlowNode(
+                step_kind=StepKind.LLM_CALL,
+                parent_ids=[judge_pre_node.id],
+                input_messages=list(context_wire),
+                model_override=resolved_model,
+            )
+        )
 
     def _launch_execute(
         self,
@@ -796,16 +1037,26 @@ class ChatFlowEngine:
                 chat_node.workflow,
                 chatflow_tool_loop_budget=chatflow.tool_loop_budget,
                 chatflow_auto_mode_revise_budget=chatflow.auto_mode_revise_budget,
+                post_node_hook=self._build_post_node_hook(chat_node, chatflow),
             )
         except Exception as exc:  # noqa: BLE001 — engine boundary
             log.exception("chat node %s inner workflow raised", node_id)
             runtime_error = f"{type(exc).__name__}: {exc}"
         finally:
-            # Stop the relay — inner workflow is done (either
-            # succeeded or raised). Close the inner subscription
-            # so the relay task terminates cleanly.
+            # Inner workflow is done (succeeded or raised). Signal
+            # end-of-stream via close() — the relay's ``async for``
+            # sees the None sentinel and returns naturally — then
+            # await the task so queued events finish forwarding
+            # before we tear down. cancel() here would race the
+            # relay and silently drop the tail of the stream; under
+            # Option B's dynamic spawning, judge_post's node events
+            # land right at execute()'s end, so a cancel() would
+            # deterministically lose them.
             await self._bus.close(inner_wf_id)
-            relay_task.cancel()
+            try:
+                await relay_task
+            except Exception:
+                pass
 
         async with runtime.lock:
             chat_node = chatflow.get(node_id)
@@ -996,6 +1247,46 @@ class ChatFlowEngine:
             log.exception(
                 "chatflow save callback failed for %s", runtime.chatflow.id
             )
+
+
+def _judge_pre_should_halt(verdict: JudgeVerdict) -> bool:
+    """Mirror of :func:`judge_pre_needs_user_input` — re-implemented here
+    to keep ``chatflow_engine`` independent of the formatter module."""
+    if verdict.feasibility != "ok":
+        return True
+    if verdict.missing_inputs:
+        return True
+    return bool(verdict.blockers)
+
+
+def _render_judge_pre_halt(verdict: JudgeVerdict) -> str:
+    """Compact human-readable summary of a judge_pre veto, fed into
+    judge_post as the ``upstream_summary``. Lets judge_post quote the
+    specifics back to the user without re-running the analysis."""
+    parts: list[str] = []
+    if verdict.feasibility:
+        parts.append(f"Feasibility: {verdict.feasibility}")
+    if verdict.blockers:
+        parts.append("Blockers:")
+        parts.extend(f"  - {b}" for b in verdict.blockers)
+    if verdict.missing_inputs:
+        parts.append("Missing inputs:")
+        parts.extend(f"  - {m}" for m in verdict.missing_inputs)
+    return "\n".join(parts) if parts else "(empty verdict)"
+
+
+def _single_node(workflow: WorkFlow) -> WorkFlowNode:
+    """Pluck the single node out of a freshly-instantiated judge template.
+
+    Both ``judge_pre`` and ``judge_post`` fixtures define exactly one
+    judge_call node. We don't keep the surrounding WorkFlow shell — the
+    inner WorkFlow already exists.
+    """
+    if len(workflow.nodes) != 1:
+        raise ValueError(
+            f"expected single-node template, got {len(workflow.nodes)} nodes"
+        )
+    return next(iter(workflow.nodes.values()))
 
 
 def _terminal_llm_call(workflow: WorkFlow) -> WorkFlowNode | None:

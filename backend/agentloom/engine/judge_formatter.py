@@ -108,7 +108,16 @@ def format_revise_budget_halt_prompt(
 def format_judge_post_prompt(verdict: JudgeVerdict) -> str:
     """Compose a check-in for the user from a judge_post verdict.
     Used when the post pass returns retry/fail and the agent needs the
-    user to decide next steps."""
+    user to decide next steps.
+
+    Option B (judge_post is the universal exit gate): the judge itself
+    writes ``user_message`` in its own voice — when present we return
+    it verbatim. The structured fallback below only fires for verdicts
+    whose ``user_message`` is missing (legacy callers, or a model that
+    didn't fill the field)."""
+    if verdict.user_message:
+        return verdict.user_message
+
     lines: list[str] = []
 
     if verdict.post_verdict == "fail":

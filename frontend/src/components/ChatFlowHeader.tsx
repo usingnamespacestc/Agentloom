@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ChatFlowSettings } from "@/components/ChatFlowSettings";
+import { ExecutionModeSlider } from "@/components/ExecutionModeSlider";
 import { Settings } from "@/components/Settings";
 import { chatflowDisplayTitle } from "@/lib/chatflowLabel";
 import { useChatFlowStore } from "@/store/chatflowStore";
@@ -56,7 +57,7 @@ export function ChatFlowHeader() {
               title={chatflow.id}
               className="flex-shrink-0 font-mono text-[10px] text-gray-400 hover:text-blue-500"
             >
-              {copied ? "copied!" : chatflow.id}
+              {copied ? t("common.copied") : chatflow.id}
             </button>
           )}
         </div>
@@ -72,8 +73,9 @@ export function ChatFlowHeader() {
         />
       </div>
 
-      {/* Right: chatflow settings + global settings + language toggle */}
+      {/* Right: execution mode slider + chatflow settings + global settings + language toggle */}
       <div className="flex items-center gap-2">
+        <ExecutionModeSlider />
         <ChatFlowSettingsButton
           onClick={() => setChatFlowSettingsOpen(true)}
           title={t("chatflow_settings.title")}

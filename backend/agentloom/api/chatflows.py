@@ -46,7 +46,7 @@ from agentloom.engine.chatflow_engine import (
 from agentloom.engine.events import get_event_bus
 from agentloom.schemas import ChatFlow, PendingTurn, make_chatflow
 from agentloom.schemas.chatflow import PendingTurnSource
-from agentloom.schemas.common import FrozenNodeError, ProviderModelRef
+from agentloom.schemas.common import ExecutionMode, FrozenNodeError, ProviderModelRef
 from agentloom.tools import default_registry
 from agentloom.tools.base import ToolContext
 
@@ -147,6 +147,9 @@ class CreateChatFlowResponse(BaseModel):
 class SubmitTurnRequest(BaseModel):
     text: str
     parent_id: str | None = None
+    #: Composer's model pick for this turn. ``None`` → the spawned
+    #: ChatNode inherits from its primary parent's ``resolved_model``.
+    spawn_model: ProviderModelRef | None = None
 
 
 class SubmitTurnResponse(BaseModel):
@@ -158,6 +161,7 @@ class SubmitTurnResponse(BaseModel):
 class EnqueueRequest(BaseModel):
     text: str
     source: PendingTurnSource = "web"
+    spawn_model: ProviderModelRef | None = None
 
 
 class PendingTurnPayload(BaseModel):
@@ -273,6 +277,7 @@ class PatchChatFlowRequest(BaseModel):
     description: str | None = None
     tags: list[str] | None = None
     default_model: ProviderModelRef | None = None
+    default_execution_mode: ExecutionMode | None = None
 
 
 @router.patch("/{chatflow_id}")
@@ -293,6 +298,8 @@ async def patch_chatflow(
         kwargs["tags"] = body.tags
     if "default_model" in provided:
         kwargs["default_model"] = body.default_model
+    if "default_execution_mode" in provided:
+        kwargs["default_execution_mode"] = body.default_execution_mode
     if not kwargs:
         return {"ok": True}
     try:
@@ -315,6 +322,8 @@ async def patch_chatflow(
             rt_chat.tags = body.tags or []
         if "default_model" in provided:
             rt_chat.default_model = body.default_model
+        if "default_execution_mode" in provided and body.default_execution_mode is not None:
+            rt_chat.default_execution_mode = body.default_execution_mode
 
     return {"ok": True}
 
@@ -358,6 +367,34 @@ async def patch_positions(
     return {"ok": True}
 
 
+@router.patch("/{chatflow_id}/nodes/{chat_node_id}/workflow/positions")
+async def patch_workflow_positions(
+    chatflow_id: str,
+    chat_node_id: str,
+    body: PatchPositionsRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Persist user-dragged positions for WorkNodes inside a ChatNode's
+    inner WorkFlow. Mirrors :func:`patch_positions` but scopes the lookup
+    to the named inner WorkFlow."""
+    engine = _get_engine(request)
+    repo = _repo(session)
+    chat = await _attached_chatflow(engine, repo, chatflow_id)
+    chat_node = chat.nodes.get(chat_node_id)
+    if chat_node is None:
+        raise HTTPException(404, f"chat node {chat_node_id} not found")
+    inner = chat_node.workflow.nodes
+    for pos in body.positions:
+        node = inner.get(pos.id)
+        if node is not None:
+            node.position_x = pos.x
+            node.position_y = pos.y
+    await repo.save(chat)
+    await session.commit()
+    return {"ok": True}
+
+
 @router.post("/{chatflow_id}/turns", response_model=SubmitTurnResponse)
 async def submit_turn(
     chatflow_id: str,
@@ -371,7 +408,7 @@ async def submit_turn(
 
     try:
         chat_node = await engine.submit_user_turn(
-            chat, body.text, parent_id=body.parent_id
+            chat, body.text, parent_id=body.parent_id, spawn_model=body.spawn_model
         )
     except KeyError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -404,7 +441,7 @@ async def enqueue_queue_item(
     if node_id not in chat.nodes:
         raise HTTPException(404, f"node {node_id} not in chatflow {chatflow_id}")
     pending = await engine.enqueue(
-        chat.id, node_id, body.text, source=body.source
+        chat.id, node_id, body.text, source=body.source, spawn_model=body.spawn_model
     )
     await repo.save(chat)
     await session.commit()

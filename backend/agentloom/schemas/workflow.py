@@ -19,6 +19,7 @@ from agentloom.schemas.common import (
     NodeBase,
     NodeHasReferencesError,
     NodeId,
+    ProviderModelRef,
     StepKind,
     TokenUsage,
     ToolConstraints,
@@ -49,6 +50,12 @@ class WorkFlowNode(NodeBase):
 
     step_kind: StepKind
     tool_constraints: ToolConstraints | None = None
+    #: Pin for the model this specific WorkNode's LLM call uses. Set by
+    #: the engine at spawn time (from the enclosing ChatNode's
+    #: ``resolved_model``) and propagated across retries/tool-call
+    #: follow-ups. Not user-facing — ChatFlow-level model selection
+    #: happens in the composer (§4.10 rework).
+    model_override: ProviderModelRef | None = None
 
     # --- Keyframe flags (§3.4.2 / §4.9) — meaningful only while dashed ---
     is_keyframe: bool = False

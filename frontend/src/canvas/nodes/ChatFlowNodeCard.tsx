@@ -48,7 +48,14 @@ function truncate(text: string, n = TRUNCATE): string {
 
 export function ChatFlowNodeCard({ data }: NodeProps) {
   const { t } = useTranslation();
-  const { node, isSelected, canDelete, isLeaf, isRoot, contextTokens } = data as ChatFlowNodeData;
+  const {
+    node,
+    isSelected,
+    canDelete,
+    isLeaf,
+    isRoot,
+    contextTokens,
+  } = data as ChatFlowNodeData;
   const isMerge = node.parent_ids.length >= 2;
   const isGreetingRoot = node.user_message === null;
   const hasWorkflow = Object.keys(node.workflow.nodes).length > 0;
@@ -194,7 +201,7 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
   );
 }
 
-function TokenBar({ tokens }: { tokens: number }) {
+export function TokenBar({ tokens }: { tokens: number }) {
   const pct = Math.min(100, (tokens / DEFAULT_MAX_CONTEXT_TOKENS) * 100);
   const color =
     pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-yellow-400" : "bg-blue-400";

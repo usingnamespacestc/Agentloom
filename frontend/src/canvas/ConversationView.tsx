@@ -36,12 +36,16 @@ import {
   useChatFlowStore,
 } from "@/store/chatflowStore";
 import { usePreferencesStore } from "@/store/preferencesStore";
+import { api } from "@/lib/api";
+import type { ProviderSummary } from "@/lib/api";
 import type {
   ChatFlow,
   ChatFlowNode,
   NodeId,
   PendingTurn,
+  ProviderModelRef,
   TokenUsage,
+  WireMessage,
   WorkFlowNode,
 } from "@/types/schema";
 
@@ -137,6 +141,7 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
   const deleteQueueItem = useChatFlowStore((s) => s.deleteQueueItem);
   const cancelNode = useChatFlowStore((s) => s.cancelNode);
 
+  const composerModel = usePreferencesStore((s) => s.composerModel);
   const [inputText, setInputText] = useState("");
   const [sending, setSending] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -176,11 +181,11 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
       // Always send relative to the selected node (the path endpoint).
       // If the selected node is a non-leaf, this creates a fork — a
       // new branch off that node, not an append to the latest leaf.
-      await sendTurn(text, selectedNodeId ?? undefined);
+      await sendTurn(text, selectedNodeId ?? undefined, composerModel);
     } finally {
       setSending(false);
     }
-  }, [inputText, sending, sendTurn, selectedNodeId]);
+  }, [inputText, sending, sendTurn, selectedNodeId, composerModel]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -295,6 +300,10 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
           </div>
         )}
 
+        <div className="mb-1.5">
+          <ComposerModelPicker />
+        </div>
+
         <div className="flex gap-2">
           <textarea
             rows={2}
@@ -317,6 +326,149 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
         </div>
       </footer>
     </>
+  );
+}
+
+// ---------------------------------------------------------------- ComposerModelPicker
+//
+// Per-turn model selector. Sticky: once you pick a model it persists across
+// turns and sessions (lives in `usePreferencesStore.composerModel`) until you
+// change it again. The composer's choice flows down as the PendingTurn's
+// `spawn_model`, which the engine snapshots onto the spawned ChatNode's
+// `resolved_model`. `null` = inherit from the primary parent's resolved_model
+// (or fall back to chatflow.default_model at the root).
+//
+// The picker is keyed by ModelKind so future kinds (judge / tool_call) can
+// add their own sections. Today only `llm` exists, so the popup has one
+// section.
+
+type ComposerKind = "llm";
+const COMPOSER_KINDS: ComposerKind[] = ["llm"];
+
+function refKey(ref: ProviderModelRef | null): string {
+  return ref ? `${ref.provider_id}::${ref.model_id}` : "";
+}
+
+function parseRefKey(key: string): ProviderModelRef | null {
+  if (!key) return null;
+  const [provider_id, ...rest] = key.split("::");
+  return { provider_id, model_id: rest.join("::") };
+}
+
+function ComposerModelPicker() {
+  const { t } = useTranslation();
+  const composerModel = usePreferencesStore((s) => s.composerModel);
+  const setComposerModel = usePreferencesStore((s) => s.setComposerModel);
+  const [open, setOpen] = useState(false);
+  const [providers, setProviders] = useState<ProviderSummary[]>([]);
+  const popupRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void api
+      .listProviders()
+      .then((list) => {
+        if (!cancelled) setProviders(list);
+      })
+      .catch(() => {
+        // ignore — picker just shows empty list
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  // Close on outside click.
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (popupRef.current?.contains(target)) return;
+      if (buttonRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    window.addEventListener("mousedown", onClick);
+    return () => window.removeEventListener("mousedown", onClick);
+  }, [open]);
+
+  const modelOptions = useMemo(() => {
+    const out: Array<{ key: string; label: string; pinned: boolean }> = [];
+    for (const p of providers) {
+      for (const m of p.available_models) {
+        out.push({
+          key: `${p.id}::${m.id}`,
+          label: `${p.friendly_name} / ${m.id}`,
+          pinned: m.pinned,
+        });
+      }
+    }
+    out.sort((a, b) => {
+      if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+      return a.label.localeCompare(b.label);
+    });
+    return out;
+  }, [providers]);
+
+  const buttonText = composerModel
+    ? composerModel.model_id
+    : t("composer_model.button_inherit");
+
+  return (
+    <div className="relative inline-block">
+      <button
+        ref={buttonRef}
+        type="button"
+        data-testid="composer-model-button"
+        onClick={() => setOpen((v) => !v)}
+        className={[
+          "flex items-center gap-1 rounded border px-2 py-0.5 text-[10px]",
+          composerModel
+            ? "border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100"
+            : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50",
+        ].join(" ")}
+        title={t("composer_model.hint")}
+      >
+        <span className="text-gray-400">{t("composer_model.button_label")}:</span>
+        <span className="font-medium">{buttonText}</span>
+        <span className="text-gray-400">▾</span>
+      </button>
+
+      {open && (
+        <div
+          ref={popupRef}
+          data-testid="composer-model-popup"
+          className="absolute bottom-full left-0 z-20 mb-1 w-72 rounded-lg border border-gray-200 bg-white p-3 shadow-lg"
+        >
+          <div className="mb-2 text-[11px] font-semibold text-gray-700">
+            {t("composer_model.title")}
+          </div>
+          {COMPOSER_KINDS.map((kind) => (
+            <div key={kind} className="mb-2 last:mb-0">
+              <div className="mb-1 text-[10px] font-medium text-gray-500">
+                {t(`composer_model.kind_${kind}`)}
+              </div>
+              <select
+                data-testid={`composer-model-select-${kind}`}
+                value={refKey(composerModel)}
+                onChange={(e) => setComposerModel(parseRefKey(e.target.value))}
+                className="w-full rounded border border-gray-300 px-2 py-1 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+              >
+                <option value="">{t("composer_model.inherit_option")}</option>
+                {modelOptions.map((o) => (
+                  <option key={o.key} value={o.key}>
+                    {o.pinned ? "\u2605 " : ""}
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ))}
+          <p className="mt-1 text-[10px] text-gray-400">{t("composer_model.hint")}</p>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -473,6 +625,7 @@ function MetaFooter({
   startedAt: string | null;
   finishedAt: string | null;
 }) {
+  const { t } = useTranslation();
   const showTokens = usePreferencesStore((s) => s.showTokens);
   const showGenTime = usePreferencesStore((s) => s.showGenTime);
   const showGenSpeed = usePreferencesStore((s) => s.showGenSpeed);
@@ -511,9 +664,9 @@ function MetaFooter({
         <span
           onClick={onCopyId}
           className="cursor-pointer select-all truncate font-mono hover:text-blue-500"
-          title={copied ? "copied!" : nodeId}
+          title={copied ? t("common.copied") : nodeId}
         >
-          {copied ? "copied!" : nodeId}
+          {copied ? t("common.copied") : nodeId}
         </span>
       )}
     </div>
@@ -579,6 +732,7 @@ function PendingBubble({
   pending: PendingTurn;
   onDelete: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div
       data-testid={`pending-${pending.id}`}
@@ -593,7 +747,7 @@ function PendingBubble({
         onClick={onDelete}
         data-testid={`pending-delete-${pending.id}`}
         className="mt-1 text-[10px] text-red-400 hover:text-red-600"
-        title="Remove from queue"
+        title={t("conversation.queue_remove")}
       >
         ✕
       </button>
@@ -669,7 +823,7 @@ function WorkFlowConversation({ chatNode }: { chatNode: ChatFlowNode | null }) {
         })}
       </div>
 
-      <footer className="max-h-[45%] overflow-auto border-t border-gray-100 bg-gray-50 px-4 py-2">
+      <footer className="max-h-[40%] overflow-auto border-t border-gray-100 bg-gray-50 px-4 py-2">
         <NodeDetailPanel node={selectedNode} />
       </footer>
     </>
@@ -685,57 +839,225 @@ function WorkFlowIOBubble({
   isSelected: boolean;
   onSelect: () => void;
 }) {
+  const { t } = useTranslation();
   const showNodeId = usePreferencesStore((s) => s.showNodeId);
+  const isRunning = node.status === "running";
+  const isFailed = node.status === "failed";
   const kindColor =
     node.step_kind === "llm_call"
       ? "text-sky-600"
       : node.step_kind === "tool_call"
         ? "text-emerald-700"
-        : "text-violet-700";
+        : node.step_kind === "judge_call"
+          ? "text-amber-700"
+          : "text-violet-700";
+
+  const thinking =
+    node.step_kind === "llm_call" &&
+    typeof node.output_message?.extras?.thinking === "string"
+      ? (node.output_message.extras.thinking as string)
+      : "";
 
   return (
     <div
       data-testid={`wf-io-${node.id}`}
       onClick={onSelect}
       className={[
-        "cursor-pointer pl-3 transition-colors",
-        isSelected ? "border-l-2 border-blue-400" : "border-l-2 border-transparent hover:border-gray-200",
+        "group cursor-pointer pl-3 transition-colors",
+        isSelected
+          ? "border-l-2 border-blue-400"
+          : "border-l-2 border-transparent hover:border-gray-200",
       ].join(" ")}
     >
-      <div className={`mb-0.5 text-[10px] uppercase tracking-wide ${kindColor}`}>
-        {node.step_kind.replace(/_/g, " ")}
+      <div className={`mb-1 text-[10px] uppercase tracking-wide ${kindColor}`}>
+        {t(`node.kind.${node.step_kind}`)}
       </div>
+
       {node.step_kind === "llm_call" && (
-        <div className="prose prose-sm max-w-none text-[12px] leading-relaxed text-gray-800 break-words">
-          {node.output_message?.content
-            ? <Markdown>{node.output_message.content}</Markdown>
-            : <span className="italic text-gray-400">—</span>}
-        </div>
-      )}
-      {node.step_kind === "tool_call" && (
-        <div>
-          <div className="font-mono text-[11px] text-gray-700">{node.tool_name ?? "tool"}</div>
-          {node.tool_result && (
+        <>
+          {thinking && (
+            <ThinkingBlock text={thinking} label={t("conversation.thinking")} />
+          )}
+          {node.output_message?.content ? (
             <div
               className={[
-                "mt-0.5 text-[12px] whitespace-pre-wrap break-words",
-                node.tool_result.is_error ? "text-red-700" : "text-gray-800",
+                "prose prose-sm max-w-none text-[13px] leading-relaxed break-words",
+                isFailed ? "text-red-600" : "text-gray-800",
               ].join(" ")}
             >
-              {node.tool_result.content}
+              <Markdown>{node.output_message.content}</Markdown>
             </div>
+          ) : isRunning ? (
+            <div className="flex items-center gap-1.5 text-[12px] text-yellow-600">
+              <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-yellow-400" />
+              thinking…
+            </div>
+          ) : isFailed ? (
+            <div className="text-[12px] text-red-500">{node.error || "failed"}</div>
+          ) : (
+            <div className="text-[12px] italic text-gray-400">—</div>
           )}
+        </>
+      )}
+
+      {node.step_kind === "tool_call" && (
+        <ToolCallBubbleBody node={node} t={t} isRunning={isRunning} />
+      )}
+
+      {node.step_kind === "judge_call" && (
+        <JudgeBubbleBody node={node} t={t} isRunning={isRunning} isFailed={isFailed} />
+      )}
+
+      {node.step_kind === "sub_agent_delegation" && (
+        <div className="text-[12px] italic text-gray-500">
+          {t("node.kind.sub_agent_delegation")}
         </div>
       )}
-      {node.step_kind === "sub_agent_delegation" && (
-        <div className="italic text-gray-500">delegation</div>
-      )}
+
       <MetaFooter
         nodeId={showNodeId ? node.id : null}
         usage={node.usage ?? null}
         startedAt={node.started_at}
         finishedAt={node.finished_at}
       />
+    </div>
+  );
+}
+
+function ToolCallBubbleBody({
+  node,
+  t,
+  isRunning,
+}: {
+  node: WorkFlowNode;
+  t: (k: string) => string;
+  isRunning: boolean;
+}) {
+  const result = node.tool_result;
+  return (
+    <>
+      <div className="mb-1 font-mono text-[12px] text-gray-700">
+        {node.tool_name ?? "tool"}
+      </div>
+      {result ? (
+        <pre
+          className={[
+            "whitespace-pre-wrap break-words rounded bg-white/60 px-2 py-1.5 font-mono text-[12px] leading-relaxed",
+            result.is_error ? "text-red-700" : "text-gray-800",
+          ].join(" ")}
+        >
+          {result.content}
+        </pre>
+      ) : isRunning ? (
+        <div className="flex items-center gap-1.5 text-[12px] text-yellow-600">
+          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-yellow-400" />
+          {t("node.status.running")}
+        </div>
+      ) : (
+        <div className="text-[12px] italic text-gray-400">—</div>
+      )}
+    </>
+  );
+}
+
+function JudgeBubbleBody({
+  node,
+  t,
+  isRunning,
+  isFailed,
+}: {
+  node: WorkFlowNode;
+  t: (k: string) => string;
+  isRunning: boolean;
+  isFailed: boolean;
+}) {
+  const variant = node.judge_variant;
+  const verdict = node.judge_verdict;
+  const headline = verdict
+    ? variant === "pre"
+      ? verdict.feasibility
+      : variant === "during"
+        ? verdict.during_verdict
+        : verdict.post_verdict
+    : null;
+  const headlineColor =
+    headline === "ok" || headline === "accept" || headline === "continue"
+      ? "text-green-700"
+      : headline === "risky" || headline === "retry" || headline === "revise"
+        ? "text-amber-700"
+        : headline
+          ? "text-red-700"
+          : "text-gray-400";
+
+  return (
+    <>
+      <div className="mb-1.5 flex flex-wrap items-center gap-1.5 text-[11px]">
+        {variant && (
+          <span className="rounded bg-amber-200/60 px-1.5 py-0.5 font-medium text-amber-900">
+            {t(`workflow.judge_variant_${variant}`)}
+          </span>
+        )}
+        {headline && (
+          <span className={`font-semibold ${headlineColor}`}>{headline}</span>
+        )}
+      </div>
+
+      {verdict?.user_message && (
+        <div className="prose prose-sm mb-1 max-w-none text-[13px] leading-relaxed text-gray-800 break-words">
+          <Markdown>{verdict.user_message}</Markdown>
+        </div>
+      )}
+
+      {verdict?.blockers && verdict.blockers.length > 0 && (
+        <JudgeList label={t("workflow.blockers")} items={verdict.blockers} />
+      )}
+      {verdict?.missing_inputs && verdict.missing_inputs.length > 0 && (
+        <JudgeList label={t("workflow.missing_inputs")} items={verdict.missing_inputs} />
+      )}
+      {verdict?.critiques && verdict.critiques.length > 0 && (
+        <JudgeList
+          label={t("workflow.critiques")}
+          items={verdict.critiques.map((c) => `[${c.severity}] ${c.issue}`)}
+        />
+      )}
+      {verdict?.issues && verdict.issues.length > 0 && (
+        <JudgeList
+          label={t("workflow.issues")}
+          items={verdict.issues.map(
+            (i) => `${i.location}: ${i.expected} → ${i.actual}`,
+          )}
+        />
+      )}
+
+      {!verdict && isRunning && (
+        <div className="flex items-center gap-1.5 text-[12px] text-yellow-600">
+          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-yellow-400" />
+          {t("node.status.running")}
+        </div>
+      )}
+      {!verdict && isFailed && (
+        <div className="text-[12px] text-red-500">{node.error || "failed"}</div>
+      )}
+      {!verdict && !isRunning && !isFailed && (
+        <div className="text-[12px] italic text-gray-400">—</div>
+      )}
+    </>
+  );
+}
+
+function JudgeList({ label, items }: { label: string; items: string[] }) {
+  return (
+    <div className="mb-1">
+      <div className="text-[10px] font-medium uppercase tracking-wide text-gray-500">
+        {label}
+      </div>
+      <ul className="ml-4 list-disc text-[12px] leading-snug text-gray-700">
+        {items.map((it, i) => (
+          <li key={i} className="break-words">
+            {it}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -792,21 +1114,64 @@ function NodeDetailPanel({ node }: { node: WorkFlowNode | null }) {
     return <div className="italic text-[11px] text-gray-400">{t("workflow.no_selection")}</div>;
   }
 
+  const hasSubWorkflow =
+    node.step_kind === "sub_agent_delegation" &&
+    node.sub_workflow != null &&
+    Object.keys(node.sub_workflow.nodes).length > 0;
+
   return (
-    <div className="space-y-1.5 text-[11px]">
-      <div className="font-semibold text-gray-800">{t("workflow.detail_title")}</div>
-      <DetailRow label={t("workflow.detail_status")}>{node.status}</DetailRow>
+    <div className="space-y-2 text-[11px]">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="font-semibold text-gray-800">{t("workflow.detail_title")}</span>
+          <span className="rounded bg-gray-200 px-1.5 py-0.5 font-mono text-[9px] uppercase text-gray-700">
+            {node.step_kind}
+          </span>
+        </div>
+        {hasSubWorkflow && (
+          <button
+            type="button"
+            data-testid={`worknode-detail-${node.id}-enter`}
+            onClick={(e) => {
+              e.stopPropagation();
+              // Reserved for sub_agent_delegation: route into the inner
+              // WorkFlow once the engine actually populates ``sub_workflow``.
+              window.dispatchEvent(
+                new CustomEvent("agentloom:enter-sub-workflow", {
+                  detail: { workNodeId: node.id },
+                }),
+              );
+            }}
+            className="flex items-center gap-1 rounded border border-gray-200 bg-white px-1.5 py-0.5 text-[10px] text-gray-600 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700"
+          >
+            <span>⤢</span>
+            <span>{t("chatflow.open_workflow")}</span>
+          </button>
+        )}
+      </div>
+
+      <DetailRow label={t("workflow.detail_status")}>
+        <span className="capitalize">{node.status}</span>
+      </DetailRow>
+      <DetailRow label={t("workflow.detail_id")}>
+        <CopyableId nodeId={node.id} />
+      </DetailRow>
       <DetailRow label={t("workflow.detail_description")}>
         {node.description.text || <span className="italic text-gray-400">—</span>}
       </DetailRow>
-      <DetailRow label={t("workflow.detail_expected")}>
-        {node.expected_outcome?.text || <span className="italic text-gray-400">—</span>}
-      </DetailRow>
-      {node.model_override && (
-        <DetailRow label={t("workflow.detail_model")}>
-          {`${node.model_override.provider_id}/${node.model_override.model_id}`}
+      {node.expected_outcome?.text && (
+        <DetailRow label={t("workflow.detail_expected")}>
+          {node.expected_outcome.text}
         </DetailRow>
       )}
+      {node.model_override && (
+        <DetailRow label={t("workflow.detail_model")}>
+          <span className="font-mono">
+            {`${node.model_override.provider_id}/${node.model_override.model_id}`}
+          </span>
+        </DetailRow>
+      )}
+
       {node.step_kind === "tool_call" && (
         <>
           <DetailRow label={t("workflow.detail_tool_name")}>
@@ -814,23 +1179,162 @@ function NodeDetailPanel({ node }: { node: WorkFlowNode | null }) {
           </DetailRow>
           {node.tool_args && (
             <DetailRow label={t("workflow.detail_tool_args")}>
-              <pre className="whitespace-pre-wrap break-words rounded bg-white px-1.5 py-0.5 font-mono text-[10px]">
+              <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-white px-1.5 py-1 font-mono text-[10px] text-gray-800">
                 {JSON.stringify(node.tool_args, null, 2)}
+              </pre>
+            </DetailRow>
+          )}
+          {node.tool_result && (
+            <DetailRow
+              label={
+                node.tool_result.is_error
+                  ? t("workflow.tool_error")
+                  : t("workflow.tool_result")
+              }
+            >
+              <pre
+                className={[
+                  "max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-white px-1.5 py-1 font-mono text-[10px]",
+                  node.tool_result.is_error ? "text-red-700" : "text-gray-800",
+                ].join(" ")}
+              >
+                {node.tool_result.content}
               </pre>
             </DetailRow>
           )}
         </>
       )}
+
+      {node.step_kind === "judge_call" && node.judge_verdict && (
+        <DetailRow label={t("workflow.detail_judge_verdict")}>
+          <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-white px-1.5 py-1 font-mono text-[10px] text-gray-800">
+            {JSON.stringify(node.judge_verdict, null, 2)}
+          </pre>
+        </DetailRow>
+      )}
+
+      {node.input_messages && node.input_messages.length > 0 && (
+        <DetailRow label={t("workflow.detail_input_messages")}>
+          <MessageList messages={node.input_messages} />
+        </DetailRow>
+      )}
+      {node.output_message && (
+        <DetailRow label={t("workflow.detail_output_message")}>
+          <MessageList messages={[node.output_message]} />
+        </DetailRow>
+      )}
+
       {node.error && (
         <DetailRow label={t("workflow.detail_error")}>
-          <span className="text-red-700">{node.error}</span>
+          <pre className="whitespace-pre-wrap break-words rounded bg-red-50 px-1.5 py-1 font-mono text-[10px] text-red-700">
+            {node.error}
+          </pre>
         </DetailRow>
       )}
       {node.usage && (
         <DetailRow label={t("workflow.tokens")}>
-          {`${node.usage.prompt_tokens}/${node.usage.completion_tokens}` +
-            (node.usage.cached_tokens > 0 ? ` (${node.usage.cached_tokens} cached)` : "")}
+          <UsageBreakdown usage={node.usage} />
         </DetailRow>
+      )}
+    </div>
+  );
+}
+
+function CopyableId({ nodeId }: { nodeId: string }) {
+  const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+  const onCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(nodeId);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 900);
+    } catch {
+      // ignore
+    }
+  };
+  return (
+    <span
+      onClick={onCopy}
+      className="cursor-pointer select-all break-all font-mono text-[10px] text-gray-600 hover:text-blue-500"
+      title={copied ? t("common.copied") : nodeId}
+    >
+      {copied ? t("common.copied") : nodeId}
+    </span>
+  );
+}
+
+function UsageBreakdown({ usage }: { usage: TokenUsage }) {
+  const parts: string[] = [
+    `↑${usage.prompt_tokens}`,
+    `↓${usage.completion_tokens}`,
+  ];
+  if (usage.cached_tokens > 0) parts.push(`(${usage.cached_tokens} cached)`);
+  if (usage.reasoning_tokens > 0) parts.push(`(${usage.reasoning_tokens} reasoning)`);
+  return <div className="font-mono text-[10px] text-gray-700">{parts.join(" ")}</div>;
+}
+
+function MessageList({ messages }: { messages: WireMessage[] }) {
+  return (
+    <div className="space-y-1">
+      {messages.map((msg, i) => (
+        <MessageRow key={i} message={msg} />
+      ))}
+    </div>
+  );
+}
+
+function MessageRow({ message }: { message: WireMessage }) {
+  const [open, setOpen] = useState(true);
+  const roleColor =
+    message.role === "user"
+      ? "bg-blue-100 text-blue-800"
+      : message.role === "assistant"
+        ? "bg-emerald-100 text-emerald-800"
+        : message.role === "system"
+          ? "bg-gray-200 text-gray-700"
+          : "bg-amber-100 text-amber-800";
+  const hasToolUses = message.tool_uses && message.tool_uses.length > 0;
+  const hasContent = !!message.content;
+  return (
+    <div className="rounded border border-gray-200 bg-white">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between gap-2 rounded px-1.5 py-0.5 text-left hover:bg-gray-50"
+      >
+        <span className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase ${roleColor}`}>
+          {message.role}
+        </span>
+        <span className="text-[9px] text-gray-400">
+          {open ? "▾" : "▸"}
+        </span>
+      </button>
+      {open && (hasContent || hasToolUses) && (
+        <div className="border-t border-gray-100 px-1.5 py-1">
+          {hasContent && (
+            <div className="prose prose-sm max-w-none whitespace-pre-wrap break-words text-[11px] text-gray-800">
+              <Markdown>{message.content}</Markdown>
+            </div>
+          )}
+          {hasToolUses && (
+            <div className="mt-1 space-y-0.5">
+              {message.tool_uses.map((tu) => (
+                <div
+                  key={tu.id}
+                  className="rounded bg-gray-50 px-1.5 py-0.5 font-mono text-[10px] text-gray-700"
+                >
+                  <span className="font-semibold">{tu.name}</span>
+                  {Object.keys(tu.arguments ?? {}).length > 0 && (
+                    <pre className="mt-0.5 whitespace-pre-wrap break-words text-[10px]">
+                      {JSON.stringify(tu.arguments, null, 2)}
+                    </pre>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
@@ -839,8 +1343,8 @@ function NodeDetailPanel({ node }: { node: WorkFlowNode | null }) {
 function DetailRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <div className="text-[10px] uppercase text-gray-500">{label}</div>
-      <div className="break-words text-gray-800">{children}</div>
+      <div className="text-[10px] uppercase tracking-wide text-gray-500">{label}</div>
+      <div className="mt-0.5 break-words text-gray-800">{children}</div>
     </div>
   );
 }

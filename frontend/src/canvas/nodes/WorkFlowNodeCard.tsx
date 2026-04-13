@@ -16,6 +16,7 @@ import { useTranslation } from "react-i18next";
 
 import { StatusBadge } from "./StatusBadge";
 import { NodeIdLine } from "./NodeIdLine";
+import { TokenBar } from "./ChatFlowNodeCard";
 import type { WorkFlowNode } from "@/types/schema";
 
 export interface WorkFlowNodeData extends Record<string, unknown> {
@@ -46,7 +47,7 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
     <div
       data-testid={`workflow-node-${node.id}`}
       className={[
-        "rounded-md border w-48 p-2 text-[11px] shadow-sm",
+        "rounded-md border w-52 p-2 text-[11px] shadow-sm",
         accent,
         isSelected ? "ring-2 ring-blue-300" : "",
       ].join(" ")}
@@ -100,15 +101,7 @@ function LlmCallBody({ node }: { node: WorkFlowNode }) {
       <div className="prose prose-sm max-w-none text-[11px] text-gray-800 break-words">
         {output ? <Markdown>{truncate(output)}</Markdown> : <span className="italic text-gray-400">—</span>}
       </div>
-      {usage && (
-        <div className="text-[10px] text-gray-500 flex gap-2">
-          <span>{t("workflow.prompt_tokens")}: {usage.prompt_tokens}</span>
-          <span>{t("workflow.completion_tokens")}: {usage.completion_tokens}</span>
-          {usage.cached_tokens > 0 && (
-            <span>{t("workflow.cached_tokens")}: {usage.cached_tokens}</span>
-          )}
-        </div>
-      )}
+      {usage && usage.prompt_tokens > 0 && <TokenBar tokens={usage.prompt_tokens} />}
     </div>
   );
 }
@@ -193,6 +186,9 @@ function JudgeCallBody({ node }: { node: WorkFlowNode }) {
         <div className="prose prose-sm max-w-none text-[11px] text-gray-500 italic break-words">
           <Markdown>{truncate(node.output_message.content, 80)}</Markdown>
         </div>
+      )}
+      {node.usage && node.usage.prompt_tokens > 0 && (
+        <TokenBar tokens={node.usage.prompt_tokens} />
       )}
     </div>
   );

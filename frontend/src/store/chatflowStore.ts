@@ -32,6 +32,7 @@ import type {
   ChatFlow,
   ChatFlowNode,
   ChatFlowSummary,
+  ExecutionMode,
   Folder,
   NodeId,
   NodeStatus,
@@ -110,7 +111,16 @@ export interface ChatFlowStoreState {
     description?: string | null;
     tags?: string[];
     default_model?: ProviderModelRef | null;
+    default_execution_mode?: ExecutionMode;
   }) => Promise<void>;
+
+  /** Which edge is currently hovered on the ChatFlow canvas — drives
+   * the model-family ribbon highlight (§4.10 rework: model lives on
+   * the parent→child edge, so hover targets edges, not node badges).
+   * Stored as the full {parent, child} pair because merge nodes have
+   * multiple incoming edges that may carry different per-edge models. */
+  hoveredEdge: { parent: NodeId; child: NodeId } | null;
+  setHoveredEdge: (edge: { parent: NodeId; child: NodeId } | null) => void;
 
   /** Load a chatflow from the server and subscribe to its events. */
   loadChatFlow: (id: string) => Promise<void>;
@@ -145,9 +155,17 @@ export interface ChatFlowStoreState {
   setRightPanelWidth: (width: number) => void;
 
   /** Send a user turn (enqueue or immediate submit depending on state). */
-  sendTurn: (text: string, parentId?: string) => Promise<void>;
+  sendTurn: (
+    text: string,
+    parentId?: string,
+    spawnModel?: ProviderModelRef | null,
+  ) => Promise<void>;
   /** Enqueue a pending turn on a specific node. */
-  enqueueTurn: (nodeId: NodeId, text: string) => Promise<void>;
+  enqueueTurn: (
+    nodeId: NodeId,
+    text: string,
+    spawnModel?: ProviderModelRef | null,
+  ) => Promise<void>;
   /** Delete a pending queue item. */
   deleteQueueItem: (nodeId: NodeId, itemId: string) => Promise<void>;
   /** Delete a FAILED node. */
@@ -179,6 +197,7 @@ const INITIAL: Omit<
   | "moveFolder"
   | "moveChatFlowToFolder"
   | "patchChatFlow"
+  | "setHoveredEdge"
   | "loadChatFlow"
   | "setChatFlow"
   | "selectNode"
@@ -214,6 +233,7 @@ const INITIAL: Omit<
   workflowSelectedNodeId: null,
   workflowBranchMemory: {},
   rightPanelWidth: RIGHT_PANEL_DEFAULT,
+  hoveredEdge: null,
   sseSubscription: null,
   sseFactory: null,
 };
@@ -353,6 +373,10 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     await get().fetchChatFlowList();
   },
 
+  setHoveredEdge(edge) {
+    set({ hoveredEdge: edge });
+  },
+
   async patchChatFlow(patch) {
     const cf = get().chatflow;
     if (!cf) return;
@@ -363,6 +387,9 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     if ("description" in patch) updated.description = patch.description ?? null;
     if ("tags" in patch) updated.tags = patch.tags ?? [];
     if ("default_model" in patch) updated.default_model = patch.default_model ?? null;
+    if ("default_execution_mode" in patch && patch.default_execution_mode !== undefined) {
+      updated.default_execution_mode = patch.default_execution_mode;
+    }
     set({ chatflow: updated as typeof cf });
     // Refresh sidebar list too (title may have changed).
     void get().fetchChatFlowList();
@@ -490,7 +517,7 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     set({ rightPanelWidth: clamped });
   },
 
-  async sendTurn(text, parentId) {
+  async sendTurn(text, parentId, spawnModel) {
     const chat = get().chatflow;
     if (!chat) return;
 
@@ -505,15 +532,19 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     if (!targetId) return;
 
     // 1. Optimistic node — appears immediately with "running" status.
+    //    Stamp resolved_model with the composer's pick so the ribbon
+    //    layer colors the optimistic node correctly until the real one
+    //    arrives via SSE.
     const optimisticId = `_opt_${Date.now()}`;
     const now = new Date().toISOString();
     const optimistic: ChatFlowNode = {
       id: optimisticId,
       parent_ids: [targetId],
       description: { text: "", provenance: "unset", updated_at: now },
+      inputs: null,
       expected_outcome: null,
       status: "running",
-      model_override: null,
+      resolved_model: spawnModel ?? null,
       locked: false,
       error: null,
       position_x: null,
@@ -542,7 +573,7 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     //    Don't await the response — it blocks until the LLM finishes.
     //    SSE events will drive all UI updates. We just need the server
     //    to receive the request and create the real node.
-    api.submitTurn(chat.id, text, targetId).catch(() => {
+    api.submitTurn(chat.id, text, targetId, spawnModel ?? null).catch(() => {
       // If the request itself fails (network error, 4xx), clean up.
       removeOptimistic(get, set, optimisticId);
     });
@@ -570,10 +601,10 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     }
   },
 
-  async enqueueTurn(nodeId, text) {
+  async enqueueTurn(nodeId, text, spawnModel) {
     const chat = get().chatflow;
     if (!chat) return;
-    await api.enqueueTurn(chat.id, nodeId, text);
+    await api.enqueueTurn(chat.id, nodeId, text, "web", spawnModel ?? null);
     await get().refreshChatFlow();
   },
 

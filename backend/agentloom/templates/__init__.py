@@ -23,6 +23,7 @@ from agentloom.templates.instantiate import (
     TemplateError,
     TemplateNotFoundError,
     UnboundParamError,
+    instantiate_fixture,
     instantiate_template,
     resolve_template,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "TemplateNotFoundError",
     "UnboundParamError",
     "fragments_as_texts",
+    "instantiate_fixture",
     "instantiate_template",
     "load_fixtures",
     "resolve_template",

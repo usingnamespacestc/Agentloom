@@ -222,7 +222,31 @@ def instantiate_template(
     includes are known, and any ``{% include %}`` tag in the plan will
     raise :class:`TemplateError`.
     """
+    return _instantiate_plan(row.plan, params, includes)
+
+
+def instantiate_fixture(
+    plan: dict[str, Any],
+    params: dict[str, Any],
+    *,
+    includes: dict[str, str] | None = None,
+) -> WorkFlow:
+    """Same as :func:`instantiate_template` but takes a raw plan dict
+    rather than a persisted ``WorkflowTemplateRow``.
+
+    Used by callers that load fixtures directly from disk (no DB) — e.g.
+    the ChatFlow engine, which materializes ``judge_pre`` / ``judge_post``
+    inside ``_spawn_turn_node`` (sync, no AsyncSession available).
+    """
+    return _instantiate_plan(plan, params, includes)
+
+
+def _instantiate_plan(
+    plan: dict[str, Any],
+    params: dict[str, Any],
+    includes: dict[str, str] | None,
+) -> WorkFlow:
     include_texts = includes or {}
-    substituted = _walk_substitute(row.plan, params, include_texts)
+    substituted = _walk_substitute(plan, params, include_texts)
     remapped = _remap_ids(substituted)
     return WorkFlow.model_validate(remapped)
