@@ -70,6 +70,25 @@ class JudgeVariant(str, Enum):
     POST = "post"
 
 
+class WorkNodeRole(str, Enum):
+    """Structural role in the recursive planner model — see §3.4.3 / ADR-024.
+
+    Orthogonal to ``StepKind``: ``role`` answers "what is this node's
+    purpose in the planning model?", ``step_kind`` answers "what
+    mechanical invocation does it perform?". The engine interprets
+    ``role`` only when the WorkFlow's execution mode is ``semi_auto`` or
+    ``auto``; in ``direct`` mode and on legacy nodes ``role`` is None and
+    only ``step_kind`` is consulted.
+    """
+
+    PRE_JUDGE = "pre_judge"          # judge_call — frame the task, decide feasibility
+    PLANNER = "planner"              # llm_call — atomic-or-decompose decision
+    PLANNER_JUDGE = "planner_judge"  # judge_call — review the plan, debate
+    WORKER = "worker"                # llm_call OR tool_call — execute atomic task
+    WORKER_JUDGE = "worker_judge"    # judge_call — review the worker's draft, debate
+    POST_JUDGE = "post_judge"        # judge_call — verify success, roll up children, handoff
+
+
 class ExecutionMode(str, Enum):
     """How autonomous a WorkFlow's execution is — see §3.4.1."""
 

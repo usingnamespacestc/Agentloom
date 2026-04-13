@@ -35,6 +35,21 @@ export type StepKind = (typeof STEP_KINDS)[number];
 
 export type JudgeVariant = "pre" | "during" | "post";
 
+/**
+ * Structural role in the recursive planner model (§3.4.4 / ADR-024).
+ * Orthogonal to ``StepKind``. ``null`` for direct-mode and legacy nodes.
+ */
+export const WORK_NODE_ROLES = [
+  "pre_judge",
+  "planner",
+  "planner_judge",
+  "worker",
+  "worker_judge",
+  "post_judge",
+] as const;
+
+export type WorkNodeRole = (typeof WORK_NODE_ROLES)[number];
+
 export const EXECUTION_MODES = ["direct", "semi_auto", "auto"] as const;
 export type ExecutionMode = (typeof EXECUTION_MODES)[number];
 
@@ -138,6 +153,9 @@ export interface NodeBaseFields {
 
 export interface WorkFlowNode extends NodeBaseFields {
   step_kind: StepKind;
+  /** Structural role in the recursive planner flow. ``null`` outside
+   * semi_auto/auto modes. See §3.4.4. */
+  role: WorkNodeRole | null;
   tool_constraints: ToolConstraints | null;
   /** Pin for this WorkNode's LLM call. Set by the engine at spawn time
    * from the enclosing ChatNode's resolved_model and propagated across
@@ -174,6 +192,9 @@ export interface WorkFlow {
    * agent's next turn (§3.5).
    */
   pending_user_prompt?: string | null;
+  /** Hard cap on planner↔planner_judge / worker↔worker_judge debate
+   * rounds before forcing convergence (§3.4.5). */
+  debate_round_budget?: number;
 }
 
 export type PendingTurnSource = "web" | "discord" | "feishu" | "api" | "test";

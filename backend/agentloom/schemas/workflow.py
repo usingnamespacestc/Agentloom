@@ -25,6 +25,7 @@ from agentloom.schemas.common import (
     ToolConstraints,
     ToolResult,
     ToolUse,
+    WorkNodeRole,
     generate_node_id,
 )
 
@@ -49,6 +50,11 @@ class WorkFlowNode(NodeBase):
     """
 
     step_kind: StepKind
+    #: Structural role in the recursive planner model (§3.4.3, ADR-024).
+    #: Orthogonal to ``step_kind``. ``None`` for direct-mode nodes and
+    #: legacy (pre-recursive-planner) nodes; the engine reads this field
+    #: only when the enclosing WorkFlow runs in ``semi_auto`` or ``auto``.
+    role: WorkNodeRole | None = None
     tool_constraints: ToolConstraints | None = None
     #: Pin for the model this specific WorkNode's LLM call uses. Set by
     #: the engine at spawn time (from the enclosing ChatNode's
@@ -124,7 +130,32 @@ class WorkFlowNode(NodeBase):
                 raise ValueError("delegation node may not carry llm_call fields")
             if self.judge_variant or self.judge_verdict:
                 raise ValueError("delegation node may not carry judge_call fields")
+
+        # ADR-024: role and step_kind are orthogonal but constrained to a
+        # whitelist of compatible pairings. ``role=None`` is always valid
+        # (direct mode / legacy nodes); a non-null role must match.
+        if self.role is not None:
+            allowed_kinds = _ROLE_TO_STEP_KINDS.get(self.role, set())
+            if self.step_kind not in allowed_kinds:
+                raise ValueError(
+                    f"role={self.role.value} requires step_kind in "
+                    f"{{{', '.join(sorted(k.value for k in allowed_kinds))}}}, "
+                    f"got step_kind={self.step_kind.value}"
+                )
         return self
+
+
+_ROLE_TO_STEP_KINDS: dict[WorkNodeRole, set[StepKind]] = {
+    WorkNodeRole.PRE_JUDGE: {StepKind.JUDGE_CALL},
+    WorkNodeRole.PLANNER: {StepKind.LLM_CALL},
+    WorkNodeRole.PLANNER_JUDGE: {StepKind.JUDGE_CALL},
+    # Worker is the only role with mechanical flexibility — atomic tasks
+    # may be a model call or a direct tool invocation. ``sub_agent_delegation``
+    # is explicitly *not* allowed: a worker by definition does not decompose.
+    WorkNodeRole.WORKER: {StepKind.LLM_CALL, StepKind.TOOL_CALL},
+    WorkNodeRole.WORKER_JUDGE: {StepKind.JUDGE_CALL},
+    WorkNodeRole.POST_JUDGE: {StepKind.JUDGE_CALL},
+}
 
 
 class WorkFlow(BaseModel):
@@ -162,6 +193,10 @@ class WorkFlow(BaseModel):
     # Per-WorkFlow budget overrides; ``None`` = inherit from ChatFlow
     tool_loop_budget: int | None = None
     auto_mode_revise_budget: int | None = None
+    #: Hard cap on planner↔planner_judge / worker↔worker_judge debate
+    #: rounds before forcing convergence (§3.4.5). Ignored in ``direct``
+    #: mode where there are no judges.
+    debate_round_budget: int = 3
 
     #: Set by the engine when a judge pass decides the WorkFlow cannot
     #: proceed without user clarification (judge_pre says non-OK, or
