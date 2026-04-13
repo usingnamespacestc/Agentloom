@@ -55,7 +55,13 @@ from agentloom.schemas import (
     WorkFlowNode,
 )
 from agentloom.schemas.chatflow import PendingTurnSource, UpstreamFailurePolicy
-from agentloom.schemas.common import EditableText, NodeStatus, utcnow
+from agentloom.schemas.common import (
+    EditableText,
+    ExecutionMode,
+    JudgeVariant,
+    NodeStatus,
+    utcnow,
+)
 from agentloom.schemas.workflow import WireMessage
 from agentloom.tools.base import ToolContext, ToolRegistry
 
@@ -66,6 +72,47 @@ log = logging.getLogger(__name__)
 #: queue edit, retry, delete). Invoked outside the runtime lock so
 #: implementations that acquire their own db session don't deadlock.
 SaveCallback = Callable[[ChatFlow], Awaitable[None]]
+
+
+class ExecutionSwitches:
+    """Four boolean toggles an ``ExecutionMode`` unpacks into. Kept as a
+    tiny class so callers can name the fields instead of remembering
+    tuple positions."""
+
+    __slots__ = ("plan", "judge_pre", "judge_during", "judge_post")
+
+    def __init__(
+        self, *, plan: bool, judge_pre: bool, judge_during: bool, judge_post: bool
+    ) -> None:
+        self.plan = plan
+        self.judge_pre = judge_pre
+        self.judge_during = judge_during
+        self.judge_post = judge_post
+
+
+def derive_switches_from_mode(mode: ExecutionMode) -> ExecutionSwitches:
+    """Per §3.4.1, each execution mode implies a starting position for
+    the four switches. These are defaults — individual WorkFlows may
+    override any switch after creation.
+
+    - ``direct``: pure ReAct. No plan, no judges. Existing M4/M6 shape.
+    - ``semi_auto``: plan on, judge_pre on, judge_post on, judge_during
+      off (opt-in — adversarial critic is expensive and only helps when
+      the user wants it).
+    - ``auto``: all four on. Halt conditions (§3.4.1) gate progression.
+    """
+    if mode == ExecutionMode.DIRECT:
+        return ExecutionSwitches(
+            plan=False, judge_pre=False, judge_during=False, judge_post=False
+        )
+    if mode == ExecutionMode.SEMI_AUTO:
+        return ExecutionSwitches(
+            plan=True, judge_pre=True, judge_during=False, judge_post=True
+        )
+    # auto
+    return ExecutionSwitches(
+        plan=True, judge_pre=True, judge_during=True, judge_post=True
+    )
 
 
 class DiscardedUpstreamFailure(Exception):
@@ -609,22 +656,60 @@ class ChatFlowEngine:
     ) -> ChatFlowNode:
         """Create a PLANNED ChatFlowNode and attach it to the chatflow.
 
-        Seeds the inner WorkFlow with a single ``llm_call`` whose
-        ``input_messages`` is the built conversation context plus the
-        new user turn appended.
+        The inner WorkFlow's shape depends on ``chatflow.default_execution_mode``:
+
+        - ``direct``: single ``llm_call`` whose ``input_messages`` is the
+          built conversation context + new user turn.
+        - ``semi_auto`` / ``auto``: optional ``judge_pre`` root → ``llm_call``
+          → optional ``judge_post`` chain. The judge_pre halts the
+          WorkFlow via ``pending_user_prompt`` (wired in M10.3) if it
+          says the task needs user clarification; otherwise the llm_call
+          produces the answer and judge_post reviews it. Plan phase and
+          judge_during are handled in later milestones (M10.2b/M10.4).
         """
         chatflow = runtime.chatflow
         context_wire = _build_chat_context(chatflow, parent_ids)
         context_wire.append(WireMessage(role="user", content=user_message_text))
 
-        inner = WorkFlow()
-        inner.add_node(
+        mode = chatflow.default_execution_mode
+        switches = derive_switches_from_mode(mode)
+        inner = WorkFlow(
+            execution_mode=mode,
+            plan_enabled=switches.plan,
+            judge_pre_enabled=switches.judge_pre,
+            judge_during_enabled=switches.judge_during,
+            judge_post_enabled=switches.judge_post,
+        )
+
+        parent_for_llm: list[str] = []
+        if switches.judge_pre:
+            pre = inner.add_node(
+                WorkFlowNode(
+                    step_kind=StepKind.JUDGE_CALL,
+                    judge_variant=JudgeVariant.PRE,
+                    input_messages=list(context_wire),
+                )
+            )
+            parent_for_llm = [pre.id]
+
+        llm = inner.add_node(
             WorkFlowNode(
                 step_kind=StepKind.LLM_CALL,
-                input_messages=context_wire,
+                parent_ids=parent_for_llm,
+                input_messages=list(context_wire),
                 model_override=chatflow.default_model,
             )
         )
+
+        if switches.judge_post:
+            inner.add_node(
+                WorkFlowNode(
+                    step_kind=StepKind.JUDGE_CALL,
+                    judge_variant=JudgeVariant.POST,
+                    parent_ids=[llm.id],
+                    judge_target_id=llm.id,
+                )
+            )
 
         chat_node = ChatFlowNode(
             parent_ids=list(parent_ids),
@@ -710,6 +795,7 @@ class ChatFlowEngine:
             await self._inner.execute(
                 chat_node.workflow,
                 chatflow_tool_loop_budget=chatflow.tool_loop_budget,
+                chatflow_auto_mode_revise_budget=chatflow.auto_mode_revise_budget,
             )
         except Exception as exc:  # noqa: BLE001 — engine boundary
             log.exception("chat node %s inner workflow raised", node_id)
@@ -723,10 +809,19 @@ class ChatFlowEngine:
 
         async with runtime.lock:
             chat_node = chatflow.get(node_id)
+            pending_prompt = chat_node.workflow.pending_user_prompt
             terminal = _terminal_llm_call(chat_node.workflow)
             if runtime_error is not None:
                 chat_node.status = NodeStatus.FAILED
                 chat_node.error = runtime_error
+            elif pending_prompt is not None:
+                # A judge inside the WorkFlow decided it needs user
+                # clarification before continuing. The pending prompt
+                # becomes this ChatNode's agent_response; the user's
+                # reply creates a child ChatNode in the normal way.
+                # All user dialogue lives at the ChatFlow layer (§3.5).
+                chat_node.agent_response = EditableText.by_agent(pending_prompt)
+                chat_node.status = NodeStatus.SUCCEEDED
             elif terminal is None:
                 chat_node.status = NodeStatus.FAILED
                 chat_node.error = "inner workflow had no terminal llm_call"
@@ -904,34 +999,32 @@ class ChatFlowEngine:
 
 
 def _terminal_llm_call(workflow: WorkFlow) -> WorkFlowNode | None:
-    """Return the leaf llm_call whose output should become the turn's
+    """Return the llm_call whose output should become the turn's
     ``agent_response``.
 
-    A leaf is a node no other node lists as a parent. We want the leaf
-    that is an ``llm_call`` — in a plain one-shot turn the root is the
-    only node and is both root and leaf; in a tool loop the sequence
-    looks like ``llm → tool → llm (→ tool → llm)*`` and the leaf is
-    the final llm_call that produced the user-facing reply after all
-    tool results came back.
+    The relevant node is the most recently created ``llm_call`` — this
+    rule covers three shapes we produce:
 
-    If multiple llm_call leaves exist (shouldn't happen on a linear
-    tool loop, but might once branching lands), we pick the most
-    recently created one — same tiebreaker as ``_latest_leaf``.
+    - plain one-shot turn: single root llm_call.
+    - tool loop ``llm → tool → llm (→ tool → llm)*``: final follow-up
+      llm_call is newest.
+    - judge-gated turn ``[judge_pre →] llm_call [→ judge_post]``: the
+      llm_call is the only one; judges are not llm_calls, so they do
+      not participate in this selection and the earlier "leaf" rule
+      (which excluded llm_calls with any children, including judge
+      children) would have wrongly returned None.
     """
     if not workflow.nodes:
         return None
-    referenced: set[str] = set()
-    for n in workflow.nodes.values():
-        referenced.update(n.parent_ids)
-    llm_leaves = [
+    llm_calls = [
         n
         for n in workflow.nodes.values()
-        if n.id not in referenced and n.step_kind == StepKind.LLM_CALL
+        if n.step_kind == StepKind.LLM_CALL
     ]
-    if not llm_leaves:
+    if not llm_calls:
         return None
-    llm_leaves.sort(key=lambda n: n.created_at)
-    return llm_leaves[-1]
+    llm_calls.sort(key=lambda n: n.created_at)
+    return llm_calls[-1]
 
 
 def _live_tip(chatflow: ChatFlow, start_id: str) -> str:

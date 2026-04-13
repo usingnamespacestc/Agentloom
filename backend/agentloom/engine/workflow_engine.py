@@ -18,6 +18,13 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 from agentloom.engine.events import EventBus, WorkflowEvent
+from agentloom.engine.judge_formatter import (
+    format_judge_post_prompt,
+    format_judge_pre_prompt,
+    format_revise_budget_halt_prompt,
+    judge_post_needs_user_input,
+    judge_pre_needs_user_input,
+)
 from agentloom.engine.judge_parser import JudgeParseError, parse_judge_verdict
 from agentloom.engine.model_resolution import effective_model_for
 from agentloom.providers.types import (
@@ -31,7 +38,7 @@ from agentloom.providers.types import (
 )
 from agentloom.providers.types import ToolUse as ProviderToolUse
 from agentloom.schemas import WorkFlow, WorkFlowNode
-from agentloom.schemas.common import NodeStatus, StepKind, TokenUsage, utcnow
+from agentloom.schemas.common import JudgeVariant, NodeStatus, StepKind, TokenUsage, utcnow
 from agentloom.schemas.common import ToolUse as SchemaToolUse
 from agentloom.schemas.workflow import WireMessage
 from agentloom.tools.base import ToolContext, ToolRegistry
@@ -72,12 +79,21 @@ class WorkflowEngine:
         #: Resolved once per ``execute()`` call; read by
         #: :func:`_assert_tool_loop_budget`. ``None`` means unlimited.
         self._effective_budget: int | None = MAX_TOOL_LOOP_ITERATIONS
+        #: Resolved once per ``execute()`` call — the cap on
+        #: ``judge_during.during_verdict == "revise"`` seen in this run
+        #: before auto-mode halts. ``None`` means unlimited (§5.3 FR-PL-7).
+        self._effective_revise_budget: int | None = None
+        #: Revise counter for *this* ``execute()`` invocation. Nested
+        #: sub_agent_delegation will spin up its own engine, so each
+        #: recursion level counts independently.
+        self._revise_count: int = 0
 
     async def execute(
         self,
         workflow: WorkFlow,
         *,
         chatflow_tool_loop_budget: int | None | object = _UNSET,
+        chatflow_auto_mode_revise_budget: int | None | object = _UNSET,
     ) -> WorkFlow:
         """Run every planned node in topological order. Mutates and
         returns the workflow.
@@ -103,6 +119,10 @@ class WorkflowEngine:
         self._effective_budget = _effective_tool_loop_budget(
             workflow.tool_loop_budget, chatflow_tool_loop_budget
         )
+        self._effective_revise_budget = _effective_revise_budget(
+            workflow.auto_mode_revise_budget, chatflow_auto_mode_revise_budget
+        )
+        self._revise_count = 0
         broken: set[str] = set()
         done: set[str] = set()
 
@@ -129,11 +149,18 @@ class WorkflowEngine:
                     broken.add(node.id)
                 done.add(node_id)
                 progressed = True
+                # If a judge pass decided the WorkFlow must bounce back
+                # to the ChatFlow layer for user clarification, stop
+                # running — remaining planned nodes stay dashed, and
+                # the ChatFlow engine opens a new ChatNode whose
+                # agent_response is the pending prompt.
+                if workflow.pending_user_prompt is not None:
+                    break
                 # The tool loop may have added new nodes; break to
                 # recompute topological order and see them this pass.
                 break
 
-            if not progressed:
+            if not progressed or workflow.pending_user_prompt is not None:
                 break
 
         await self._bus.publish(
@@ -324,6 +351,31 @@ class WorkflowEngine:
             # FAILED. The raw output_message is already on the node.
             raise RuntimeError(f"judge parse failed: {exc}") from exc
 
+        # If the verdict requires user clarification, stash a rendered
+        # prompt on the WorkFlow — the outer execute() loop will halt,
+        # and the ChatFlow engine will open a new ChatNode whose
+        # agent_response is this prompt. judge_during is monitoring-
+        # mode only in MVP (ADR-020) — it never sets this field.
+        verdict = node.judge_verdict
+        if node.judge_variant == JudgeVariant.PRE and judge_pre_needs_user_input(verdict):
+            workflow.pending_user_prompt = format_judge_pre_prompt(verdict)
+        elif node.judge_variant == JudgeVariant.POST and judge_post_needs_user_input(verdict):
+            workflow.pending_user_prompt = format_judge_post_prompt(verdict)
+        elif node.judge_variant == JudgeVariant.DURING and verdict.during_verdict == "revise":
+            # Monitoring mode (ADR-020) — the WorkFlow keeps running on
+            # a single "revise", but auto-mode maintains a running count
+            # of revises across this execute() call. Once the count
+            # exceeds the budget we halt and bounce back to the user
+            # (§5.3 FR-PL-7).
+            self._revise_count += 1
+            budget = self._effective_revise_budget
+            if budget is not None and self._revise_count > budget:
+                workflow.pending_user_prompt = format_revise_budget_halt_prompt(
+                    revise_count=self._revise_count,
+                    budget=budget,
+                    latest_verdict=verdict,
+                )
+
 
 def _assert_tool_loop_budget(
     workflow: WorkFlow,
@@ -354,6 +406,26 @@ def _assert_tool_loop_budget(
             f"tool-use loop exceeded budget ({effective_budget} iterations); "
             "aborting to protect against runaway agents"
         )
+
+
+def _effective_revise_budget(
+    workflow_budget: int | None,
+    chatflow_budget: int | None | object,
+) -> int | None:
+    """Resolve ``workflow.auto_mode_revise_budget ?? chatflow.auto_mode_revise_budget``.
+
+    Mirror of :func:`_effective_tool_loop_budget` but with a different
+    fallback: when no ChatFlow context is provided (bare engine test),
+    auto-mode defaults to **unlimited** rather than a numeric cap. The
+    WorkFlow/ChatFlow-level defaults (``3``) only apply when the caller
+    actually hands them in.
+    """
+    if workflow_budget is not None:
+        return workflow_budget
+    if chatflow_budget is _UNSET:
+        return None  # unlimited for bare engine callers
+    assert chatflow_budget is None or isinstance(chatflow_budget, int)
+    return chatflow_budget
 
 
 def _effective_tool_loop_budget(

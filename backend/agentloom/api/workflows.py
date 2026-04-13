@@ -6,6 +6,8 @@ milestones will inject the real workspace via auth middleware.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -19,10 +21,32 @@ from agentloom.db.repositories.workflow import WorkflowNotFoundError, WorkflowRe
 from agentloom.engine.events import get_event_bus
 from agentloom.engine.workflow_engine import WorkflowEngine
 from agentloom.schemas import StepKind, WorkFlow, WorkFlowNode
-from agentloom.schemas.common import FrozenNodeError
+from agentloom.schemas.common import FrozenNodeError, JudgeVariant
 from agentloom.schemas.workflow import WireMessage
 from agentloom.tools import default_registry
 from agentloom.tools.base import ToolContext
+
+log = logging.getLogger(__name__)
+
+#: Tracks background re-run tasks so tests can await completion
+#: deterministically. Production traffic ignores this set — tasks
+#: remove themselves on completion, so the set is always ≤ the number
+#: of in-flight re-runs.
+_active_judge_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_judge_task(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _active_judge_tasks.add(task)
+    task.add_done_callback(_active_judge_tasks.discard)
+    return task
+
+
+async def drain_judge_tasks() -> None:
+    """Awaitable for tests: block until every re-run task fired from
+    this module finishes. Production code never calls this."""
+    while _active_judge_tasks:
+        await asyncio.gather(*list(_active_judge_tasks), return_exceptions=True)
 
 router = APIRouter(prefix="/api/workflows", tags=["workflows"])
 
@@ -150,6 +174,162 @@ async def execute_workflow(
     # Bind ChatResponse reference so the local import isn't unused.
     _ = ChatResponse
     return wf.model_dump(mode="json")
+
+
+class RerunJudgeRequest(BaseModel):
+    """Optional overrides for a re-run. When omitted the new judge_call
+    inherits sensible defaults from the existing graph (see handler)."""
+
+    parent_ids: list[str] | None = None
+    input_messages: list[WireMessage] | None = None
+
+
+class RerunJudgeResponse(BaseModel):
+    """202-style response — the judge runs asynchronously and streams
+    its verdict over the existing SSE channel at
+    ``GET /api/workflows/{workflow_id}/events``. Clients poll
+    ``GET /api/workflows/{workflow_id}`` or watch SSE for the result."""
+
+    judge_node_id: str
+
+
+async def _run_judge_in_background(workflow_id: str, new_node_id: str) -> None:
+    """Load the workflow in a fresh session, run the engine (which
+    will run exactly the new PLANNED judge_call since every other node
+    is already frozen), and persist the result. Errors are logged —
+    they also land on the node via the engine's normal failure path,
+    so the client sees them via SSE + GET."""
+    from agentloom.db.base import get_session_maker
+
+    try:
+        async with get_session_maker()() as session:
+            repo = WorkflowRepository(session, workspace_id=DEFAULT_WORKSPACE_ID)
+            wf = await repo.get(workflow_id)
+            engine = WorkflowEngine(
+                _provider_call_from_settings(),
+                get_event_bus(),
+                tool_registry=default_registry(),
+                tool_context=ToolContext(workspace_id=DEFAULT_WORKSPACE_ID),
+            )
+            await engine.execute(wf)
+            await repo.save(wf)
+            await session.commit()
+    except Exception:  # noqa: BLE001 — background boundary
+        log.exception(
+            "re-run judge failed for workflow=%s node=%s", workflow_id, new_node_id
+        )
+    finally:
+        await get_event_bus().close(workflow_id)
+
+
+def _latest_same_variant_judge(
+    wf: WorkFlow, variant: JudgeVariant
+) -> WorkFlowNode | None:
+    """Find the most recently created judge_call of the same variant to
+    copy ``input_messages`` / ``parent_ids`` from. Returns None if no
+    prior judge of this variant exists in the WorkFlow."""
+    candidates = [
+        n
+        for n in wf.nodes.values()
+        if n.step_kind == StepKind.JUDGE_CALL and n.judge_variant == variant
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda n: n.created_at)
+    return candidates[-1]
+
+
+@router.post(
+    "/{workflow_id}/judge/{variant}",
+    response_model=RerunJudgeResponse,
+    status_code=202,
+)
+async def rerun_workflow_judge(
+    workflow_id: str,
+    variant: JudgeVariant,
+    body: RerunJudgeRequest | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> RerunJudgeResponse:
+    """Create a sibling ``judge_call`` at WorkFlow scope and schedule
+    it. Re-runs never mutate the original judge — the evaluation
+    history is preserved in the DAG (ADR-018)."""
+    repo = _repo(session)
+    try:
+        wf = await repo.get(workflow_id)
+    except WorkflowNotFoundError as exc:
+        raise HTTPException(404, f"workflow {workflow_id} not found") from exc
+
+    prior = _latest_same_variant_judge(wf, variant)
+    body = body or RerunJudgeRequest()
+    parent_ids = list(
+        body.parent_ids
+        if body.parent_ids is not None
+        else (prior.parent_ids if prior else [])
+    )
+    input_messages = body.input_messages or (prior.input_messages if prior else None)
+
+    new_node = WorkFlowNode(
+        step_kind=StepKind.JUDGE_CALL,
+        judge_variant=variant,
+        parent_ids=parent_ids,
+        input_messages=input_messages,
+        judge_target_id=prior.judge_target_id if prior else None,
+    )
+    try:
+        wf.add_node(new_node)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    await repo.save(wf)
+    await session.commit()
+
+    _spawn_judge_task(_run_judge_in_background(workflow_id, new_node.id))
+    return RerunJudgeResponse(judge_node_id=new_node.id)
+
+
+@router.post(
+    "/{workflow_id}/nodes/{node_id}/judge/{variant}",
+    response_model=RerunJudgeResponse,
+    status_code=202,
+)
+async def rerun_node_judge(
+    workflow_id: str,
+    node_id: str,
+    variant: JudgeVariant,
+    body: RerunJudgeRequest | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> RerunJudgeResponse:
+    """Create a sibling ``judge_call`` pointed at ``node_id`` and
+    schedule it. Equivalent to the WorkFlow-level endpoint but with
+    ``judge_target_id`` pinned to the specific node and its I/O in the
+    new judge's ancestor chain."""
+    repo = _repo(session)
+    try:
+        wf = await repo.get(workflow_id)
+    except WorkflowNotFoundError as exc:
+        raise HTTPException(404, f"workflow {workflow_id} not found") from exc
+
+    if node_id not in wf.nodes:
+        raise HTTPException(404, f"node {node_id} not in workflow {workflow_id}")
+
+    body = body or RerunJudgeRequest()
+    new_node = WorkFlowNode(
+        step_kind=StepKind.JUDGE_CALL,
+        judge_variant=variant,
+        parent_ids=list(body.parent_ids) if body.parent_ids is not None else [node_id],
+        input_messages=body.input_messages,
+        judge_target_id=node_id,
+    )
+    try:
+        wf.add_node(new_node)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    await repo.save(wf)
+    await session.commit()
+
+    _spawn_judge_task(_run_judge_in_background(workflow_id, new_node.id))
+    return RerunJudgeResponse(judge_node_id=new_node.id)
 
 
 @router.get("/{workflow_id}/events")

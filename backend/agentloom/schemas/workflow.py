@@ -156,6 +156,14 @@ class WorkFlow(BaseModel):
     tool_loop_budget: int | None = None
     auto_mode_revise_budget: int | None = None
 
+    #: Set by the engine when a judge pass decides the WorkFlow cannot
+    #: proceed without user clarification (judge_pre says non-OK, or
+    #: judge_post says retry/fail). The ChatFlow layer reads this on
+    #: WorkFlow completion and opens a new ChatNode whose
+    #: ``agent_response`` is this prompt — all user-facing dialogue
+    #: lives at the ChatFlow layer, never inside a WorkFlow (§3.5).
+    pending_user_prompt: str | None = None
+
     @property
     def root_id(self) -> NodeId | None:
         """The single root id (§3.2 single-root decision).

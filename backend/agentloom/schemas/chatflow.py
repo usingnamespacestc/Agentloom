@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from agentloom.schemas.common import (
     EditableText,
+    ExecutionMode,
     NodeBase,
     NodeHasReferencesError,
     NodeId,
@@ -111,6 +112,11 @@ class ChatFlow(BaseModel):
     #: per WorkFlow run before the engine pauses at ``waiting_for_user``.
     #: Per-WorkNode override allowed; ``None`` = unlimited. See §5.3 FR-PL-7.
     auto_mode_revise_budget: int | None = 3
+    #: Execution mode applied to every new turn's inner WorkFlow. The
+    #: ChatFlowEngine derives the four switch defaults (``plan_enabled``,
+    #: ``judge_pre_enabled``, ``judge_during_enabled``, ``judge_post_enabled``)
+    #: from this per §3.4.1 — see :func:`derive_switches_from_mode`.
+    default_execution_mode: ExecutionMode = ExecutionMode.DIRECT
     created_at: datetime = Field(default_factory=utcnow)
 
     @property
