@@ -1,0 +1,93 @@
+builtin_id: planner_judge
+name: "Planner judge"
+description: >
+  Reviews a planner WorkNode's output (atomic brief OR decomposition)
+  for feasibility, coverage, ordering, and missed constraints. Returns
+  a `during` judge verdict — `continue` (proceed to worker / spawn
+  sub-tasks), `revise` (debate another round), or `halt` (escalate to
+  post_judge as infeasible).
+params_schema:
+  description:
+    type: string
+    required: true
+    description: "Realised trio of the WorkFlow level being planned."
+  inputs:
+    type: string
+    required: false
+  expected_outcome:
+    type: string
+    required: true
+  plan_json:
+    type: string
+    required: true
+    description: "The planner's most recent JSON output, verbatim."
+  round:
+    type: string
+    required: true
+    description: >
+      Current debate round (1-indexed, as a string for substitution).
+      The judge should be more accepting on later rounds — concerns
+      that survived prior debates are unlikely to be fixed by another.
+  round_budget:
+    type: string
+    required: true
+    description: "Hard cap on debate rounds for this WorkFlow."
+plan:
+  description:
+    text: "planner_judge — review the plan"
+    provenance: pure_agent
+  execution_mode: direct
+  nodes:
+    - id: "planner_judge_root"
+      parent_ids: []
+      step_kind: judge_call
+      judge_variant: during
+      role: planner_judge
+      description:
+        text: "Decide whether to proceed, revise, or halt the plan."
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            {% include '_critique_base' %}
+
+            You are the planner_judge. The planner just emitted a plan.
+            Decide one of:
+
+            - "continue": the plan covers the goal, the decomposition
+              (if any) is well-ordered, and an atomic worker brief
+              (if any) is concrete enough to execute. Advance.
+            - "revise":   the plan has fixable issues. Enumerate them
+              as critiques so the planner can address them next round.
+            - "halt":     the plan is so far off that no amount of
+              revision will salvage it (e.g. the planner emitted
+              `infeasible`). Escalate to post_judge.
+
+            Hard rules:
+            - For "decompose" plans: check that sub-tasks together
+              cover the parent's expected_outcome; that none reference
+              data the parent's `inputs` does not include; that the
+              `after` graph is acyclic; that no sub-task is a no-op.
+            - For "atomic" plans: check that the worker's brief has
+              concrete inputs and a measurable expected_outcome.
+            - Convergence pressure: this is round {{ round }} of at
+              most {{ round_budget }}. Late rounds should accept any
+              plan that is not actively wrong; nits are not blockers.
+
+            Return JSON:
+              {"during_verdict": "continue"|"revise"|"halt",
+               "critiques": [{"issue": str, "severity": "blocker"|"concern"|"nit",
+                              "evidence": str}, ...]}
+            No other prose.
+        - role: user
+          content: |
+            Realised trio
+            -------------
+            Description: {{ description }}
+            Inputs: {{ inputs }}
+            Expected outcome: {{ expected_outcome }}
+
+            Plan to review (round {{ round }} / {{ round_budget }})
+            -------------------------------------------------------
+            {{ plan_json }}
+  root_ids: ["planner_judge_root"]

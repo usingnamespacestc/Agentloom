@@ -1,0 +1,85 @@
+builtin_id: worker_judge
+name: "Worker judge"
+description: >
+  Reviews the worker's draft output before it is committed. Returns a
+  `during` verdict — `continue` (output is acceptable, advance to
+  post_judge), `revise` (debate another round; the worker will rerun
+  with the critique attached), or `halt` (escalate to post_judge as
+  unrecoverable).
+params_schema:
+  description:
+    type: string
+    required: true
+    description: "The worker's brief — what the planner asked it to do."
+  inputs:
+    type: string
+    required: false
+  expected_outcome:
+    type: string
+    required: true
+  worker_output:
+    type: string
+    required: true
+    description: "The worker's most recent draft output, verbatim."
+  round:
+    type: string
+    required: true
+    description: "1-indexed debate round."
+  round_budget:
+    type: string
+    required: true
+plan:
+  description:
+    text: "worker_judge — review the worker's draft"
+    provenance: pure_agent
+  execution_mode: direct
+  nodes:
+    - id: "worker_judge_root"
+      parent_ids: []
+      step_kind: judge_call
+      judge_variant: during
+      role: worker_judge
+      description:
+        text: "Decide whether the worker's draft is good enough to commit."
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            {% include '_critique_base' %}
+
+            You are the worker_judge. The worker just produced a draft
+            output for an atomic task. Decide one of:
+
+            - "continue": the output meets the expected outcome with no
+              blocking issues. Advance to post_judge.
+            - "revise":   the output has fixable gaps. Enumerate them
+              as critiques. The worker will retry with these attached.
+            - "halt":     the task as briefed cannot succeed (e.g. the
+              worker reports it lacks required inputs that the planner
+              should have provided). Escalate to post_judge.
+
+            Hard rules:
+            - Compare the output against the expected_outcome
+              specifically — not against your own intuition of what a
+              "good" answer looks like.
+            - Convergence pressure: this is round {{ round }} of at
+              most {{ round_budget }}. Late rounds should accept any
+              output that is not actively wrong; nits are not blockers.
+
+            Return JSON:
+              {"during_verdict": "continue"|"revise"|"halt",
+               "critiques": [{"issue": str, "severity": "blocker"|"concern"|"nit",
+                              "evidence": str}, ...]}
+            No other prose.
+        - role: user
+          content: |
+            Worker brief
+            ------------
+            Description: {{ description }}
+            Inputs: {{ inputs }}
+            Expected outcome: {{ expected_outcome }}
+
+            Worker draft (round {{ round }} / {{ round_budget }})
+            -----------------------------------------------------
+            {{ worker_output }}
+  root_ids: ["worker_judge_root"]

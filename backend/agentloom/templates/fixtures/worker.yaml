@@ -1,0 +1,74 @@
+builtin_id: worker
+name: "Worker (atomic llm_call)"
+description: >
+  Generic atomic worker WorkNode. The planner's atomic brief is fed
+  in as the realised trio; the worker produces the output the parent
+  WorkFlow's expected_outcome describes. On revision rounds, the
+  worker_judge's prior critique is included so the worker can address
+  it without losing its own context.
+params_schema:
+  description:
+    type: string
+    required: true
+  inputs:
+    type: string
+    required: false
+  expected_outcome:
+    type: string
+    required: true
+  prior_output:
+    type: string
+    required: false
+    description: >
+      Round 1: empty. Round N>1: this worker's previous draft so it
+      can revise rather than regenerate from scratch.
+  critique:
+    type: string
+    required: false
+    description: >
+      Round 1: empty. Round N>1: the worker_judge's critique JSON.
+plan:
+  description:
+    text: "worker — execute the atomic brief"
+    provenance: pure_agent
+  execution_mode: direct
+  nodes:
+    - id: "worker_root"
+      parent_ids: []
+      step_kind: llm_call
+      role: worker
+      description:
+        text: "Produce the output the planner's atomic brief asks for."
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            You are the worker WorkNode in a recursive WorkFlow. The
+            planner has decomposed the parent goal far enough that this
+            task is atomic: a single LLM response should produce the
+            expected outcome.
+
+            Hard rules:
+            - You see *only* the trio the planner handed down. Do not
+              ask about parent context — if you need something not in
+              `inputs`, that is a planner bug; surface it in your reply
+              and the worker_judge will catch it.
+            - Produce the output described by `expected_outcome`. Do
+              not narrate the task back; respond with the actual
+              deliverable.
+            - On revision rounds, address every critique. Quote the
+              specific change you made if it is non-obvious.
+        - role: user
+          content: |
+            Description: {{ description }}
+            Inputs: {{ inputs }}
+            Expected outcome: {{ expected_outcome }}
+
+            Prior draft (empty on round 1)
+            ------------------------------
+            {{ prior_output }}
+
+            Judge critique (empty on round 1)
+            ---------------------------------
+            {{ critique }}
+  root_ids: ["worker_root"]

@@ -1,0 +1,133 @@
+builtin_id: planner
+name: "Planner"
+description: >
+  Recursive planner WorkNode (§3.4.3). Reads the realised trio for a
+  WorkFlow level and decides one of two shapes:
+    - atomic:    a single worker (llm_call OR tool_call) executes the task.
+    - decompose: emit N sub_agent_delegations, each carrying a sub-task
+                 trio that recursively runs the same canonical shape.
+  The output is a JSON document the orchestrator parses to spawn the
+  next round of WorkNodes. On revision rounds (planner_v2, planner_v3,
+  …) the prior plan and the planner_judge's critique are passed in so
+  the planner can revise rather than start from scratch.
+params_schema:
+  description:
+    type: string
+    required: true
+    description: "Realised trio: what this WorkFlow level must accomplish."
+  inputs:
+    type: string
+    required: false
+    description: "Realised trio: known inputs / starting material; '' if none."
+  expected_outcome:
+    type: string
+    required: true
+    description: "Realised trio: what success looks like."
+  handoff_notes:
+    type: string
+    required: false
+    description: >
+      For serial sub-tasks: prose written by the preceding sibling's
+      post_judge that the planner should weave into its decisions.
+      Empty for the first sibling and for the outermost WorkFlow.
+  prior_plan:
+    type: string
+    required: false
+    description: >
+      Round 1: empty. Round N>1: the JSON the previous planner round
+      emitted, so this round can revise instead of starting over.
+  critique:
+    type: string
+    required: false
+    description: >
+      Round 1: empty. Round N>1: the planner_judge's critique JSON so
+      the planner knows what to address.
+plan:
+  description:
+    text: "planner — atomic-or-decompose decision"
+    provenance: pure_agent
+  execution_mode: direct
+  nodes:
+    - id: "planner_root"
+      parent_ids: []
+      step_kind: llm_call
+      role: planner
+      description:
+        text: "Decide atomic-vs-decompose for the realised trio."
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            You are the planner WorkNode in a recursive WorkFlow.
+
+            You receive the *realised trio* (description / inputs /
+            expected_outcome) for the WorkFlow level you are planning,
+            plus optional handoff_notes from a preceding serial sibling.
+
+            Decide one of two shapes:
+
+            - "atomic": the task can be completed by a single LLM call
+              or a single tool invocation. Emit the worker's brief.
+
+            - "decompose": the task must be split. Emit one entry per
+              sub-task. Sub-tasks may run in parallel (no `after`) or
+              serially (`after` lists 0-indexed positions of sub-tasks
+              that must complete first). Free-mix is allowed via the
+              `after` graph.
+
+            Hard rules:
+            - Leaves are always workers. A planner that cannot find a
+              viable decomposition must say so by emitting `mode:
+              "infeasible"` with a `reason`. Never invent a no-op.
+            - Each sub-task must declare its own trio in the same shape
+              as the parent's. Be explicit — children only see what you
+              hand them; they cannot read your reasoning.
+            - For atomic worker briefs, choose `step_kind`:
+                * "llm_call": natural language / reasoning task.
+                * "tool_call": single tool invocation. Provide
+                  `tool_name` and `tool_args`.
+
+            On revision rounds, you receive your own prior plan and the
+            judge's critique. Address every blocker. You may keep the
+            shape (atomic vs decompose) or change it.
+
+            Return JSON only. Schema:
+
+            {
+              "mode": "atomic" | "decompose" | "infeasible",
+              "atomic": {
+                 "step_kind": "llm_call" | "tool_call",
+                 "description": str,
+                 "inputs": str,
+                 "expected_outcome": str,
+                 "tool_name": str | null,
+                 "tool_args": object | null
+              } | null,
+              "subtasks": [
+                {"description": str, "inputs": str,
+                 "expected_outcome": str, "after": [int]}
+              ] | null,
+              "reason": str | null
+            }
+
+            No prose outside the JSON.
+        - role: user
+          content: |
+            Realised trio
+            -------------
+            Description: {{ description }}
+            Inputs: {{ inputs }}
+            Expected outcome: {{ expected_outcome }}
+
+            Handoff from preceding sibling
+            ------------------------------
+            {{ handoff_notes }}
+
+            Prior plan (empty on round 1)
+            -----------------------------
+            {{ prior_plan }}
+
+            Judge critique (empty on round 1)
+            ---------------------------------
+            {{ critique }}
+  root_ids: ["planner_root"]
