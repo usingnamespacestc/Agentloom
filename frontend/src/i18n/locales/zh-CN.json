@@ -28,6 +28,7 @@
       "planned": "待执行",
       "running": "运行中",
       "waiting_for_rate_limit": "等待令牌桶",
+      "waiting_for_user": "等待用户",
       "succeeded": "成功",
       "failed": "失败",
       "retrying": "重试中",
@@ -36,6 +37,7 @@
     "kind": {
       "llm_call": "LLM 调用",
       "tool_call": "工具调用",
+      "judge_call": "评审",
       "sub_agent_delegation": "子代理"
     }
   },
@@ -60,7 +62,9 @@
     "ctx_retry": "重试",
     "ctx_cancel": "取消执行",
     "ctx_delete": "删除",
-    "ctx_delete_cascade": "删除及所有后续节点"
+    "ctx_delete_cascade": "删除及所有后续节点",
+    "awaiting_user": "需要你",
+    "awaiting_user_hint": "Agent 有问题要问你——点开工作流查看"
   },
   "workflow": {
     "panel_title": "内部工作流",
@@ -83,7 +87,15 @@
     "detail_status": "状态",
     "detail_error": "错误",
     "detail_tool_name": "工具名",
-    "detail_tool_args": "工具参数"
+    "detail_tool_args": "工具参数",
+    "pending_user_prompt": "Agent 需要澄清",
+    "judge_variant_pre": "pre",
+    "judge_variant_during": "during",
+    "judge_variant_post": "post",
+    "blockers": "阻塞项",
+    "missing_inputs": "缺失输入",
+    "critiques": "评审意见",
+    "issues": "问题"
   },
   "conversation": {
     "panel_title": "对话",

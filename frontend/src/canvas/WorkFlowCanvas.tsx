@@ -94,8 +94,21 @@ export function WorkFlowCanvas({ chatNode }: WorkFlowCanvasProps) {
     );
   }
 
+  const pendingPrompt = chatNode.workflow.pending_user_prompt;
+
   return (
-    <div data-testid="workflow-canvas" className="h-full w-full">
+    <div data-testid="workflow-canvas" className="relative h-full w-full">
+      {pendingPrompt && (
+        <div
+          data-testid="workflow-pending-banner"
+          className="absolute left-3 right-3 top-3 z-10 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-[12px] text-amber-900 shadow-sm"
+        >
+          <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+            {t("workflow.pending_user_prompt")}
+          </div>
+          <div className="whitespace-pre-wrap break-words">{pendingPrompt}</div>
+        </div>
+      )}
       <ReactFlow
         nodes={nodes}
         edges={edges}

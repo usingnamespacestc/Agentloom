@@ -53,6 +53,7 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
   const isGreetingRoot = node.user_message === null;
   const hasWorkflow = Object.keys(node.workflow.nodes).length > 0;
   const isDashed = node.status === "planned" || node.status === "running";
+  const isAwaitingUser = !!node.workflow.pending_user_prompt;
 
   const onEnter = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -75,8 +76,22 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
       data-testid={`chatflow-node-${node.id}`}
       className={[
         "group/card relative rounded-lg border shadow-sm w-52 p-2.5 text-xs",
-        isRoot ? "bg-blue-50 border-l-[3px] border-l-blue-400" : isLeaf ? "bg-green-50" : "bg-white",
-        isSelected ? "border-blue-500 ring-2 ring-blue-200" : isRoot ? "border-blue-200" : isLeaf ? "border-green-200" : "border-gray-300",
+        isAwaitingUser
+          ? "bg-amber-50 border-l-[3px] border-l-amber-500"
+          : isRoot
+            ? "bg-blue-50 border-l-[3px] border-l-blue-400"
+            : isLeaf
+              ? "bg-green-50"
+              : "bg-white",
+        isSelected
+          ? "border-blue-500 ring-2 ring-blue-200"
+          : isAwaitingUser
+            ? "border-amber-300"
+            : isRoot
+              ? "border-blue-200"
+              : isLeaf
+                ? "border-green-200"
+                : "border-gray-300",
         isMerge ? "border-purple-400" : "",
         isDashed ? "border-dashed" : "",
       ].join(" ")}
@@ -98,6 +113,14 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
 
       <div className="flex items-center justify-between mb-1.5">
         <StatusBadge status={node.status} />
+        {isAwaitingUser && (
+          <span
+            title={t("chatflow.awaiting_user_hint")}
+            className="rounded bg-amber-200/80 px-1 py-0.5 text-[10px] font-semibold text-amber-900"
+          >
+            {t("chatflow.awaiting_user")}
+          </span>
+        )}
         {isMerge && (
           <span className="text-[10px] text-purple-600 font-medium">⨯{node.parent_ids.length}</span>
         )}

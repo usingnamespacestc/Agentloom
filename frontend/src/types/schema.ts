@@ -15,6 +15,7 @@ export const NODE_STATUSES = [
   "planned",
   "running",
   "waiting_for_rate_limit",
+  "waiting_for_user",
   "succeeded",
   "failed",
   "retrying",
@@ -26,10 +27,39 @@ export type NodeStatus = (typeof NODE_STATUSES)[number];
 export const STEP_KINDS = [
   "llm_call",
   "tool_call",
+  "judge_call",
   "sub_agent_delegation",
 ] as const;
 
 export type StepKind = (typeof STEP_KINDS)[number];
+
+export type JudgeVariant = "pre" | "during" | "post";
+
+export interface Critique {
+  issue: string;
+  severity: "blocker" | "concern" | "nit";
+  evidence: string;
+}
+
+export interface Issue {
+  location: NodeId;
+  expected: string;
+  actual: string;
+  reproduction: string;
+}
+
+export interface JudgeVerdict {
+  // pre
+  feasibility: "ok" | "risky" | "infeasible" | null;
+  blockers: string[];
+  missing_inputs: string[];
+  // during
+  critiques: Critique[];
+  during_verdict: "continue" | "revise" | "halt" | null;
+  // post
+  post_verdict: "accept" | "retry" | "fail" | null;
+  issues: Issue[];
+}
 
 export type EditProvenance = "pure_user" | "pure_agent" | "mixed" | "unset";
 
@@ -111,12 +141,23 @@ export interface WorkFlowNode extends NodeBaseFields {
 
   // sub_agent_delegation
   sub_workflow?: WorkFlow | null;
+
+  // judge_call (ADR-018)
+  judge_variant?: JudgeVariant | null;
+  judge_target_id?: NodeId | null;
+  judge_verdict?: JudgeVerdict | null;
 }
 
 export interface WorkFlow {
   id: NodeId;
   nodes: Record<NodeId, WorkFlowNode>;
   root_ids: NodeId[];
+  /**
+   * Set by the engine when a judge decides the WorkFlow cannot proceed
+   * without user clarification. The ChatFlow layer renders this as the
+   * agent's next turn (§3.5).
+   */
+  pending_user_prompt?: string | null;
 }
 
 export type PendingTurnSource = "web" | "discord" | "feishu" | "api" | "test";

@@ -28,6 +28,7 @@ export interface WorkFlowNodeData extends Record<string, unknown> {
 const KIND_ACCENT: Record<string, string> = {
   llm_call: "border-sky-300 bg-sky-50",
   tool_call: "border-emerald-300 bg-emerald-50",
+  judge_call: "border-amber-300 bg-amber-50",
   sub_agent_delegation: "border-violet-300 bg-violet-50",
 };
 
@@ -64,6 +65,9 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
       )}
       {node.step_kind === "tool_call" && (
         <ToolCallBody node={node} />
+      )}
+      {node.step_kind === "judge_call" && (
+        <JudgeCallBody node={node} />
       )}
       {node.step_kind === "sub_agent_delegation" && (
         <div className="italic text-gray-500">delegation</div>
@@ -128,6 +132,83 @@ function ThinkingToggle({ text, label }: { text: string; label: string }) {
           {truncate(text, 500)}
         </div>
       )}
+    </div>
+  );
+}
+
+function JudgeCallBody({ node }: { node: WorkFlowNode }) {
+  const { t } = useTranslation();
+  const variant = node.judge_variant;
+  const verdict = node.judge_verdict;
+
+  // Pick the one-word headline that matches the variant's discriminator.
+  const headline = verdict
+    ? variant === "pre"
+      ? verdict.feasibility
+      : variant === "during"
+        ? verdict.during_verdict
+        : verdict.post_verdict
+    : null;
+
+  const headlineColor =
+    headline === "ok" || headline === "accept" || headline === "continue"
+      ? "text-green-700"
+      : headline === "risky" || headline === "retry" || headline === "revise"
+        ? "text-amber-700"
+        : headline
+          ? "text-red-700"
+          : "text-gray-400";
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center gap-1 text-[10px] text-gray-500">
+        <span className="rounded bg-amber-200/60 px-1 py-0.5 font-medium text-amber-900">
+          {variant ? t(`workflow.judge_variant_${variant}`) : "—"}
+        </span>
+        {headline && (
+          <span className={`font-semibold ${headlineColor}`}>{headline}</span>
+        )}
+      </div>
+      {verdict?.blockers && verdict.blockers.length > 0 && (
+        <BulletList label={t("workflow.blockers")} items={verdict.blockers} />
+      )}
+      {verdict?.missing_inputs && verdict.missing_inputs.length > 0 && (
+        <BulletList label={t("workflow.missing_inputs")} items={verdict.missing_inputs} />
+      )}
+      {verdict?.critiques && verdict.critiques.length > 0 && (
+        <BulletList
+          label={t("workflow.critiques")}
+          items={verdict.critiques.map((c) => `${c.severity}: ${c.issue}`)}
+        />
+      )}
+      {verdict?.issues && verdict.issues.length > 0 && (
+        <BulletList
+          label={t("workflow.issues")}
+          items={verdict.issues.map(
+            (i) => `${i.location}: expected ${i.expected}, got ${i.actual}`,
+          )}
+        />
+      )}
+      {node.output_message?.content && !verdict && (
+        <div className="prose prose-sm max-w-none text-[11px] text-gray-500 italic break-words">
+          <Markdown>{truncate(node.output_message.content, 80)}</Markdown>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BulletList({ label, items }: { label: string; items: string[] }) {
+  return (
+    <div>
+      <div className="text-[10px] font-medium text-gray-600">{label}</div>
+      <ul className="ml-3 list-disc text-[10px] text-gray-700 space-y-0.5">
+        {items.map((it, i) => (
+          <li key={i} className="break-words">
+            {truncate(it, 90)}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

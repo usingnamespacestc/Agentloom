@@ -28,6 +28,7 @@
       "planned": "Planned",
       "running": "Running",
       "waiting_for_rate_limit": "Waiting (rate limit)",
+      "waiting_for_user": "Waiting for user",
       "succeeded": "Succeeded",
       "failed": "Failed",
       "retrying": "Retrying",
@@ -36,6 +37,7 @@
     "kind": {
       "llm_call": "LLM call",
       "tool_call": "Tool call",
+      "judge_call": "Judge",
       "sub_agent_delegation": "Sub-agent"
     }
   },
@@ -60,7 +62,9 @@
     "ctx_retry": "Retry",
     "ctx_cancel": "Cancel execution",
     "ctx_delete": "Delete",
-    "ctx_delete_cascade": "Delete with descendants"
+    "ctx_delete_cascade": "Delete with descendants",
+    "awaiting_user": "Needs you",
+    "awaiting_user_hint": "The agent has a question for you — drill in to see what it's asking"
   },
   "workflow": {
     "panel_title": "Inner workflow",
@@ -83,7 +87,15 @@
     "detail_status": "Status",
     "detail_error": "Error",
     "detail_tool_name": "Tool",
-    "detail_tool_args": "Arguments"
+    "detail_tool_args": "Arguments",
+    "pending_user_prompt": "Agent needs clarification",
+    "judge_variant_pre": "pre",
+    "judge_variant_during": "during",
+    "judge_variant_post": "post",
+    "blockers": "Blockers",
+    "missing_inputs": "Missing inputs",
+    "critiques": "Critiques",
+    "issues": "Issues"
   },
   "conversation": {
     "panel_title": "Conversation",

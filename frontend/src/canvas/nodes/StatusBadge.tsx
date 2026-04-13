@@ -16,6 +16,7 @@ const STATUS_CLASSES: Record<NodeStatus, string> = {
   planned: "bg-gray-200 text-gray-700 border-gray-300",
   running: "bg-yellow-100 text-yellow-800 border-yellow-300",
   waiting_for_rate_limit: "bg-amber-100 text-amber-800 border-amber-300",
+  waiting_for_user: "bg-amber-200 text-amber-900 border-amber-400",
   succeeded: "bg-green-100 text-green-800 border-green-300",
   failed: "bg-red-100 text-red-800 border-red-300",
   retrying: "bg-orange-100 text-orange-800 border-orange-300",
