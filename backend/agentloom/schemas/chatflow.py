@@ -103,7 +103,25 @@ class ChatFlow(BaseModel):
     nodes: dict[NodeId, ChatFlowNode] = Field(default_factory=dict)
     root_ids: list[NodeId] = Field(default_factory=list)
     default_model: ProviderModelRef | None = None
+    #: ReAct inner-loop cap shared by every WorkFlow in this ChatFlow.
+    #: ``None`` means unlimited. Per-WorkFlow and per-WorkNode overrides
+    #: are planned. See §5.4 FR-EX-6.
+    tool_loop_budget: int | None = 12
+    #: Auto-mode halt cap: total ``judge_during.verdict == "revise"`` tolerated
+    #: per WorkFlow run before the engine pauses at ``waiting_for_user``.
+    #: Per-WorkNode override allowed; ``None`` = unlimited. See §5.3 FR-PL-7.
+    auto_mode_revise_budget: int | None = 3
     created_at: datetime = Field(default_factory=utcnow)
+
+    @property
+    def root_id(self) -> NodeId | None:
+        """The single root id (§3.2 single-root decision).
+
+        Returns the first entry of ``root_ids`` for forward-compat with
+        legacy payloads that may technically have multiple roots; the
+        invariant going forward is ``len(root_ids) <= 1`` on new data.
+        """
+        return self.root_ids[0] if self.root_ids else None
 
     def add_node(self, node: ChatFlowNode) -> ChatFlowNode:
         if node.id in self.nodes:

@@ -12,6 +12,10 @@ from pydantic import BaseModel, Field, model_validator
 
 from agentloom.schemas.common import (
     CycleError,
+    EditableText,
+    ExecutionMode,
+    JudgeVariant,
+    JudgeVerdict,
     NodeBase,
     NodeHasReferencesError,
     NodeId,
@@ -46,6 +50,14 @@ class WorkFlowNode(NodeBase):
     step_kind: StepKind
     tool_constraints: ToolConstraints | None = None
 
+    # --- Keyframe flags (§3.4.2 / §4.9) — meaningful only while dashed ---
+    is_keyframe: bool = False
+    is_keyframe_locked: bool = False
+    #: Snapshot of the user's original trio for unlocked keyframes, so the
+    #: planner's edits can be diffed/restored. None for non-keyframe nodes
+    #: and for nodes whose trio the planner has not yet touched.
+    keyframe_origin_trio: dict[str, Any] | None = None
+
     # --- llm_call fields ---
     input_messages: list[WireMessage] | None = None
     output_message: WireMessage | None = None
@@ -57,6 +69,13 @@ class WorkFlowNode(NodeBase):
     tool_args: dict[str, Any] | None = None
     tool_result: ToolResult | None = None
 
+    # --- judge_call fields (ADR-018) ---
+    judge_variant: JudgeVariant | None = None
+    #: The WorkNode id this judge is evaluating. Empty for WorkFlow-level
+    #: judges (whose target is the enclosing WorkFlow itself, not a node).
+    judge_target_id: NodeId | None = None
+    judge_verdict: JudgeVerdict | None = None
+
     # --- sub_agent_delegation ---
     sub_workflow: "WorkFlow | None" = None
 
@@ -66,22 +85,38 @@ class WorkFlowNode(NodeBase):
 
         We don't *require* them all to be populated (a dashed llm_call has
         no output_message yet), but we do forbid cross-kind contamination.
+        ``judge_call`` nodes share ``input_messages`` / ``output_message`` /
+        ``usage`` with ``llm_call`` (they're still a model invocation under
+        the hood) but additionally carry ``judge_variant`` / ``judge_verdict``.
         """
         if self.step_kind == StepKind.LLM_CALL:
             if self.tool_name or self.tool_args or self.tool_result:
                 raise ValueError("llm_call node may not carry tool_call fields")
             if self.sub_workflow is not None:
                 raise ValueError("llm_call node may not carry a sub_workflow")
+            if self.judge_variant or self.judge_verdict:
+                raise ValueError("llm_call node may not carry judge_call fields")
         elif self.step_kind == StepKind.TOOL_CALL:
             if self.input_messages or self.output_message or self.usage:
                 raise ValueError("tool_call node may not carry llm_call fields")
             if self.sub_workflow is not None:
                 raise ValueError("tool_call node may not carry a sub_workflow")
+            if self.judge_variant or self.judge_verdict:
+                raise ValueError("tool_call node may not carry judge_call fields")
+        elif self.step_kind == StepKind.JUDGE_CALL:
+            if self.tool_name or self.tool_args or self.tool_result:
+                raise ValueError("judge_call node may not carry tool_call fields")
+            if self.sub_workflow is not None:
+                raise ValueError("judge_call node may not carry a sub_workflow")
+            if self.judge_variant is None:
+                raise ValueError("judge_call node requires judge_variant")
         elif self.step_kind == StepKind.SUB_AGENT_DELEGATION:
             if self.tool_name or self.tool_args or self.tool_result:
                 raise ValueError("delegation node may not carry tool_call fields")
             if self.input_messages or self.output_message or self.usage:
                 raise ValueError("delegation node may not carry llm_call fields")
+            if self.judge_variant or self.judge_verdict:
+                raise ValueError("delegation node may not carry judge_call fields")
         return self
 
 
@@ -91,11 +126,45 @@ class WorkFlow(BaseModel):
     Stored as a flat ``nodes`` map keyed by NodeId plus a list of root_ids
     (nodes with empty ``parent_ids``). Edges live on each node's
     ``parent_ids`` — no separate edge table.
+
+    The WorkFlow carries its own **trio** (``description`` / ``inputs`` /
+    ``expected_outcome``) describing the outer task it's accountable for —
+    this is what ``judge_pre`` fills in and what ``judge_post`` measures
+    against. See §3.3 of requirements.
+
+    ``execution_mode`` + the four switches together determine how plan and
+    judges fire. See §3.4.1.
     """
 
     id: NodeId = Field(default_factory=generate_node_id)
     nodes: dict[NodeId, WorkFlowNode] = Field(default_factory=dict)
     root_ids: list[NodeId] = Field(default_factory=list)
+
+    # WorkFlow-level trio
+    description: EditableText | None = None
+    inputs: EditableText | None = None
+    expected_outcome: EditableText | None = None
+
+    # Execution behavior — each WorkFlow (including nested ones) picks its own
+    execution_mode: ExecutionMode = ExecutionMode.DIRECT
+    plan_enabled: bool = False
+    judge_pre_enabled: bool = False
+    judge_during_enabled: bool = False
+    judge_post_enabled: bool = False
+
+    # Per-WorkFlow budget overrides; ``None`` = inherit from ChatFlow
+    tool_loop_budget: int | None = None
+    auto_mode_revise_budget: int | None = None
+
+    @property
+    def root_id(self) -> NodeId | None:
+        """The single root id (§3.2 single-root decision).
+
+        Returns the first entry of ``root_ids`` for forward-compat with
+        legacy payloads that may technically have multiple roots; the
+        invariant going forward is ``len(root_ids) <= 1`` on new data.
+        """
+        return self.root_ids[0] if self.root_ids else None
 
     # ----------------------------------------------------------- construction
 

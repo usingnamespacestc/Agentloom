@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 import uuid_utils
 from pydantic import BaseModel, Field
@@ -37,6 +37,7 @@ class NodeStatus(str, Enum):
     PLANNED = "planned"
     RUNNING = "running"
     WAITING_FOR_RATE_LIMIT = "waiting_for_rate_limit"
+    WAITING_FOR_USER = "waiting_for_user"  # auto-mode halt pending user resume (§3.4.1)
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     RETRYING = "retrying"
@@ -57,7 +58,24 @@ class StepKind(str, Enum):
 
     LLM_CALL = "llm_call"
     TOOL_CALL = "tool_call"
+    JUDGE_CALL = "judge_call"  # pre / during / post — see §3.5
     SUB_AGENT_DELEGATION = "sub_agent_delegation"
+
+
+class JudgeVariant(str, Enum):
+    """Which of the three judge passes a ``judge_call`` WorkNode represents."""
+
+    PRE = "pre"
+    DURING = "during"
+    POST = "post"
+
+
+class ExecutionMode(str, Enum):
+    """How autonomous a WorkFlow's execution is — see §3.4.1."""
+
+    DIRECT = "direct"          # pure ReAct, no plan phase
+    SEMI_AUTO = "semi_auto"    # plan + modal gates; keyframes allowed
+    AUTO = "auto"              # end-to-end until halt condition
 
 
 class EditProvenance(str, Enum):
@@ -134,14 +152,23 @@ class ToolConstraints(BaseModel):
 
 
 class NodeBase(BaseModel):
-    """Fields common to both ChatFlowNode and WorkFlowNode."""
+    """Fields common to both ChatFlowNode and WorkFlowNode.
+
+    The **planning trio** (``description`` / ``inputs`` / ``expected_outcome``)
+    gives every node a consistent shape — what to do, what it needs, what
+    success looks like. Judges read and write the trio.
+    """
 
     id: NodeId = Field(default_factory=generate_node_id)
     parent_ids: list[NodeId] = Field(default_factory=list)
     description: EditableText = Field(default_factory=EditableText)
+    inputs: EditableText | None = None
     expected_outcome: EditableText | None = None
     status: NodeStatus = NodeStatus.PLANNED
     model_override: ProviderModelRef | None = None
+    #: Model that descendants inherit (§4.10). ``None`` = inherit from
+    #: ancestors; the effective model is resolved by walking up parents.
+    next_model_override: ProviderModelRef | None = None
     locked: bool = False
     error: str | None = None
 
@@ -207,3 +234,47 @@ class TokenUsage(BaseModel):
     total_tokens: int = 0
     cached_tokens: int = 0
     reasoning_tokens: int = 0
+
+
+class Critique(BaseModel):
+    """One item from a ``judge_during`` pass. See ADR-020."""
+
+    issue: str
+    severity: Literal["blocker", "concern", "nit"] = "concern"
+    evidence: str = ""
+
+
+class Issue(BaseModel):
+    """One item from a ``judge_post`` FAIL/RETRY pass. See ADR-018.
+
+    ``location`` points at a WorkNode id so the canvas can jump/highlight
+    exactly where the issue was found.
+    """
+
+    location: NodeId
+    expected: str
+    actual: str
+    reproduction: str = ""
+
+
+class JudgeVerdict(BaseModel):
+    """Structured parse of a ``judge_call`` WorkNode's output.
+
+    Exactly the subset of fields relevant to ``judge_variant`` is populated;
+    other fields are left at their defaults. Parsing failures surface as a
+    ``failed`` judge_call with the raw output preserved on
+    ``output_message`` (not here).
+    """
+
+    # --- judge_pre ---
+    feasibility: Literal["ok", "risky", "infeasible"] | None = None
+    blockers: list[str] = Field(default_factory=list)
+    missing_inputs: list[str] = Field(default_factory=list)
+
+    # --- judge_during ---
+    critiques: list[Critique] = Field(default_factory=list)
+    during_verdict: Literal["continue", "revise", "halt"] | None = None
+
+    # --- judge_post ---
+    post_verdict: Literal["accept", "retry", "fail"] | None = None
+    issues: list[Issue] = Field(default_factory=list)
