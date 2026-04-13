@@ -707,7 +707,10 @@ class ChatFlowEngine:
 
         runtime_error: str | None = None
         try:
-            await self._inner.execute(chat_node.workflow)
+            await self._inner.execute(
+                chat_node.workflow,
+                chatflow_tool_loop_budget=chatflow.tool_loop_budget,
+            )
         except Exception as exc:  # noqa: BLE001 — engine boundary
             log.exception("chat node %s inner workflow raised", node_id)
             runtime_error = f"{type(exc).__name__}: {exc}"

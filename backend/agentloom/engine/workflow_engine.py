@@ -16,9 +16,9 @@ Design notes:
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any
 
 from agentloom.engine.events import EventBus, WorkflowEvent
+from agentloom.engine.model_resolution import effective_model_for
 from agentloom.providers.types import (
     AssistantMessage,
     ChatResponse,
@@ -40,10 +40,19 @@ ProviderCall = Callable[
     Awaitable[ChatResponse],
 ]
 
-#: Hard safety cap on the number of LLM↔tool turns the engine will
-#: auto-spawn for one top-level llm_call. Shielded by this bound because
-#: a malformed prompt or buggy tool could otherwise keep emitting
-#: tool_uses forever. Configurable knob lands in M7.
+#: Sentinel so we can distinguish ``chatflow_tool_loop_budget=None``
+#: ("chatflow exists and says unlimited") from "no chatflow was passed
+#: at all".
+_UNSET: object = object()
+
+
+#: Fallback tool-loop budget used when no ChatFlow/WorkFlow context is
+#: provided (e.g. engine tests that exercise a bare WorkFlow). Real
+#: traffic resolves the budget via
+#: ``workflow.tool_loop_budget ?? chatflow.tool_loop_budget`` — see
+#: ``_effective_tool_loop_budget`` below. ``None`` on either layer
+#: means "unlimited"; this default exists only so standalone callers
+#: aren't implicitly unlimited.
 MAX_TOOL_LOOP_ITERATIONS = 12
 
 
@@ -59,8 +68,16 @@ class WorkflowEngine:
         self._bus = event_bus
         self._tools = tool_registry
         self._tool_ctx = tool_context or ToolContext()
+        #: Resolved once per ``execute()`` call; read by
+        #: :func:`_assert_tool_loop_budget`. ``None`` means unlimited.
+        self._effective_budget: int | None = MAX_TOOL_LOOP_ITERATIONS
 
-    async def execute(self, workflow: WorkFlow) -> WorkFlow:
+    async def execute(
+        self,
+        workflow: WorkFlow,
+        *,
+        chatflow_tool_loop_budget: int | None | object = _UNSET,
+    ) -> WorkFlow:
         """Run every planned node in topological order. Mutates and
         returns the workflow.
 
@@ -74,7 +91,17 @@ class WorkflowEngine:
         auto-spawn child tool_call nodes + a follow-up llm_call. We
         handle this by recomputing the order after each step and
         running any newly-planned node we haven't seen yet.
+
+        ``chatflow_tool_loop_budget`` lets the caller (typically
+        ``ChatFlowEngine``) hand in the outer ChatFlow's budget so the
+        resolution ``workflow.tool_loop_budget ?? chatflow.tool_loop_budget``
+        can finish. ``None`` explicitly means "unlimited"; the
+        ``_UNSET`` sentinel means "no chatflow context" and falls back
+        to :data:`MAX_TOOL_LOOP_ITERATIONS`.
         """
+        self._effective_budget = _effective_tool_loop_budget(
+            workflow.tool_loop_budget, chatflow_tool_loop_budget
+        )
         broken: set[str] = set()
         done: set[str] = set()
 
@@ -183,8 +210,8 @@ class WorkflowEngine:
                 "ancestor context to build from"
             )
 
-        if node.model_override:
-            ref = node.model_override
+        ref = effective_model_for(workflow, node.id)
+        if ref is not None:
             model = f"{ref.provider_id}:{ref.model_id}" if ref.provider_id else ref.model_id
         else:
             model = None
@@ -223,7 +250,7 @@ class WorkflowEngine:
         # llm_call to feed the results back. The outer execute() loop
         # will pick up the newly-planned children on its next pass.
         if self._tools is not None and node.output_message.tool_uses:
-            _assert_tool_loop_budget(workflow, node)
+            _assert_tool_loop_budget(workflow, node, self._effective_budget)
             _spawn_tool_loop_children(workflow, node)
 
     async def _run_tool_call(self, workflow: WorkFlow, node: WorkFlowNode) -> None:
@@ -243,7 +270,11 @@ class WorkflowEngine:
         node.tool_result = result
 
 
-def _assert_tool_loop_budget(workflow: WorkFlow, node: WorkFlowNode) -> None:
+def _assert_tool_loop_budget(
+    workflow: WorkFlow,
+    node: WorkFlowNode,
+    effective_budget: int | None,
+) -> None:
     """Count how many llm_call ancestors exist; refuse to spawn more
     children if we've already hit the safety cap.
 
@@ -251,18 +282,46 @@ def _assert_tool_loop_budget(workflow: WorkFlow, node: WorkFlowNode) -> None:
     have we done in this chain" — each loop turn adds exactly one
     llm_call to the ancestor chain, so len(llm ancestors) is the loop
     iteration count.
+
+    ``effective_budget=None`` means unlimited (this check becomes a
+    no-op). See :func:`_effective_tool_loop_budget`.
     """
+    if effective_budget is None:
+        return
     ancestors = workflow.ancestors(node.id) + [node.id]
     llm_ancestors = sum(
         1
         for nid in ancestors
         if workflow.get(nid).step_kind == StepKind.LLM_CALL
     )
-    if llm_ancestors >= MAX_TOOL_LOOP_ITERATIONS:
+    if llm_ancestors >= effective_budget:
         raise RuntimeError(
-            f"tool-use loop exceeded budget ({MAX_TOOL_LOOP_ITERATIONS} iterations); "
+            f"tool-use loop exceeded budget ({effective_budget} iterations); "
             "aborting to protect against runaway agents"
         )
+
+
+def _effective_tool_loop_budget(
+    workflow_budget: int | None,
+    chatflow_budget: int | None | object,
+) -> int | None:
+    """Resolve ``workflow.tool_loop_budget ?? chatflow.tool_loop_budget``.
+
+    - If the WorkFlow set its own budget, that wins (``None`` on the
+      WorkFlow means "inherit from ChatFlow").
+    - Else use the ChatFlow's budget. ``None`` there explicitly means
+      "unlimited".
+    - ``chatflow_budget=_UNSET`` means the caller didn't provide a
+      ChatFlow context at all (e.g. a test invoking the engine
+      directly); fall back to :data:`MAX_TOOL_LOOP_ITERATIONS` so
+      those callers still get a safety cap.
+    """
+    if workflow_budget is not None:
+        return workflow_budget
+    if chatflow_budget is _UNSET:
+        return MAX_TOOL_LOOP_ITERATIONS
+    assert chatflow_budget is None or isinstance(chatflow_budget, int)
+    return chatflow_budget
 
 
 def _spawn_tool_loop_children(workflow: WorkFlow, parent_llm: WorkFlowNode) -> None:
