@@ -1,0 +1,68 @@
+builtin_id: judge_during
+name: "Judge (during)"
+description: "Mid-execution red-team pass over a single WorkNode."
+params_schema:
+  target_description:
+    type: string
+    required: true
+    description: "Trio.description of the WorkNode being judged."
+  target_inputs:
+    type: string
+    required: false
+  target_expected_outcome:
+    type: string
+    required: false
+  target_output:
+    type: string
+    required: true
+    description: "The WorkNode's output so far (output_message or tool_result)."
+  workflow_description:
+    type: string
+    required: false
+    description: "Enclosing WorkFlow trio.description, for context."
+plan:
+  description:
+    text: "judge_during red-team pass"
+    provenance: pure_agent
+  execution_mode: direct
+  nodes:
+    - id: "judge_during_root"
+      parent_ids: []
+      step_kind: judge_call
+      judge_variant: during
+      description:
+        text: "Critique this WorkNode's output adversarially."
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            {% include '_critique_base' %}
+
+            You are running the *during* pass on a single WorkNode
+            whose output is fresh. Return a list of critiques plus a
+            verdict:
+              - continue: nothing blocking; proceed.
+              - revise:   re-run the WorkNode; critiques describe what
+                          must change.
+              - halt:     something is structurally wrong; stop the
+                          WorkFlow and hand back to the user.
+
+            Return JSON:
+              {"critiques": [{"issue": str, "severity":
+                "blocker"|"concern"|"nit", "evidence": str}, ...],
+               "during_verdict": "continue"|"revise"|"halt"}.
+            No other prose.
+        - role: user
+          content: |
+            Enclosing WorkFlow: {{ workflow_description }}
+
+            WorkNode under review
+            ---------------------
+            Description: {{ target_description }}
+            Inputs: {{ target_inputs }}
+            Expected outcome: {{ target_expected_outcome }}
+
+            Output
+            ------
+            {{ target_output }}
+  root_ids: ["judge_during_root"]

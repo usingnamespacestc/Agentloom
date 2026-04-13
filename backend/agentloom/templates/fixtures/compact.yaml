@@ -1,0 +1,44 @@
+builtin_id: compact
+name: "Compact"
+description: "Summarize a long ChatFlow prefix into a single system message so subsequent turns fit in context."
+params_schema:
+  transcript:
+    type: string
+    required: true
+    description: "Serialized user/assistant turns to be compressed."
+  preserved_facts:
+    type: string
+    required: false
+    description: "Newline list of facts that must survive verbatim (names, ids, numbers)."
+plan:
+  description:
+    text: "Compact a long transcript into a concise summary."
+    provenance: pure_agent
+  execution_mode: direct
+  nodes:
+    - id: "compact_root"
+      parent_ids: []
+      step_kind: llm_call
+      description:
+        text: "Produce a compact summary preserving listed facts."
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            You are summarizing a conversation prefix so later turns
+            can reason about it without re-reading the raw transcript.
+
+            Rules:
+            - Preserve every fact in "preserved_facts" verbatim.
+            - Keep proper nouns, ids, numbers, and dates exact.
+            - Drop filler, greetings, and redundant restatements.
+            - Keep the decision points — what was asked, what was
+              answered, what was agreed.
+        - role: user
+          content: |
+            Preserved facts (verbatim):
+            {{ preserved_facts }}
+
+            Transcript to compact:
+            {{ transcript }}
+  root_ids: ["compact_root"]

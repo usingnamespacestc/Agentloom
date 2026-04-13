@@ -1,0 +1,40 @@
+builtin_id: merge
+name: "Merge"
+description: "Combine two ChatNode subtrees into a single continuation turn."
+params_schema:
+  left_summary:
+    type: string
+    required: true
+  right_summary:
+    type: string
+    required: true
+plan:
+  description:
+    text: "Merge two ChatFlow branches"
+    provenance: pure_agent
+  execution_mode: direct
+  nodes:
+    - id: "merge_root"
+      parent_ids: []
+      step_kind: llm_call
+      description:
+        text: "Produce a single user_message that coherently continues from both branches."
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            You are merging two conversation branches into one.
+            Produce a single assistant message that reconciles the
+            two lines of discussion without losing material facts
+            from either. If the branches disagree, call out the
+            disagreement explicitly.
+        - role: user
+          content: |
+            Left branch summary
+            -------------------
+            {{ left_summary }}
+
+            Right branch summary
+            --------------------
+            {{ right_summary }}
+  root_ids: ["merge_root"]

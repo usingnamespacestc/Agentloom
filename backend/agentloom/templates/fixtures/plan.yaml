@@ -1,0 +1,61 @@
+builtin_id: plan
+name: "Plan"
+description: "Expand a goal into a dashed-node WorkFlow the user can review."
+params_schema:
+  goal:
+    type: string
+    required: true
+    description: "The outer task the WorkFlow is accountable for."
+  inputs:
+    type: string
+    required: false
+    description: "Known inputs / starting material; empty string if none."
+  expected_outcome:
+    type: string
+    required: false
+    description: "What success looks like; empty string if unspecified."
+  keyframes_json:
+    type: string
+    required: false
+    description: >
+      JSON array of user-placed keyframes (dashed WorkNodes) that the
+      plan MUST preserve. Locked keyframes are hard constraints — their
+      trio is immutable. Unlocked keyframes are refinable suggestions.
+      Empty string means no keyframes.
+plan:
+  description:
+    text: "Plan for: {{ goal }}"
+    provenance: pure_agent
+  execution_mode: direct
+  plan_enabled: false
+  judge_pre_enabled: false
+  judge_during_enabled: false
+  judge_post_enabled: false
+  nodes:
+    - id: "plan_root"
+      parent_ids: []
+      step_kind: llm_call
+      description:
+        text: "Generate a DAG plan for the stated goal."
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            You are a planner that breaks a goal into an executable DAG
+            of WorkNodes. Each node is one of:
+              - llm_call: a single model invocation
+              - tool_call: invoke a named tool with arguments
+              - sub_agent_delegation: hand off to a nested WorkFlow
+
+            Return valid JSON matching the WorkFlow schema. Dashed
+            nodes only (status=planned). Preserve user-placed
+            keyframes verbatim when locked; refine them when unlocked.
+        - role: user
+          content: |
+            Goal: {{ goal }}
+            Inputs: {{ inputs }}
+            Expected outcome: {{ expected_outcome }}
+
+            User-placed keyframes (must preserve in order):
+            {{ keyframes_json }}
+  root_ids: ["plan_root"]

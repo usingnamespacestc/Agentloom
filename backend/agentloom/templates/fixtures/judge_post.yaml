@@ -1,0 +1,71 @@
+builtin_id: judge_post
+name: "Judge (post)"
+description: "Terminal-boundary verdict on whether the WorkFlow achieved its stated outcome."
+params_schema:
+  workflow_description:
+    type: string
+    required: true
+  workflow_inputs:
+    type: string
+    required: false
+  workflow_expected_outcome:
+    type: string
+    required: true
+  workflow_output_summary:
+    type: string
+    required: true
+    description: "Summary of the terminal WorkNode outputs (engine-built)."
+  worknode_catalog:
+    type: string
+    required: false
+    description: >
+      Newline-separated ``id: description`` pairs so the judge can
+      cite a location when flagging an issue.
+plan:
+  description:
+    text: "judge_post terminal verdict"
+    provenance: pure_agent
+  execution_mode: direct
+  nodes:
+    - id: "judge_post_root"
+      parent_ids: []
+      step_kind: judge_call
+      judge_variant: post
+      description:
+        text: "Did the WorkFlow meet its expected outcome?"
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            {% include '_critique_base' %}
+
+            You are running the *post* pass. Decide:
+              - accept: output meets expected_outcome with no blocking issues.
+              - retry:  fixable gap — specific issues must be resolved by
+                        rerunning one or more WorkNodes.
+              - fail:   structurally cannot succeed as built; hand back to user.
+
+            When an issue exists, locate it on a specific WorkNode id
+            from the catalog so the UI can jump there.
+
+            Return JSON:
+              {"post_verdict": "accept"|"retry"|"fail",
+               "issues": [{"location": worknode_id, "expected": str,
+                           "actual": str, "reproduction": str}, ...]}.
+            No other prose.
+        - role: user
+          content: |
+            WorkFlow trio
+            -------------
+            Description: {{ workflow_description }}
+            Inputs: {{ workflow_inputs }}
+            Expected outcome: {{ workflow_expected_outcome }}
+
+            WorkNode catalog
+            ----------------
+            {{ worknode_catalog }}
+
+            Output summary
+            --------------
+            {{ workflow_output_summary }}
+  root_ids: ["judge_post_root"]
