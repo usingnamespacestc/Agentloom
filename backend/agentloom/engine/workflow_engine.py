@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 from agentloom.engine.events import EventBus, WorkflowEvent
+from agentloom.engine.judge_parser import JudgeParseError, parse_judge_verdict
 from agentloom.engine.model_resolution import effective_model_for
 from agentloom.providers.types import (
     AssistantMessage,
@@ -157,6 +158,8 @@ class WorkflowEngine:
                 await self._run_llm_call(workflow, node)
             elif node.step_kind == StepKind.TOOL_CALL:
                 await self._run_tool_call(workflow, node)
+            elif node.step_kind == StepKind.JUDGE_CALL:
+                await self._run_judge_call(workflow, node)
             elif node.step_kind == StepKind.SUB_AGENT_DELEGATION:
                 raise NotImplementedError(
                     "sub_agent_delegation is not implemented yet"
@@ -188,16 +191,22 @@ class WorkflowEngine:
             )
         )
 
-    async def _run_llm_call(self, workflow: WorkFlow, node: WorkFlowNode) -> None:
-        """Build context from the ancestor chain + call the provider.
+    async def _invoke_and_freeze(
+        self,
+        workflow: WorkFlow,
+        node: WorkFlowNode,
+        *,
+        expose_tools: bool,
+    ) -> None:
+        """Shared provider-call path for ``llm_call`` and ``judge_call``.
 
-        Context construction rule (ADR-009 / §4.3): the ancestor chain
-        only, not the full DAG. We walk the topologically ordered
-        ancestors, and for each *frozen llm_call* ancestor we include
-        its input_messages (once, from the root) plus the ancestor's
-        output_message. For simplicity in M3, if the node carries
-        explicit ``input_messages``, we use those as-is — otherwise we
-        derive them from the ancestor chain.
+        Builds the message context from ``node.input_messages`` or, if
+        empty, the ancestor chain; resolves the effective model via
+        :func:`effective_model_for`; optionally exposes tool definitions
+        (llm_call only — judges don't get tools, see ADR-020); invokes
+        the provider and freezes ``output_message`` / ``usage`` onto
+        the node. Does **not** spawn a tool loop — that's the caller's
+        choice.
         """
         if node.input_messages:
             messages = _wire_to_provider(node.input_messages)
@@ -206,8 +215,8 @@ class WorkflowEngine:
 
         if not messages:
             raise ValueError(
-                f"llm_call node {node.id} has no input_messages and no "
-                "ancestor context to build from"
+                f"{node.step_kind.value} node {node.id} has no input_messages "
+                "and no ancestor context to build from"
             )
 
         ref = effective_model_for(workflow, node.id)
@@ -219,9 +228,9 @@ class WorkflowEngine:
         # Expose every tool the registry considers visible under this
         # node's constraints. Empty list means "no tools" — stays
         # backward-compatible with M3 callers that don't configure a
-        # registry.
+        # registry. Judges never see tools even if a registry exists.
         tool_defs: list[ToolDefinition] = []
-        if self._tools is not None:
+        if expose_tools and self._tools is not None:
             tool_defs = [
                 ToolDefinition(**d)
                 for d in self._tools.definitions_for_constraints(node.tool_constraints)
@@ -243,6 +252,19 @@ class WorkflowEngine:
         if node.input_messages is None:
             node.input_messages = _provider_to_wire(messages)
         node.usage = TokenUsage(**response.usage.model_dump()) if response.usage else None
+
+    async def _run_llm_call(self, workflow: WorkFlow, node: WorkFlowNode) -> None:
+        """Run an llm_call node: invoke the provider, freeze the output,
+        and spawn a tool-use loop if the model requested one.
+
+        Context construction rule (ADR-009 / §4.3): the ancestor chain
+        only, not the full DAG. We walk topologically and include each
+        frozen llm_call ancestor's input (seed) plus its output_message;
+        tool_call ancestors contribute a ``tool`` message. If the node
+        carries explicit ``input_messages``, we use those as-is.
+        """
+        await self._invoke_and_freeze(workflow, node, expose_tools=True)
+        assert node.output_message is not None
 
         # ------------------------------------------------------------- tool loop
         # If the model requested tool calls AND we have a registry
@@ -268,6 +290,39 @@ class WorkflowEngine:
             constraints=node.tool_constraints,
         )
         node.tool_result = result
+
+    async def _run_judge_call(self, workflow: WorkFlow, node: WorkFlowNode) -> None:
+        """Invoke the LLM exactly like an llm_call, then parse the raw
+        assistant reply into a :class:`JudgeVerdict` that matches the
+        node's declared ``judge_variant`` (ADR-018).
+
+        Parse failures surface as a failed node — the outer ``_run_node``
+        marks the status and the raw output is already on
+        ``output_message`` for the user to inspect or re-run. The engine
+        never silently accepts malformed judge output.
+
+        ``judge_during`` runs in **monitoring mode** for MVP (ADR-020):
+        the verdict is written to the node but does not interrupt the
+        surrounding WorkFlow. Auto-mode halts on `revise` exhaustion
+        and semi_auto's user-driven gates live at the ChatFlow layer.
+        """
+        if node.judge_variant is None:
+            raise ValueError(f"judge_call node {node.id} missing judge_variant")
+
+        # Same context/provider path as llm_call, but never exposes
+        # tools to the judge — judges must respond with structured
+        # JSON, not by asking to call a tool.
+        await self._invoke_and_freeze(workflow, node, expose_tools=False)
+        assert node.output_message is not None
+        try:
+            node.judge_verdict = parse_judge_verdict(
+                node.output_message.content,
+                node.judge_variant,
+            )
+        except JudgeParseError as exc:
+            # Reraise as a plain exception so the outer _run_node marks
+            # FAILED. The raw output_message is already on the node.
+            raise RuntimeError(f"judge parse failed: {exc}") from exc
 
 
 def _assert_tool_loop_budget(
