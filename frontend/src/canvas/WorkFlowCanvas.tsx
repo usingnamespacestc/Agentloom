@@ -1,11 +1,16 @@
 /**
- * Main-area canvas for the drill-down view of a ChatNode's inner
- * WorkFlow DAG. Replaces the old right-side WorkFlowPanel.
+ * Main-area canvas for the drill-down view of a WorkFlow DAG.
  *
  * Renders the workflow with the same horizontal layout and drag /
  * single-selection semantics as ``ChatFlowCanvas``. Selection feeds
  * into ``workflowSelectedNodeId`` in the store so the right-side
  * ConversationView can show a matching I/O + detail panel.
+ *
+ * Drives off whatever WorkFlow the drill-stack resolves to (§3.4.3) —
+ * the outer workflow attached to a ChatNode, or a nested ``sub_workflow``
+ * inside a ``sub_agent_delegation`` WorkNode. Position persistence is
+ * only wired for the outer workflow today; nested sub-workflow drag
+ * positions live in memory until a backend endpoint exists for them.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -26,15 +31,22 @@ import { layoutDag } from "./layout";
 import { WorkFlowNodeCard, type WorkFlowNodeData } from "./nodes/WorkFlowNodeCard";
 import { api } from "@/lib/api";
 import { useChatFlowStore } from "@/store/chatflowStore";
-import type { ChatFlowNode, WorkFlowNode } from "@/types/schema";
+import type { NodeId, WorkFlow, WorkFlowNode } from "@/types/schema";
 
 const NODE_TYPES = { workflow: WorkFlowNodeCard };
 
 export interface WorkFlowCanvasProps {
-  chatNode: ChatFlowNode | null;
+  workflow: WorkFlow | null;
+  /** ChatNode that owns the drill-stack root. Used as the persistence
+   * key for outer-workflow drag positions. ``null`` while the stack is
+   * empty. */
+  outerChatNodeId: NodeId | null;
+  /** True when ``workflow`` is a nested sub_workflow rather than the
+   * outer one — disables position-saving (no backend endpoint yet). */
+  nested: boolean;
 }
 
-export function WorkFlowCanvas({ chatNode }: WorkFlowCanvasProps) {
+export function WorkFlowCanvas({ workflow, outerChatNodeId, nested }: WorkFlowCanvasProps) {
   const { t } = useTranslation();
   const chatflowId = useChatFlowStore((s) => s.chatflow?.id ?? null);
   const workflowSelectedNodeId = useChatFlowStore((s) => s.workflowSelectedNodeId);
@@ -45,13 +57,10 @@ export function WorkFlowCanvas({ chatNode }: WorkFlowCanvasProps) {
   const dragPositions = useRef<Record<string, { x: number; y: number }>>({});
   const dirtyPositions = useRef<Set<string>>(new Set());
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastChatNodeId = useRef<string | null>(null);
+  const lastWorkflowId = useRef<string | null>(null);
 
-  // Mirrors ChatFlowCanvas's persistence: drag positions live in a ref
-  // (so SSE reconciliation doesn't snap them back) and a 500ms-debounced
-  // PATCH ships dirty ids to the backend.
   const flushPositions = useCallback(() => {
-    if (!chatflowId || !chatNode || dirtyPositions.current.size === 0) return;
+    if (nested || !chatflowId || !outerChatNodeId || dirtyPositions.current.size === 0) return;
     const positions = [...dirtyPositions.current]
       .map((id) => {
         const pos = dragPositions.current[id];
@@ -60,24 +69,24 @@ export function WorkFlowCanvas({ chatNode }: WorkFlowCanvasProps) {
       .filter(Boolean) as { id: string; x: number; y: number }[];
     dirtyPositions.current.clear();
     if (positions.length > 0) {
-      void api.patchWorkflowPositions(chatflowId, chatNode.id, positions);
+      void api.patchWorkflowPositions(chatflowId, outerChatNodeId, positions);
     }
-  }, [chatflowId, chatNode]);
+  }, [chatflowId, outerChatNodeId, nested]);
 
   useEffect(() => {
-    if (chatNode?.id !== lastChatNodeId.current) {
+    if (workflow?.id !== lastWorkflowId.current) {
       dragPositions.current = {};
       dirtyPositions.current.clear();
-      lastChatNodeId.current = chatNode?.id ?? null;
+      lastWorkflowId.current = workflow?.id ?? null;
     }
-    const laid = buildWorkflowGraph(chatNode, workflowSelectedNodeId);
+    const laid = buildWorkflowGraph(workflow, workflowSelectedNodeId);
     const merged = laid.nodes.map((n) => ({
       ...n,
       position: dragPositions.current[n.id] ?? n.position,
     }));
     setNodes(merged);
     setEdges(laid.edges);
-  }, [chatNode, workflowSelectedNodeId]);
+  }, [workflow, workflowSelectedNodeId]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     const filtered = changes.filter((c) => c.type !== "select");
@@ -100,7 +109,7 @@ export function WorkFlowCanvas({ chatNode }: WorkFlowCanvasProps) {
     selectWorkflowNode(node.id);
   };
 
-  if (!chatNode) {
+  if (!workflow) {
     return (
       <div
         data-testid="workflow-canvas-empty"
@@ -111,7 +120,7 @@ export function WorkFlowCanvas({ chatNode }: WorkFlowCanvasProps) {
     );
   }
 
-  if (Object.keys(chatNode.workflow.nodes).length === 0) {
+  if (Object.keys(workflow.nodes).length === 0) {
     return (
       <div
         data-testid="workflow-canvas-empty"
@@ -147,11 +156,11 @@ export function WorkFlowCanvas({ chatNode }: WorkFlowCanvasProps) {
 
 /** Pure helper — unit-testable without rendering React Flow. */
 export function buildWorkflowGraph(
-  chatNode: ChatFlowNode | null,
+  workflow: WorkFlow | null,
   selectedNodeId: string | null = null,
 ): { nodes: Node<WorkFlowNodeData>[]; edges: Edge[] } {
-  if (!chatNode) return { nodes: [], edges: [] };
-  const wf = chatNode.workflow;
+  if (!workflow) return { nodes: [], edges: [] };
+  const wf = workflow;
   const laidOut = layoutDag<WorkFlowNode>(wf.nodes, wf.root_ids, {
     columnWidth: 240,
     rowHeight: 160,

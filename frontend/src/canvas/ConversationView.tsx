@@ -33,6 +33,7 @@ import { resolvePath } from "./pathUtils";
 import {
   RIGHT_PANEL_MAX,
   RIGHT_PANEL_MIN,
+  resolveDrilledWorkflow,
   useChatFlowStore,
 } from "@/store/chatflowStore";
 import { usePreferencesStore } from "@/store/preferencesStore";
@@ -46,18 +47,21 @@ import type {
   ProviderModelRef,
   TokenUsage,
   WireMessage,
+  WorkFlow,
   WorkFlowNode,
 } from "@/types/schema";
 
 export function ConversationView() {
   const chatflow = useChatFlowStore((s) => s.chatflow);
   const viewMode = useChatFlowStore((s) => s.viewMode);
-  const drillDownChatNodeId = useChatFlowStore((s) => s.drillDownChatNodeId);
+  const drillStack = useChatFlowStore((s) => s.drillStack);
   const width = useChatFlowStore((s) => s.rightPanelWidth);
   const setWidth = useChatFlowStore((s) => s.setRightPanelWidth);
 
-  const drilledChatNode =
-    chatflow && drillDownChatNodeId ? chatflow.nodes[drillDownChatNodeId] ?? null : null;
+  const drilledWorkflow = useMemo(
+    () => resolveDrilledWorkflow(chatflow, drillStack),
+    [chatflow, drillStack],
+  );
 
   return (
     <aside
@@ -69,7 +73,7 @@ export function ConversationView() {
       {viewMode === "chatflow" ? (
         <ChatFlowConversation chatflow={chatflow} />
       ) : (
-        <WorkFlowConversation chatNode={drilledChatNode} />
+        <WorkFlowConversation workflow={drilledWorkflow} />
       )}
     </aside>
   );
@@ -757,19 +761,19 @@ function PendingBubble({
 
 // ---------------------------------------------------------------- WorkFlow mode
 
-function WorkFlowConversation({ chatNode }: { chatNode: ChatFlowNode | null }) {
+function WorkFlowConversation({ workflow }: { workflow: WorkFlow | null }) {
   const { t } = useTranslation();
   const workflowSelectedNodeId = useChatFlowStore((s) => s.workflowSelectedNodeId);
   const selectWorkflowNode = useChatFlowStore((s) => s.selectWorkflowNode);
   const pickWorkflowBranch = useChatFlowStore((s) => s.pickWorkflowBranch);
 
   const { path, forks } = useMemo(() => {
-    if (!chatNode) return { path: [], forks: [] };
+    if (!workflow) return { path: [], forks: [] };
     return resolvePath<WorkFlowNode>(
-      { nodes: chatNode.workflow.nodes, rootIds: chatNode.workflow.root_ids },
+      { nodes: workflow.nodes, rootIds: workflow.root_ids },
       workflowSelectedNodeId,
     );
-  }, [chatNode, workflowSelectedNodeId]);
+  }, [workflow, workflowSelectedNodeId]);
 
   const forkAt = useMemo(() => {
     const m = new Map<NodeId, (typeof forks)[number]>();
@@ -777,7 +781,7 @@ function WorkFlowConversation({ chatNode }: { chatNode: ChatFlowNode | null }) {
     return m;
   }, [forks]);
 
-  if (!chatNode) {
+  if (!workflow) {
     return <EmptyBody testid="conversation-empty">{t("workflow.no_selection")}</EmptyBody>;
   }
 
@@ -786,8 +790,8 @@ function WorkFlowConversation({ chatNode }: { chatNode: ChatFlowNode | null }) {
   }
 
   const selectedNode = workflowSelectedNodeId
-    ? chatNode.workflow.nodes[workflowSelectedNodeId] ?? null
-    : chatNode.workflow.nodes[path[path.length - 1]] ?? null;
+    ? workflow.nodes[workflowSelectedNodeId] ?? null
+    : workflow.nodes[path[path.length - 1]] ?? null;
 
   return (
     <>
@@ -801,7 +805,7 @@ function WorkFlowConversation({ chatNode }: { chatNode: ChatFlowNode | null }) {
         className="flex-1 space-y-4 overflow-auto px-4 py-4"
       >
         {path.map((nid) => {
-          const node = chatNode.workflow.nodes[nid];
+          const node = workflow.nodes[nid];
           if (!node) return null;
           const fork = forkAt.get(nid);
           return (
@@ -813,7 +817,7 @@ function WorkFlowConversation({ chatNode }: { chatNode: ChatFlowNode | null }) {
               />
               {fork && (
                 <WorkFlowBranchSelector
-                  wfNodes={chatNode.workflow.nodes}
+                  wfNodes={workflow.nodes}
                   fork={fork}
                   onPick={(childId) => pickWorkflowBranch(fork.nodeId, childId)}
                 />

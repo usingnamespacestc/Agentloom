@@ -17,6 +17,7 @@ import { useTranslation } from "react-i18next";
 import { StatusBadge } from "./StatusBadge";
 import { NodeIdLine } from "./NodeIdLine";
 import { TokenBar } from "./ChatFlowNodeCard";
+import { useChatFlowStore } from "@/store/chatflowStore";
 import type { WorkFlowNode } from "@/types/schema";
 
 export interface WorkFlowNodeData extends Record<string, unknown> {
@@ -71,7 +72,7 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
         <JudgeCallBody node={node} />
       )}
       {node.step_kind === "sub_agent_delegation" && (
-        <div className="italic text-gray-500">delegation</div>
+        <SubAgentDelegationBody node={node} />
       )}
 
       <NodeIdLine nodeId={node.id} />
@@ -205,6 +206,32 @@ function BulletList({ label, items }: { label: string; items: string[] }) {
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+function SubAgentDelegationBody({ node }: { node: WorkFlowNode }) {
+  const { t } = useTranslation();
+  const enterSubWorkflow = useChatFlowStore((s) => s.enterSubWorkflow);
+  const hasSub = node.sub_workflow != null;
+  const childCount = hasSub ? Object.keys(node.sub_workflow!.nodes).length : 0;
+
+  return (
+    <div className="space-y-1">
+      <div className="italic text-gray-500">delegation</div>
+      {hasSub && (
+        <button
+          type="button"
+          data-testid={`open-sub-workflow-${node.id}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            enterSubWorkflow(node.id);
+          }}
+          className="rounded border border-violet-300 bg-white px-1.5 py-0.5 text-[10px] text-violet-700 hover:bg-violet-100"
+        >
+          {t("workflow.open_sub_workflow")} ({childCount})
+        </button>
+      )}
     </div>
   );
 }

@@ -45,6 +45,19 @@ import type {
 export type LoadState = "idle" | "loading" | "ready" | "error";
 export type ViewMode = "chatflow" | "workflow";
 
+/**
+ * One level of nested-WorkFlow drill-in (§3.4.3 nesting).
+ *
+ *   - ``chatnode``   — the outer WorkFlow attached to a ChatFlowNode.
+ *                      Always the first frame on the stack.
+ *   - ``subworkflow`` — a ``sub_workflow`` attached to a
+ *                      ``sub_agent_delegation`` WorkNode in the PREVIOUS
+ *                      frame's WorkFlow. Always frame[≥1].
+ */
+export type DrillFrame =
+  | { kind: "chatnode"; chatNodeId: NodeId }
+  | { kind: "subworkflow"; parentWorkNodeId: NodeId };
+
 export const RIGHT_PANEL_MIN = 320;
 export const RIGHT_PANEL_MAX = 900;
 const RIGHT_PANEL_DEFAULT = 440;
@@ -74,12 +87,24 @@ export interface ChatFlowStoreState {
    */
   branchMemory: Record<NodeId, NodeId>;
 
-  /** Drill-down: which ChatNode we entered. null means we're in chatflow view. */
-  viewMode: ViewMode;
-  drillDownChatNodeId: NodeId | null;
+  /**
+   * Stack of drill-in frames (§3.4.3). Empty = chatflow view; first
+   * frame is always a ChatNode entry; later frames are nested
+   * sub-WorkFlows reached through ``sub_agent_delegation`` WorkNodes.
+   */
+  drillStack: DrillFrame[];
+  /** Selection inside the *top* drill frame's WorkFlow. */
   workflowSelectedNodeId: NodeId | null;
-  /** Same concept as ``branchMemory``, but inside a drilled-down WorkFlow. */
+  /** Branch memory for the top drill frame's WorkFlow. Reset on push/pop. */
   workflowBranchMemory: Record<NodeId, NodeId>;
+
+  /** Convenience for legacy callers: the original ChatNode the user
+   * drilled into (= ``drillStack[0].chatNodeId``), or null in chatflow
+   * view. Computed from ``drillStack`` so updates are atomic. */
+  drillDownChatNodeId: NodeId | null;
+  /** ``"chatflow"`` when ``drillStack`` is empty, ``"workflow"`` otherwise.
+   * Computed from ``drillStack``. */
+  viewMode: ViewMode;
 
   /** ConversationView width in px — user-draggable. */
   rightPanelWidth: number;
@@ -142,9 +167,20 @@ export interface ChatFlowStoreState {
    */
   pickBranch: (forkId: NodeId, childId: NodeId) => void;
 
-  /** Enter the workflow drill-down view for a specific ChatNode. */
+  /** Enter the outer workflow drill-down view for a specific ChatNode.
+   * Resets the stack to a single ``chatnode`` frame. */
   enterWorkflow: (chatNodeId: NodeId) => void;
-  /** Leave the workflow drill-down and return to ChatFlow canvas. */
+  /** Push a nested ``subworkflow`` frame for ``parentWorkNodeId`` (a
+   * ``sub_agent_delegation`` WorkNode in the current top frame). The
+   * caller is responsible for verifying that node has a ``sub_workflow``. */
+  enterSubWorkflow: (parentWorkNodeId: NodeId) => void;
+  /** Pop the topmost drill frame. If the stack becomes empty, returns
+   * to the ChatFlow view. */
+  popDrill: () => void;
+  /** Truncate the stack to ``length`` frames (used by breadcrumb clicks).
+   * ``length === 0`` returns to the ChatFlow view. */
+  truncateDrillStack: (length: number) => void;
+  /** Leave the workflow drill-down entirely and return to ChatFlow canvas. */
   exitWorkflow: () => void;
   /** Select a node inside the currently drilled-down WorkFlow. */
   selectWorkflowNode: (nodeId: NodeId | null) => void;
@@ -203,6 +239,9 @@ const INITIAL: Omit<
   | "selectNode"
   | "pickBranch"
   | "enterWorkflow"
+  | "enterSubWorkflow"
+  | "popDrill"
+  | "truncateDrillStack"
   | "exitWorkflow"
   | "selectWorkflowNode"
   | "pickWorkflowBranch"
@@ -228,10 +267,11 @@ const INITIAL: Omit<
   _optimisticIds: new Set<string>(),
   selectedNodeId: null,
   branchMemory: {},
-  viewMode: "chatflow",
-  drillDownChatNodeId: null,
+  drillStack: [],
   workflowSelectedNodeId: null,
   workflowBranchMemory: {},
+  drillDownChatNodeId: null,
+  viewMode: "chatflow",
   rightPanelWidth: RIGHT_PANEL_DEFAULT,
   hoveredEdge: null,
   sseSubscription: null,
@@ -243,14 +283,40 @@ function autoLeafForChatFlow(chat: ChatFlow | null): NodeId | null {
   return findLatestLeafId<ChatFlowNode>({ nodes: chat.nodes, rootIds: chat.root_ids });
 }
 
-function autoLeafForWorkFlow(chat: ChatFlow | null, chatNodeId: NodeId | null): NodeId | null {
-  if (!chat || !chatNodeId) return null;
-  const node = chat.nodes[chatNodeId];
-  if (!node) return null;
+function autoLeafForWorkFlow(chat: ChatFlow | null, stack: DrillFrame[]): NodeId | null {
+  const wf = resolveDrilledWorkflow(chat, stack);
+  if (!wf) return null;
   return findLatestLeafId<WorkFlowNode>({
-    nodes: node.workflow.nodes,
-    rootIds: node.workflow.root_ids,
+    nodes: wf.nodes,
+    rootIds: wf.root_ids,
   });
+}
+
+/**
+ * Walk ``drillStack`` against ``chatflow`` and return the WorkFlow at
+ * the top frame, or ``null`` if any frame fails to resolve (deleted
+ * node, missing sub_workflow, …).
+ */
+export function resolveDrilledWorkflow(
+  chat: ChatFlow | null,
+  stack: DrillFrame[],
+): import("@/types/schema").WorkFlow | null {
+  if (!chat || stack.length === 0) return null;
+  let wf: import("@/types/schema").WorkFlow | null = null;
+  for (const frame of stack) {
+    if (frame.kind === "chatnode") {
+      const cn = chat.nodes[frame.chatNodeId];
+      if (!cn) return null;
+      wf = cn.workflow;
+    } else {
+      if (!wf) return null;
+      const wn: import("@/types/schema").WorkFlowNode | undefined =
+        wf.nodes[frame.parentWorkNodeId];
+      if (!wn || !wn.sub_workflow) return null;
+      wf = wn.sub_workflow;
+    }
+  }
+  return wf;
 }
 
 /**
@@ -404,6 +470,7 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
       errorMessage: null,
       selectedNodeId: null,
       branchMemory: {},
+      drillStack: [],
       viewMode: "chatflow",
       drillDownChatNodeId: null,
       workflowSelectedNodeId: null,
@@ -444,6 +511,7 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
       errorMessage: null,
       selectedNodeId: null,
       branchMemory: {},
+      drillStack: [],
       viewMode: "chatflow",
       drillDownChatNodeId: null,
       workflowSelectedNodeId: null,
@@ -471,39 +539,85 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
 
   enterWorkflow(chatNodeId) {
     const chat = get().chatflow;
+    const stack: DrillFrame[] = [{ kind: "chatnode", chatNodeId }];
     set({
+      drillStack: stack,
       viewMode: "workflow",
       drillDownChatNodeId: chatNodeId,
       workflowSelectedNodeId: null,
       workflowBranchMemory: {},
     });
-    const leaf = autoLeafForWorkFlow(chat, chatNodeId);
+    const leaf = autoLeafForWorkFlow(chat, stack);
     if (leaf) get().selectWorkflowNode(leaf);
   },
 
-  exitWorkflow() {
+  enterSubWorkflow(parentWorkNodeId) {
+    const chat = get().chatflow;
+    const current = get().drillStack;
+    if (current.length === 0) return; // can't push below an empty stack
+    const next: DrillFrame[] = [
+      ...current,
+      { kind: "subworkflow", parentWorkNodeId },
+    ];
+    // Validate: the parentWorkNodeId must resolve to a WorkNode with
+    // a sub_workflow in the *current* top frame's WorkFlow. If it
+    // doesn't, drop the push silently — the canvas will just keep
+    // showing the current level. A noisier error would only surface
+    // race conditions where the user clicked into a node the engine
+    // just rewrote out from under them.
+    const validated = resolveDrilledWorkflow(chat, next);
+    if (!validated) return;
     set({
-      viewMode: "chatflow",
-      drillDownChatNodeId: null,
+      drillStack: next,
+      viewMode: "workflow",
+      drillDownChatNodeId: next[0].kind === "chatnode" ? next[0].chatNodeId : null,
       workflowSelectedNodeId: null,
       workflowBranchMemory: {},
     });
+    const leaf = autoLeafForWorkFlow(chat, next);
+    if (leaf) get().selectWorkflowNode(leaf);
+  },
+
+  popDrill() {
+    const stack = get().drillStack;
+    if (stack.length === 0) return;
+    const next = stack.slice(0, -1);
+    get().truncateDrillStack(next.length);
+  },
+
+  truncateDrillStack(length) {
+    const stack = get().drillStack.slice(0, Math.max(0, length));
+    const chat = get().chatflow;
+    set({
+      drillStack: stack,
+      viewMode: stack.length === 0 ? "chatflow" : "workflow",
+      drillDownChatNodeId:
+        stack.length > 0 && stack[0].kind === "chatnode"
+          ? stack[0].chatNodeId
+          : null,
+      workflowSelectedNodeId: null,
+      workflowBranchMemory: {},
+    });
+    if (stack.length > 0) {
+      const leaf = autoLeafForWorkFlow(chat, stack);
+      if (leaf) get().selectWorkflowNode(leaf);
+    }
+  },
+
+  exitWorkflow() {
+    get().truncateDrillStack(0);
   },
 
   selectWorkflowNode(nodeId) {
     const chat = get().chatflow;
-    const drillId = get().drillDownChatNodeId;
-    if (!nodeId || !chat || !drillId) {
-      set({ workflowSelectedNodeId: nodeId });
-      return;
-    }
-    const wfNodes = chat.nodes[drillId]?.workflow.nodes;
-    if (!wfNodes || !wfNodes[nodeId]) {
+    const stack = get().drillStack;
+    const wf = resolveDrilledWorkflow(chat, stack);
+    if (!nodeId || !wf || !wf.nodes[nodeId]) {
       set({ workflowSelectedNodeId: nodeId });
       return;
     }
     const nextMemory = { ...get().workflowBranchMemory };
-    rememberBranchEndpoints(wfNodes, nodeId, nextMemory);
+    rememberBranchEndpoints(wf.nodes, nodeId, nextMemory);
     set({ workflowSelectedNodeId: nodeId, workflowBranchMemory: nextMemory });
   },
 

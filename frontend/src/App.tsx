@@ -1,10 +1,11 @@
 /**
- * M8.5 app shell — left sidebar + horizontal ChatFlow canvas +
- * ConversationView, with drill-down to a full-canvas WorkFlow view.
+ * App shell — left sidebar + horizontal ChatFlow canvas +
+ * ConversationView, with drill-down to a full-canvas WorkFlow view
+ * that supports nested sub-workflows (§3.4.3).
  *
- * The sidebar lists all chatflows and supports create / switch / delete.
- * A ``?chatflow=<id>`` query param is still honoured on first load for
- * backward compatibility and share links.
+ * The breadcrumb in the top-left walks the drill stack: ChatFlow →
+ * outer WorkFlow → sub-workflow (depth N). Earlier segments are
+ * clickable and truncate the stack back to that depth.
  */
 
 import { useEffect, useMemo } from "react";
@@ -15,20 +16,18 @@ import { ConversationView } from "@/canvas/ConversationView";
 import { WorkFlowCanvas } from "@/canvas/WorkFlowCanvas";
 import { ChatFlowHeader } from "@/components/ChatFlowHeader";
 import { Sidebar } from "@/components/Sidebar";
-import { useChatFlowStore } from "@/store/chatflowStore";
+import { resolveDrilledWorkflow, useChatFlowStore } from "@/store/chatflowStore";
 
 export default function App() {
-  const { t } = useTranslation();
   const chatflow = useChatFlowStore((s) => s.chatflow);
   const loadState = useChatFlowStore((s) => s.loadState);
   const errorMessage = useChatFlowStore((s) => s.errorMessage);
   const viewMode = useChatFlowStore((s) => s.viewMode);
-  const drillDownChatNodeId = useChatFlowStore((s) => s.drillDownChatNodeId);
-  const exitWorkflow = useChatFlowStore((s) => s.exitWorkflow);
+  const drillStack = useChatFlowStore((s) => s.drillStack);
   const loadChatFlow = useChatFlowStore((s) => s.loadChatFlow);
   const setSSEFactory = useChatFlowStore((s) => s.setSSEFactory);
+  const { t } = useTranslation();
 
-  // Grab ``?chatflow=`` once, before the first load attempt.
   const initialChatflowId = useMemo(() => {
     if (typeof window === "undefined") return null;
     const params = new URLSearchParams(window.location.search);
@@ -44,8 +43,13 @@ export default function App() {
     }
   }, [initialChatflowId, loadChatFlow, setSSEFactory]);
 
-  const drilledChatNode =
-    chatflow && drillDownChatNodeId ? chatflow.nodes[drillDownChatNodeId] ?? null : null;
+  const drilledWorkflow = useMemo(
+    () => resolveDrilledWorkflow(chatflow, drillStack),
+    [chatflow, drillStack],
+  );
+  const outerChatNodeId =
+    drillStack.length > 0 && drillStack[0].kind === "chatnode" ? drillStack[0].chatNodeId : null;
+  const isNested = drillStack.length > 1;
 
   return (
     <div className="flex h-full flex-col">
@@ -76,23 +80,66 @@ export default function App() {
           {viewMode === "chatflow" ? (
             <ChatFlowCanvas chatflow={chatflow} />
           ) : (
-            <WorkFlowCanvas chatNode={drilledChatNode} />
+            <WorkFlowCanvas
+              workflow={drilledWorkflow}
+              outerChatNodeId={outerChatNodeId}
+              nested={isNested}
+            />
           )}
 
-          {viewMode === "workflow" && (
-            <button
-              type="button"
-              onClick={exitWorkflow}
-              data-testid="exit-workflow"
-              className="absolute left-3 top-3 z-20 rounded border border-gray-300 bg-white/90 px-2 py-1 text-xs text-gray-700 shadow-sm hover:bg-white"
-            >
-              ← {t("workflow.back_to_chatflow")}
-            </button>
-          )}
+          {viewMode === "workflow" && <DrillBreadcrumb />}
         </section>
 
         <ConversationView />
       </main>
     </div>
+  );
+}
+
+function DrillBreadcrumb() {
+  const { t } = useTranslation();
+  const drillStack = useChatFlowStore((s) => s.drillStack);
+  const exitWorkflow = useChatFlowStore((s) => s.exitWorkflow);
+  const truncateDrillStack = useChatFlowStore((s) => s.truncateDrillStack);
+
+  return (
+    <nav
+      data-testid="drill-breadcrumb"
+      className="absolute left-3 top-3 z-20 flex items-center gap-1 rounded border border-gray-300 bg-white/90 px-2 py-1 text-xs text-gray-700 shadow-sm"
+    >
+      <button
+        type="button"
+        onClick={exitWorkflow}
+        data-testid="exit-workflow"
+        className="hover:underline"
+      >
+        ← {t("workflow.breadcrumb_chatflow")}
+      </button>
+      {drillStack.map((frame, idx) => {
+        const isLast = idx === drillStack.length - 1;
+        const truncateTo = idx + 1;
+        const label =
+          frame.kind === "chatnode"
+            ? t("workflow.breadcrumb_outer")
+            : t("workflow.breadcrumb_subworkflow_depth", { depth: idx });
+        return (
+          <span key={idx} className="flex items-center gap-1">
+            <span className="text-gray-400">/</span>
+            {isLast ? (
+              <span className="font-medium text-gray-900">{label}</span>
+            ) : (
+              <button
+                type="button"
+                data-testid={`drill-breadcrumb-${idx}`}
+                onClick={() => truncateDrillStack(truncateTo)}
+                className="hover:underline"
+              >
+                {label}
+              </button>
+            )}
+          </span>
+        );
+      })}
+    </nav>
   );
 }

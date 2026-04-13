@@ -6,8 +6,8 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
-import { useChatFlowStore } from "./chatflowStore";
-import type { ChatFlow, ChatFlowNode, WorkFlowEvent } from "@/types/schema";
+import { resolveDrilledWorkflow, useChatFlowStore } from "./chatflowStore";
+import type { ChatFlow, ChatFlowNode, WorkFlow, WorkFlowEvent } from "@/types/schema";
 
 function stubChatNode(
   id: string,
@@ -88,6 +88,7 @@ function seedChatFlow(): ChatFlow {
               started_at: null,
               finished_at: null,
               step_kind: "llm_call",
+              role: null,
               tool_constraints: null,
               input_messages: null,
               output_message: null,
@@ -138,6 +139,7 @@ describe("chatflowStore", () => {
     useChatFlowStore.getState().enterWorkflow("n1");
     const s = useChatFlowStore.getState();
     expect(s.viewMode).toBe("workflow");
+    expect(s.drillStack).toEqual([{ kind: "chatnode", chatNodeId: "n1" }]);
     expect(s.drillDownChatNodeId).toBe("n1");
     expect(s.workflowSelectedNodeId).toBe("w1");
   });
@@ -148,8 +150,82 @@ describe("chatflowStore", () => {
     useChatFlowStore.getState().exitWorkflow();
     const s = useChatFlowStore.getState();
     expect(s.viewMode).toBe("chatflow");
+    expect(s.drillStack).toEqual([]);
     expect(s.drillDownChatNodeId).toBeNull();
     expect(s.workflowSelectedNodeId).toBeNull();
+  });
+
+  it("enterSubWorkflow drills into a delegation's sub_workflow", () => {
+    // Seed a chatflow whose w1 WorkNode is a sub_agent_delegation
+    // pointing at a nested WorkFlow with one inner node "sw1".
+    const subWf: WorkFlow = {
+      id: "wf-sub",
+      root_ids: ["sw1"],
+      nodes: {
+        sw1: {
+          id: "sw1",
+          parent_ids: [],
+          description: { text: "", provenance: "unset", updated_at: "2026-04-13T00:00:00Z" },
+          inputs: null,
+          expected_outcome: null,
+          status: "succeeded",
+          model_override: null,
+          resolved_model: null,
+          locked: false,
+          error: null,
+          position_x: null,
+          position_y: null,
+          created_at: "2026-04-13T00:00:00Z",
+          updated_at: "2026-04-13T00:00:00Z",
+          started_at: null,
+          finished_at: null,
+          step_kind: "llm_call",
+          role: null,
+          tool_constraints: null,
+          input_messages: null,
+          output_message: null,
+          usage: null,
+        },
+      },
+    };
+    const chat = seedChatFlow();
+    chat.nodes.n1.workflow.nodes.w1.step_kind = "sub_agent_delegation";
+    chat.nodes.n1.workflow.nodes.w1.input_messages = null;
+    chat.nodes.n1.workflow.nodes.w1.output_message = null;
+    chat.nodes.n1.workflow.nodes.w1.usage = null;
+    chat.nodes.n1.workflow.nodes.w1.sub_workflow = subWf;
+
+    useChatFlowStore.getState().setChatFlow(chat);
+    useChatFlowStore.getState().enterWorkflow("n1");
+    useChatFlowStore.getState().enterSubWorkflow("w1");
+
+    const s = useChatFlowStore.getState();
+    expect(s.drillStack).toEqual([
+      { kind: "chatnode", chatNodeId: "n1" },
+      { kind: "subworkflow", parentWorkNodeId: "w1" },
+    ]);
+    expect(s.workflowSelectedNodeId).toBe("sw1");
+    // Resolved workflow should be the sub-workflow, not the outer one.
+    const resolved = resolveDrilledWorkflow(s.chatflow, s.drillStack);
+    expect(resolved?.id).toBe("wf-sub");
+  });
+
+  it("enterSubWorkflow ignores invalid pushes when the WorkNode lacks a sub_workflow", () => {
+    useChatFlowStore.getState().setChatFlow(seedChatFlow());
+    useChatFlowStore.getState().enterWorkflow("n1");
+    // w1 is a plain llm_call without sub_workflow — push must be a no-op.
+    useChatFlowStore.getState().enterSubWorkflow("w1");
+    const s = useChatFlowStore.getState();
+    expect(s.drillStack).toEqual([{ kind: "chatnode", chatNodeId: "n1" }]);
+  });
+
+  it("truncateDrillStack pops to the requested depth", () => {
+    useChatFlowStore.getState().setChatFlow(seedChatFlow());
+    useChatFlowStore.getState().enterWorkflow("n1");
+    expect(useChatFlowStore.getState().drillStack).toHaveLength(1);
+    useChatFlowStore.getState().truncateDrillStack(0);
+    expect(useChatFlowStore.getState().viewMode).toBe("chatflow");
+    expect(useChatFlowStore.getState().drillStack).toEqual([]);
   });
 
   it("selectNode remembers the endpoint for branch-root ancestors", () => {
