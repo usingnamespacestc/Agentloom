@@ -12,6 +12,8 @@ const STORAGE_KEY = "agentloom_prefs_v1";
 export interface Preferences {
   /** Render the raw DB node id in the top-right corner of each node card. */
   showNodeId: boolean;
+  /** Append the ChatFlow's own id after its title in the top header. */
+  showChatflowId: boolean;
   /** Show per-turn token totals (prompt+completion+cached). */
   showTokens: boolean;
   /** Show wall-clock generation time (finished_at − started_at). */
@@ -22,6 +24,7 @@ export interface Preferences {
 
 const DEFAULTS: Preferences = {
   showNodeId: false,
+  showChatflowId: false,
   showTokens: false,
   showGenTime: false,
   showGenSpeed: false,
@@ -48,6 +51,7 @@ function save(prefs: Preferences): void {
 
 interface PreferencesStore extends Preferences {
   setShowNodeId: (value: boolean) => void;
+  setShowChatflowId: (value: boolean) => void;
   setShowTokens: (value: boolean) => void;
   setShowGenTime: (value: boolean) => void;
   setShowGenSpeed: (value: boolean) => void;
@@ -58,6 +62,10 @@ export const usePreferencesStore = create<PreferencesStore>((set, get) => ({
   setShowNodeId(value) {
     set({ showNodeId: value });
     save({ ...get(), showNodeId: value });
+  },
+  setShowChatflowId(value) {
+    set({ showChatflowId: value });
+    save({ ...get(), showChatflowId: value });
   },
   setShowTokens(value) {
     set({ showTokens: value });

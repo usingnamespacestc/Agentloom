@@ -652,3 +652,108 @@ M10 System Workflows：
 - merge、plan_elaborate、title_gen、compact
 
 M13 MVP 验收
+
+---
+
+# Round 13 — 2026-04-12 · M10 设计收口
+
+这一轮没写功能代码，通过一连串对话把 M10（系统工作流 + Plan/Judge 管线 + 关键帧）锁定成了可以落地的设计。先背景后决策。
+
+## 触发这一轮的三条观察
+
+1. 再读需求 §3.5 时发现 `plan_elaborate / merge / compact / title_gen` 只有名字没结构，真动手会发现"用 Python 写死还是用 Template 写"这个问题从未定过
+2. 观测目标 ChatNode `019d8436-5c09-78c0-97dc-01aa5020d38f` 需要一个 CLI，顺手把 `inspect_workflow.py` 写出来。跑起来后发现当前 WorkFlow 已经是 ReAct loop（之前我一度错判成单步调用），`MAX_TOOL_LOOP_ITERATIONS=12` 在 `_spawn_tool_loop_children` 里，这件事澄清完以后对 M10 的形状立刻清晰
+3. Tavily 一直未被触发的谜团 —— `MCPToolSource` 有 lib 代码但没被 main/engine/api 引过，M7 只验了 unit test。MCP runtime wiring 正式归为 M7.5 挂在 backlog
+
+## 核心拍板链（按对话顺序）
+
+### 系统工作流走"纯 Template"路线，不做混合
+
+我一开始推"Python 结构 + DB params"的混合方案，用户一句话否掉："那就失去了 WorkFlow 本身的可见性"。最终定的 ADR-019：template 引擎支持 Jinja 风格 `{{ param }}` 和 `{% include 'other_builtin_id' %}`，加载时检测引用循环；系统工作流作为 YAML fixture 迁入 `workflow_templates` 表，用户同名 `builtin_id` 覆写 = 编译器被改写
+
+### 执行模式 × Judge 开关矩阵
+
+用户说"要参考 claude code 的 planner / executor / judge 分工，但主打可控 agent 要支持半自动"。拆了几轮之后得到三模式三开关：
+
+- `direct / semi_auto / auto` 三模式作为一个顶层选择器，其下是 `plan / judge_pre / judge_during / judge_post` 四个开关
+- `direct` 就是现在的 ReAct，什么都不做
+- `semi_auto` 开 plan + judge_pre，judge_during / judge_post 可选；这是关键帧能用的唯一模式
+- `auto` 四开关全开，端到端跑，只在 `judge_pre.feasibility != "ok"` / `judge_during.verdict == "halt"` / 任何 WorkNode failed / revise 预算耗尽时停下
+
+`auto_mode_revise_budget: int = 3` 挂在 ChatFlow 上，WorkNode 可 override。停下时推浏览器本地 toast + 标题闪烁，外部通道留给后面
+
+### `task_frame` 被吃掉，judge 拆成三个
+
+中间曾经提过 `task_frame` 作为"planner 执行前生成三元组"的前置环节。用户一眼看穿："这就是前置 judge，为什么不直接归到 judge 家族？"然后进一步提议把 judge 拆成三个开关：
+
+- `judge_pre`：填三元组 + 可行性评估 + blockers + missing_inputs；半自动下用户可编辑产出并"再判一遍"；自评"不行"也允许用户硬来
+- `judge_during`：用户明确说要"对执行方案和代码细节进行批判，尽可能反驳挑问题"。参考 claude code 的 `verificationAgent.ts`（`src/tools/AgentTool/built-in/verificationAgent.ts`），那个 prompt 最精彩的是**反自辩清单**（"code looks correct" / "tests pass" / "probably fine" 被列出来并禁止）。judge_during 走同样的红队定位。触发时机定 A+C：plan 产出新 WorkNode 草稿后（A），以及 llm_call 输出包含写类 tool_use 的最后一公里（C）。MVP 只做监督式，verdict = halt 不真的中断，只记录给用户
+- `judge_post`：产出增加 `issues: [{location, expected, actual, reproduction}]`，`location` 是 WorkNodeId，让 UI 能跳转高亮。这是我们相对 claude code 天然占优的地方 —— 有 DAG，能定位到节点
+
+三个 judge 都作为 `step_kind="judge_call"` 的 WorkNode 进 DAG，过程完全可见，可以点开看 prompt 和裁决，右键"再判一遍"会新建 sibling `judge_call`，历史不覆盖。这条是 ADR-018
+
+### 关键帧（keyframes）
+
+这个需求在前几轮被我漏掉了，用户回头补上。定义是：半自动模式下用户手动在画布上预放的 dashed WorkNode，作为 planner 必须经过的锚点。关键几条：
+
+- 用户只填三元组，`step_kind` 由 planner 决定（选 B 不选 A，否则和锁的语义打架）
+- 每个关键帧带锁：🔒 = planner 完全不能动；🔓 = planner 可以改字段、位置、step_kind，但要保留 `keyframe_origin_trio` 做对比/回滚
+- 用户画的边是硬约束，和锁无关。planner 不能绕过、不能反转、不能删除
+- `auto` / `direct` 模式下禁用关键帧 —— 摆一个就定义上变成半自动了
+
+### 递归
+
+WorkNode 允许递归包含 WorkFlow，三条硬约束：context 跨层不透明（保住 ADR-009）、深度上限 `MAX_WORKFLOW_DEPTH=5`、进入交互统一用"打开工作流"而不是特殊化双击。每一层都有自己独立的一套三元组 + 开关 + 关键帧 + 执行模式 + `next_model_override` 链
+
+### `next_model_override` 链与"变化点"可视化
+
+模型选择的可见性问题 —— 全部边都标模型名太吵，只标节点又丢了"这是给谁用的"信息。定下来：
+
+- 每个节点有 `next_model_override: ProviderModelRef | None`；descendant 走祖先链取第一个非空值，再 fallback 到 `default_work_model`
+- UI 只在变化点（`next_model_override != null` 的节点）的出边上标模型名，继承边完全空白（连 ↓ 都不用，用户说"如果继承链显示得好的话"）
+- ChatFlow 根永远是变化点（它是种子），所以图上至少总有一条有标签的边
+- 悬停任意边高亮整条继承链
+
+这是 ADR-022
+
+### 单根 ChatFlow
+
+之前 §3.2 说"允许多根"，实践上其实一直单根。这次顺手把 `root_ids: list` 收窄成 `root_id: NodeId`。好处是根节点可以当 next_model_override 的唯一种子，Sidebar 保持平坦列表
+
+### Tool loop budget 晋升成配置项
+
+`MAX_TOOL_LOOP_ITERATIONS` 从常量升为 `ChatFlow.tool_loop_budget: int | null = 12`（null = unlimited），WorkNode 可 override。对极端长任务开放
+
+### Kill 对话设置里的模型选择
+
+根节点单根化之后，对话设置里的"默认模型"下拉其实没必要单独存在 —— 直接在 Root 上选就好。保留 `default_work_model` 字段作为"哪里都没设"的兜底，但 UI 上那个下拉可以砍。Round 14 实装的时候顺手处理
+
+## 副产物
+
+- **`backend/scripts/inspect_workflow.py`**：给 UUID 自动识别是 ChatFlow / ChatNode / WorkFlow / WorkNode，打印包裹链 + 拓扑序 WorkNode 清单（step_kind / status / parents / model / usage / tool_name+args / tool_result）。对着运行中的 DAG 排查 plan/judge 的时候非常舒服
+- **全局设置 Canvas 面板加 `showChatflowId` 开关**：用户顺手要求的。勾上后 `ChatFlowHeader` 里标题后面出现可点击 copy 的灰色小 id，和每个节点右上角的 node_id 开关对称
+- **MCP runtime wiring** 正式挂到 M7.5 backlog，和 M10 解耦。这一次先不动
+
+## 写入的文档
+
+1. `requirements.md`：
+   - §3.1 Node 加 `inputs`、`next_model_override`
+   - §3.2 ChatFlow 收窄到单根
+   - §3.3 WorkFlow 加三元组、`judge_call` step_kind、递归三约束
+   - §3.4 全改：§3.4.1 执行模式矩阵、§3.4.2 关键帧规则
+   - §3.5 重写：纯 Template + 四类 builtin（`plan / judge_pre / judge_during / judge_post` + 原有四个）
+   - §4.8 Node locking 区分常规锁 vs 关键帧锁
+   - §4.9 Keyframes 作为硬约束
+   - §4.10 `next_model_override` 继承链
+   - §5.3 / §5.4 / §5.6 新增 FR 条目（模式选择器、关键帧、budget、re-run judge、template 引擎要求等）
+   - ADR-008 重述；新增 ADR-018 ~ ADR-022
+   - Appendix A schema 重构 + 新增 `JudgeVerdict` / `Critique` / `Issue` / `WorkflowTemplate.builtin_id`
+
+2. `plan.md`：M10 整体重写，拆成 M10.0 ~ M10.6 六个子阶段，给了每个子阶段的 deliverables + acceptance + 具体 test 文件清单。大意：schema 迁移 → template 引擎 → engine wiring（读 execution_mode 分支）→ judge 原语 → 自动模式 halt + re-run API → 前端模式选择器和关键帧 UI → 清除 Python 硬编码残留。Playwright e2e 也挂到这里
+
+## 故意没动的
+
+- MCP runtime wiring（M7.5，单独做）
+- 通知外部通道（webhook / desktop / 邮件）（M10 之后按需加）
+- judge_during 的中断模式（MVP 是 monitoring 模式，中断模式挂在 post-MVP 选项）
+- 字符级编辑溯源 / CRDT（仍然 v2+）

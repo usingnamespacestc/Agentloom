@@ -111,6 +111,8 @@
   "canvas_prefs": {
     "show_node_id": "显示节点 ID",
     "show_node_id_hint": "在每个节点卡片右上角显示数据库中存储的原始节点 ID，方便排查问题。",
+    "show_chatflow_id": "显示对话 ID",
+    "show_chatflow_id_hint": "在顶栏标题后附上 ChatFlow 本身的 ID。",
     "show_tokens": "显示 Token 用量",
     "show_tokens_hint": "在对话面板中显示每轮对话消耗的 Token 总数（输入 + 输出，缓存单独标注）。",
     "show_gen_time": "显示生成时长",

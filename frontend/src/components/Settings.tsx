@@ -250,6 +250,8 @@ function CanvasPanel() {
   const { t } = useTranslation();
   const showNodeId = usePreferencesStore((s) => s.showNodeId);
   const setShowNodeId = usePreferencesStore((s) => s.setShowNodeId);
+  const showChatflowId = usePreferencesStore((s) => s.showChatflowId);
+  const setShowChatflowId = usePreferencesStore((s) => s.setShowChatflowId);
   const showTokens = usePreferencesStore((s) => s.showTokens);
   const setShowTokens = usePreferencesStore((s) => s.setShowTokens);
   const showGenTime = usePreferencesStore((s) => s.showGenTime);
@@ -259,6 +261,7 @@ function CanvasPanel() {
 
   const rows: Array<{ key: string; value: boolean; onChange: (v: boolean) => void }> = [
     { key: "show_node_id", value: showNodeId, onChange: setShowNodeId },
+    { key: "show_chatflow_id", value: showChatflowId, onChange: setShowChatflowId },
     { key: "show_tokens", value: showTokens, onChange: setShowTokens },
     { key: "show_gen_time", value: showGenTime, onChange: setShowGenTime },
     { key: "show_gen_speed", value: showGenSpeed, onChange: setShowGenSpeed },

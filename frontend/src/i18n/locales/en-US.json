@@ -111,6 +111,8 @@
   "canvas_prefs": {
     "show_node_id": "Show node ID",
     "show_node_id_hint": "Display the raw database node ID in the top-right corner of each node card. Helpful for debugging.",
+    "show_chatflow_id": "Show ChatFlow ID",
+    "show_chatflow_id_hint": "Display the ChatFlow's own ID after its title in the top header.",
     "show_tokens": "Show token usage",
     "show_tokens_hint": "Display total tokens (prompt + completion, cached separately) for each turn in the conversation panel.",
     "show_gen_time": "Show generation time",

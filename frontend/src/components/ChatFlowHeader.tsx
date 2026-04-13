@@ -10,13 +10,16 @@ import { ChatFlowSettings } from "@/components/ChatFlowSettings";
 import { Settings } from "@/components/Settings";
 import { chatflowDisplayTitle } from "@/lib/chatflowLabel";
 import { useChatFlowStore } from "@/store/chatflowStore";
+import { usePreferencesStore } from "@/store/preferencesStore";
 
 export function ChatFlowHeader() {
   const { t, i18n } = useTranslation();
   const chatflow = useChatFlowStore((s) => s.chatflow);
   const patchChatFlow = useChatFlowStore((s) => s.patchChatFlow);
+  const showChatflowId = usePreferencesStore((s) => s.showChatflowId);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [chatFlowSettingsOpen, setChatFlowSettingsOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   if (!chatflow) {
     return (
@@ -35,12 +38,28 @@ export function ChatFlowHeader() {
     <header className="flex items-center gap-3 border-b border-gray-200 bg-white px-4 py-1.5">
       {/* Left: title + description + tags */}
       <div className="min-w-0 flex-1">
-        <EditableTitle
-          value={chatflow.title ?? ""}
-          emptyLabel={chatflowDisplayTitle(chatflow)}
-          placeholder={t("app.untitled")}
-          onCommit={(v) => void patchChatFlow({ title: v || null })}
-        />
+        <div className="flex items-baseline gap-2">
+          <EditableTitle
+            value={chatflow.title ?? ""}
+            emptyLabel={chatflowDisplayTitle(chatflow)}
+            placeholder={t("app.untitled")}
+            onCommit={(v) => void patchChatFlow({ title: v || null })}
+          />
+          {showChatflowId && (
+            <button
+              type="button"
+              onClick={() => {
+                void navigator.clipboard.writeText(chatflow.id);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 900);
+              }}
+              title={chatflow.id}
+              className="flex-shrink-0 font-mono text-[10px] text-gray-400 hover:text-blue-500"
+            >
+              {copied ? "copied!" : chatflow.id}
+            </button>
+          )}
+        </div>
         <EditableDescription
           value={chatflow.description ?? ""}
           placeholder={t("app.add_description")}
