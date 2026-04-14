@@ -36,7 +36,14 @@ from agentloom.providers.types import (
 )
 from agentloom.providers.types import ToolUse as ProviderToolUse
 from agentloom.schemas import WorkFlow, WorkFlowNode
-from agentloom.schemas.common import JudgeVariant, NodeStatus, StepKind, TokenUsage, utcnow
+from agentloom.schemas.common import (
+    JudgeVariant,
+    NodeStatus,
+    SharedNote,
+    StepKind,
+    TokenUsage,
+    utcnow,
+)
 from agentloom.schemas.common import ToolUse as SchemaToolUse
 from agentloom.schemas.workflow import WireMessage
 from agentloom.tools.base import ToolContext, ToolRegistry
@@ -220,6 +227,7 @@ class WorkflowEngine:
 
         node.status = NodeStatus.SUCCEEDED
         node.finished_at = utcnow()
+        _append_shared_note(workflow, node)
         await self._bus.publish(
             WorkflowEvent(
                 workflow_id=workflow.id,
@@ -391,6 +399,82 @@ class WorkflowEngine:
                     budget=budget,
                     latest_verdict=verdict,
                 )
+
+
+#: Cap on a single SharedNote's summary length. Picked at "fits in a
+#: single line of typical model context" — long enough to identify the
+#: output, short enough that ~50 notes still cost a manageable amount
+#: of tokens in a layer-wide injection.
+_SHARED_NOTE_SUMMARY_MAX = 200
+
+
+def _summarize_for_shared_note(node: WorkFlowNode) -> str | None:
+    """Pull a one-line summary out of a freshly-succeeded WorkNode.
+
+    Returns ``None`` when there's nothing meaningful to record yet —
+    e.g. the dashed planning shell of a tool_call node that completed
+    without a result. Engine callers skip the append in that case.
+    """
+    if node.step_kind == StepKind.JUDGE_CALL and node.judge_verdict is not None:
+        v = node.judge_verdict
+        if v.during_verdict:
+            verdict_label = v.during_verdict
+        elif v.post_verdict:
+            verdict_label = v.post_verdict
+        elif v.feasibility:
+            verdict_label = v.feasibility
+        else:
+            verdict_label = "verdict"
+        return f"{node.judge_variant.value if node.judge_variant else 'judge'}: {verdict_label}"
+    if node.step_kind == StepKind.LLM_CALL and node.output_message is not None:
+        return _truncate_one_line(node.output_message.content)
+    if node.step_kind == StepKind.TOOL_CALL and node.tool_result is not None:
+        return _truncate_one_line(
+            f"{node.tool_name or 'tool'} → {node.tool_result.content or '(empty)'}"
+        )
+    if node.step_kind == StepKind.SUB_AGENT_DELEGATION and node.sub_workflow is not None:
+        # Sub-WorkFlow's own judge_post should have produced the
+        # delegation's effective output; surface that one-liner.
+        return _truncate_one_line(_sub_workflow_summary(node))
+    return None
+
+
+def _truncate_one_line(text: str) -> str:
+    first_line = text.strip().splitlines()[0] if text.strip() else ""
+    if len(first_line) <= _SHARED_NOTE_SUMMARY_MAX:
+        return first_line
+    return first_line[: _SHARED_NOTE_SUMMARY_MAX - 1] + "…"
+
+
+def _sub_workflow_summary(node: WorkFlowNode) -> str:
+    """Best-effort one-liner for a delegation node — implemented in
+    M12.4d4 once sub-WorkFlow output extraction is wired. Today returns
+    an empty string so the SharedNote is skipped."""
+    return ""
+
+
+def _append_shared_note(workflow: WorkFlow, node: WorkFlowNode) -> None:
+    """Append a one-line note for a freshly-succeeded WorkNode.
+
+    Engine-side hook — runs unconditionally on success; templates
+    decide whether to render the note list. The note carries
+    ``author_node_id`` so any consumer can look the full output back
+    up via ``workflow.nodes[id]``.
+    """
+    summary = _summarize_for_shared_note(node)
+    if summary is None or summary == "":
+        return
+    kind = (
+        "judge_verdict" if node.step_kind == StepKind.JUDGE_CALL else "node_succeeded"
+    )
+    workflow.shared_notes.append(
+        SharedNote(
+            author_node_id=node.id,
+            role=node.role,
+            kind=kind,
+            summary=summary,
+        )
+    )
 
 
 def _assert_tool_loop_budget(
