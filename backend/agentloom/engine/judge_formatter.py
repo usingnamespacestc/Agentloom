@@ -18,18 +18,16 @@ from agentloom.schemas.common import JudgeVerdict
 def judge_pre_needs_user_input(verdict: JudgeVerdict) -> bool:
     """Does this judge_pre verdict require bouncing back to the user?
 
-    Triggers on any of:
-    - ``feasibility != "ok"`` (risky or infeasible)
-    - non-empty ``missing_inputs`` (judge wants us to gather facts first)
-    - non-empty ``blockers`` (known obstacles the user should see)
-
-    If none of the above, the plan phase is cleared to proceed.
+    Only ``infeasible`` or non-empty ``missing_inputs`` block the run.
+    ``risky`` is defined (judge_pre.yaml) as "proceed is possible but
+    specific assumptions must hold" — the engine threads those
+    assumptions to the planner as handoff notes rather than halting.
     """
-    if verdict.feasibility != "ok":
+    if verdict.feasibility == "infeasible":
         return True
     if verdict.missing_inputs:
         return True
-    return bool(verdict.blockers)
+    return False
 
 
 def judge_post_needs_user_input(verdict: JudgeVerdict) -> bool:

@@ -1256,10 +1256,16 @@ class ChatFlowEngine:
             #   judge_pre → planner → planner_judge → worker
             #             → worker_judge → judge_post
             # The hook handlers below grow the chain step by step.
+            handoff_notes = (
+                _render_judge_pre_risky_assumptions(verdict)
+                if verdict is not None
+                else ""
+            )
             self._spawn_planner(
                 workflow,
                 judge_pre_node,
                 resolved_model=resolved_model,
+                handoff_notes=handoff_notes,
             )
             return
 
@@ -2104,12 +2110,33 @@ class ChatFlowEngine:
 
 def _judge_pre_should_halt(verdict: JudgeVerdict) -> bool:
     """Mirror of :func:`judge_pre_needs_user_input` — re-implemented here
-    to keep ``chatflow_engine`` independent of the formatter module."""
-    if verdict.feasibility != "ok":
+    to keep ``chatflow_engine`` independent of the formatter module.
+
+    Only ``infeasible`` or explicit ``missing_inputs`` halt the run;
+    ``risky`` is defined (judge_pre.yaml) as "proceed is possible but
+    specific assumptions must hold" — those assumptions are surfaced
+    to the planner via ``handoff_notes`` rather than blocking the user.
+    """
+    if verdict.feasibility == "infeasible":
         return True
     if verdict.missing_inputs:
         return True
-    return bool(verdict.blockers)
+    return False
+
+
+def _render_judge_pre_risky_assumptions(verdict: JudgeVerdict) -> str:
+    """Turn a ``risky`` judge_pre verdict's blockers into free-text
+    planner-handoff notes so the planner can plan around them."""
+    if verdict.feasibility != "risky" or not verdict.blockers:
+        return ""
+    lines = [
+        "judge_pre flagged this task as risky — the following assumptions"
+        " should hold for the plan to succeed. Plan around them, or fold"
+        " them into individual subtasks as preconditions.",
+        "",
+    ]
+    lines.extend(f"- {b}" for b in verdict.blockers)
+    return "\n".join(lines)
 
 
 def _render_judge_pre_halt(verdict: JudgeVerdict) -> str:
