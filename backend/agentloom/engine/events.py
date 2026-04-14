@@ -42,9 +42,26 @@ class EventBus:
         for q in list(self._subscribers.get(workflow_id, [])):
             await q.put(None)
 
-    async def subscribe(self, workflow_id: str) -> AsyncIterator[WorkflowEvent]:
+    def open_subscription(self, workflow_id: str) -> asyncio.Queue[WorkflowEvent | None]:
+        """Synchronously register a subscriber and return its queue.
+
+        Use this when the caller needs the subscriber to be visible to
+        ``publish``/``close`` *before* yielding control to the event
+        loop — e.g. ``ChatFlowEngine`` registers the relay's subscriber
+        before awaiting inner-workflow execution, so a fast workflow
+        whose ``close`` lands before the relay task has been scheduled
+        still delivers the end-of-stream sentinel.
+        """
         q: asyncio.Queue[WorkflowEvent | None] = asyncio.Queue()
         self._subscribers[workflow_id].append(q)
+        return q
+
+    async def drain(
+        self,
+        workflow_id: str,
+        q: asyncio.Queue[WorkflowEvent | None],
+    ) -> AsyncIterator[WorkflowEvent]:
+        """Iterate events from a queue obtained via ``open_subscription``."""
         try:
             while True:
                 event = await q.get()
@@ -54,6 +71,13 @@ class EventBus:
         finally:
             if q in self._subscribers.get(workflow_id, []):
                 self._subscribers[workflow_id].remove(q)
+
+    async def subscribe(self, workflow_id: str) -> AsyncIterator[WorkflowEvent]:
+        """Convenience wrapper for callers that don't need the
+        register-before-yield guarantee (e.g. SSE HTTP routes)."""
+        q = self.open_subscription(workflow_id)
+        async for event in self.drain(workflow_id, q):
+            yield event
 
 
 # Process-wide singleton used by FastAPI routes.

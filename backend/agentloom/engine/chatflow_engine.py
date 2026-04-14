@@ -1024,10 +1024,16 @@ class ChatFlowEngine:
 
         # Relay inner workflow events to the chatflow's SSE channel
         # so the frontend sees step-by-step node growth in real time.
+        # Register the subscriber *synchronously* before awaiting
+        # execute(): a sufficiently fast inner workflow can complete and
+        # call ``_bus.close`` before the relay task has been scheduled,
+        # which then deadlocks on a queue.get() that will never see the
+        # None sentinel.
         inner_wf_id = chat_node.workflow.id
+        relay_queue = self._bus.open_subscription(inner_wf_id)
         relay_task = asyncio.create_task(
             self._relay_inner_events(
-                chatflow.id, node_id, inner_wf_id
+                chatflow.id, node_id, inner_wf_id, relay_queue
             )
         )
 
@@ -1208,6 +1214,7 @@ class ChatFlowEngine:
         chatflow_id: str,
         chat_node_id: str,
         inner_wf_id: str,
+        queue: asyncio.Queue[WorkflowEvent | None],
     ) -> None:
         """Subscribe to inner workflow events and re-publish them
         under the chatflow's SSE channel so the frontend sees
@@ -1220,7 +1227,7 @@ class ChatFlowEngine:
         which ChatFlowNode's workflow is being updated.
         """
         try:
-            async for event in self._bus.subscribe(inner_wf_id):
+            async for event in self._bus.drain(inner_wf_id, queue):
                 if event.kind == "workflow.completed":
                     # No need to relay — chatflow_engine handles this.
                     continue
