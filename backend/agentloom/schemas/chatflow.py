@@ -117,6 +117,10 @@ class ChatFlow(BaseModel):
     #: per WorkFlow run before the engine pauses at ``waiting_for_user``.
     #: Per-WorkNode override allowed; ``None`` = unlimited. See §5.3 FR-PL-7.
     auto_mode_revise_budget: int | None = 3
+    #: Hard cap on planner↔planner_judge / worker↔worker_judge debate
+    #: rounds before the engine forces convergence (routes through
+    #: judge_post). Applied to every new turn's inner WorkFlow. See §3.4.5.
+    debate_round_budget: int = 3
     #: Execution mode applied to every new turn's inner WorkFlow. The
     #: ChatFlowEngine derives the four switch defaults (``plan_enabled``,
     #: ``judge_pre_enabled``, ``judge_during_enabled``, ``judge_post_enabled``)

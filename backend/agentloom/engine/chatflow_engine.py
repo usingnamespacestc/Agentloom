@@ -39,6 +39,7 @@ tool_call via WorkflowEngine.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -770,6 +771,7 @@ class ChatFlowEngine:
             description=EditableText.by_user(user_message_text),
             inputs=EditableText.by_agent(_STOCK_INPUTS),
             expected_outcome=EditableText.by_agent(_STOCK_EXPECTED_OUTCOME),
+            debate_round_budget=chatflow.debate_round_budget,
         )
 
         if switches.judge_pre:
@@ -1056,6 +1058,7 @@ class ChatFlowEngine:
                             node,
                             user_message_text=user_message_text,
                             context_wire=context_wire,
+                            resolved_model=chat_node.resolved_model,
                         )
                 # judge_post halt → pending_user_prompt is set inside
                 # WorkflowEngine._run_judge_call; nothing to do here.
@@ -1225,9 +1228,7 @@ class ChatFlowEngine:
             )
             return
 
-        # Atomic-only fast path. Anything else routes through judge_post
-        # halt for now; M12.4c (debate) and M12.4d (decompose) will
-        # replace these branches.
+        # Continue + atomic: materialize the worker.
         if decision == "continue" and plan.mode == "atomic" and plan.atomic is not None:
             self._spawn_worker(
                 workflow,
@@ -1237,6 +1238,27 @@ class ChatFlowEngine:
             )
             return
 
+        # Revise within debate budget: spawn a fresh planner sibling
+        # under the planner_judge, threading the previous plan and the
+        # judge's critiques. The post-node hook will then attach a new
+        # planner_judge to that planner — same chain shape, deeper.
+        if (
+            decision == "revise"
+            and verdict is not None
+            and _round_index_for(workflow, planner_node) < workflow.debate_round_budget
+        ):
+            self._spawn_planner(
+                workflow,
+                planner_judge_node,
+                resolved_model=resolved_model,
+                prior_plan=planner_node.output_message.content,
+                critique=_render_critiques(verdict),
+            )
+            return
+
+        # Decompose, infeasible, halt, revise-at-budget, or unparseable
+        # → judge_post halt. M12.4d will replace decompose; M12.4e will
+        # surface budget-exhausted concerns through judge_post itself.
         upstream_summary = _summarize_planner_outcome(decision, plan)
         self._halt_to_post_judge(
             workflow,
@@ -1264,8 +1286,10 @@ class ChatFlowEngine:
         *,
         user_message_text: str,
         context_wire: list[WireMessage],
+        resolved_model: ProviderModelRef | None,
     ) -> None:
-        """On continue, pass the worker's output to judge_post; otherwise halt."""
+        """On continue, pass the worker's output to judge_post; on revise
+        within budget, spawn a fresh worker; otherwise halt."""
         verdict = worker_judge_node.judge_verdict
         decision = verdict.during_verdict if verdict is not None else None
         worker_node = workflow.nodes.get(worker_judge_node.judge_target_id or "")
@@ -1289,7 +1313,31 @@ class ChatFlowEngine:
             )
             return
 
-        # revise / halt / unparseable → judge_post halt.
+        # Revise within debate budget: re-derive the planner's atomic
+        # brief and spawn a fresh worker under the worker_judge with the
+        # prior draft + critique threaded in. The post-node hook then
+        # attaches a new worker_judge — same chain shape, deeper.
+        if (
+            decision == "revise"
+            and verdict is not None
+            and worker_node is not None
+            and _round_index_for(workflow, worker_node) < workflow.debate_round_budget
+        ):
+            atomic = _atomic_brief_for_worker(workflow, worker_node)
+            if atomic is not None:
+                self._spawn_worker(
+                    workflow,
+                    worker_judge_node,
+                    atomic,
+                    resolved_model=resolved_model,
+                    prior_output=worker_output,
+                    critique=_render_critiques(verdict),
+                )
+                return
+
+        # halt / revise-at-budget / unparseable / brief-recovery-failed
+        # → judge_post halt. M12.4e will route budget-exhausted concerns
+        # through judge_post itself.
         self._halt_to_post_judge(
             workflow,
             parent_node=worker_judge_node,
@@ -1678,10 +1726,11 @@ def _summarize_planner_outcome(
     decision: str | None, plan: RecursivePlannerOutput
 ) -> str:
     """Render a one-paragraph halt summary for judge_post when the
-    planner-pipeline can't proceed atomically.
+    planner-pipeline can't proceed.
 
     Distinct cases the user / judge_post should see:
-    - planner_judge said ``revise`` / ``halt`` (debate not implemented yet)
+    - planner_judge said ``halt``, or ``revise`` after the debate
+      budget has been spent
     - planner emitted ``decompose`` (sub-WorkFlows not implemented yet)
     - planner emitted ``infeasible`` (no decomposition exists)
     """
@@ -1692,12 +1741,54 @@ def _summarize_planner_outcome(
             f"planner proposed {len(plan.subtasks or [])} sub-tasks "
             "(decompose support is pending — M12.4d)"
         )
-    if decision in ("revise", "halt"):
+    if decision == "halt":
+        return "planner_judge halted the debate"
+    if decision == "revise":
         return (
-            f"planner_judge verdict={decision} "
-            "(debate-as-chain support is pending — M12.4c)"
+            "planner_judge still wants revisions after the debate "
+            "round budget was exhausted"
         )
     return f"unhandled planner outcome: decision={decision} mode={plan.mode}"
+
+
+def _render_critiques(verdict: JudgeVerdict) -> str:
+    """Serialize a judge's critiques as a JSON array for the next
+    planner / worker round. Empty list → empty string so the template
+    renders cleanly when there's nothing to address."""
+    if not verdict.critiques:
+        return ""
+    return json.dumps(
+        [c.model_dump() for c in verdict.critiques],
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _atomic_brief_for_worker(
+    workflow: WorkFlow, worker_node: WorkFlowNode
+) -> AtomicBrief | None:
+    """Recover the planner's atomic brief that spawned ``worker_node``.
+
+    The worker's own ``description`` is a stock string from the worker
+    template — it doesn't carry the brief. Walk back to the planner_judge
+    that parented the worker, then to the planner it judged, and re-parse
+    the planner's plan JSON. Returns ``None`` if any link is missing or
+    the plan no longer parses as atomic (which shouldn't happen on a
+    happy debate path, but we'd rather halt than crash).
+    """
+    if not worker_node.parent_ids:
+        return None
+    planner_judge = workflow.nodes.get(worker_node.parent_ids[0])
+    if planner_judge is None or not planner_judge.judge_target_id:
+        return None
+    planner = workflow.nodes.get(planner_judge.judge_target_id)
+    if planner is None or planner.output_message is None:
+        return None
+    try:
+        plan = parse_recursive_planner_output(planner.output_message.content)
+    except PlannerParseError:
+        return None
+    return plan.atomic if plan.mode == "atomic" else None
 
 
 def _trio_params(workflow: WorkFlow) -> dict[str, str]:
