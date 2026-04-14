@@ -70,6 +70,19 @@ from agentloom.tools.base import ToolContext, ToolRegistry
 
 log = logging.getLogger(__name__)
 
+
+#: Placeholder values for the WorkFlow trio's ``inputs`` and
+#: ``expected_outcome`` at the moment a turn first lands. We don't yet
+#: know what the user *really* expects — judge_pre is exactly the pass
+#: that interrogates that — so we seed both with stable stock strings
+#: and let the planner overwrite the real values for downstream nodes
+#: (worker briefs, sub-WorkFlow trios). Memory recall + skills/MCP
+#: injection will eventually replace these — see the
+#: agentloom_judge_params_pragma memo.
+_STOCK_INPUTS = "(prior conversation context — see messages below)"
+_STOCK_EXPECTED_OUTCOME = "Helpful, accurate response to the user's request"
+
+
 def _chat_inherited_model(
     chatflow: ChatFlow,
     parent_ids: list[str],
@@ -743,6 +756,14 @@ class ChatFlowEngine:
             judge_pre_enabled=switches.judge_pre,
             judge_during_enabled=switches.judge_during,
             judge_post_enabled=switches.judge_post,
+            # Seed the WorkFlow trio so judges and the planner all read
+            # from the same source. ``inputs`` and ``expected_outcome``
+            # are stock placeholders for now (see _STOCK_*); the planner
+            # writes real values onto worker / sub-WorkFlow trios as it
+            # decomposes. The user's prompt becomes ``description``.
+            description=EditableText.by_user(user_message_text),
+            inputs=EditableText.by_agent(_STOCK_INPUTS),
+            expected_outcome=EditableText.by_agent(_STOCK_EXPECTED_OUTCOME),
         )
 
         if switches.judge_pre:
@@ -785,18 +806,12 @@ class ChatFlowEngine:
     def _spawn_judge_pre(
         self,
         inner: WorkFlow,
-        user_message_text: str,
+        user_message_text: str,  # noqa: ARG002 — kept for symmetry / future logging
         context_wire: list[WireMessage],
     ) -> WorkFlowNode:
         templated = instantiate_fixture(
             self._fixture_plans["judge_pre"],
-            {
-                "description": user_message_text,
-                "inputs": "(prior conversation context — see messages below)",
-                "expected_outcome": (
-                    "Helpful, accurate response to the user's request"
-                ),
-            },
+            _trio_params(inner),
             includes=self._fixture_includes,
         )
         node = _single_node(templated)
@@ -808,7 +823,7 @@ class ChatFlowEngine:
         self,
         inner: WorkFlow,
         *,
-        user_message_text: str,
+        user_message_text: str,  # noqa: ARG002 — kept for symmetry / future logging
         context_wire: list[WireMessage],
         parent_node: WorkFlowNode,
         upstream_kind: str,
@@ -823,16 +838,15 @@ class ChatFlowEngine:
         ``upstream_summary`` give the judge enough context to write the
         user-facing message in its own voice — see judge_post.yaml.
         """
+        trio = _trio_params(inner)
         templated = instantiate_fixture(
             self._fixture_plans["judge_post"],
             {
-                "workflow_description": user_message_text,
-                "workflow_inputs": (
-                    "(prior conversation context — see messages below)"
-                ),
-                "workflow_expected_outcome": (
-                    "Helpful, accurate response to the user's request"
-                ),
+                # judge_post.yaml uses ``workflow_*`` prefixes to disambiguate
+                # the WorkFlow trio from any per-node trio it might also see.
+                "workflow_description": trio["description"],
+                "workflow_inputs": trio["inputs"],
+                "workflow_expected_outcome": trio["expected_outcome"],
                 "upstream_kind": upstream_kind,
                 "upstream_summary": upstream_summary,
                 "worknode_catalog": worknode_catalog,
@@ -1280,6 +1294,21 @@ def _render_judge_pre_halt(verdict: JudgeVerdict) -> str:
         parts.append("Missing inputs:")
         parts.extend(f"  - {m}" for m in verdict.missing_inputs)
     return "\n".join(parts) if parts else "(empty verdict)"
+
+
+def _trio_params(workflow: WorkFlow) -> dict[str, str]:
+    """Read the WorkFlow's trio into the param dict every judge / planner
+    template expects. Falls back to ``""`` for any unset field so a
+    template that asks for ``{{ inputs }}`` doesn't blow up on a
+    legacy WorkFlow that predates trio seeding.
+    """
+    return {
+        "description": workflow.description.text if workflow.description else "",
+        "inputs": workflow.inputs.text if workflow.inputs else "",
+        "expected_outcome": (
+            workflow.expected_outcome.text if workflow.expected_outcome else ""
+        ),
+    }
 
 
 def _single_node(workflow: WorkFlow) -> WorkFlowNode:
