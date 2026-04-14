@@ -135,6 +135,22 @@ plan:
                     off-topic: ``fail`` with a ``user_message``
                     restating what couldn't be done and asking how
                     to proceed.
+              - ``redo_aggregation``: a prior judge_post returned
+                ``retry`` with ``redo_targets``; those clones have now
+                finished. The upstream_summary is structured blocks in
+                the same vocabulary as decompose_aggregation but with
+                a ``[redo N round=R id=... status=...]`` header — ``R``
+                is this aggregator's retry round (2 on first retry).
+
+                IMPORTANT: you only see the clones from THIS retry
+                round, not the sibling subtasks that succeeded in
+                earlier rounds. If a retry target still fails the
+                same way twice, it's usually unfixable — prefer
+                ``fail`` over another ``retry``, and write a
+                ``user_message`` that names what couldn't be done.
+                Do NOT claim "nothing was generated" when earlier
+                rounds already succeeded for other siblings — the
+                wording should stick to what you can observe here.
               - ``judge_pre_halt``: judge_pre vetoed before any work ran.
                 The upstream summary is the verdict it returned. Default
                 to ``fail``; the user_message should restate the blockers

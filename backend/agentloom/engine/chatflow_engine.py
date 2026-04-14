@@ -1751,18 +1751,19 @@ class ChatFlowEngine:
         if _redo_group_already_reaggregated(workflow, judge_post_node.id):
             return
 
-        def _clone_output(m: WorkFlowNode) -> str:
-            if m.step_kind == StepKind.LLM_CALL and m.output_message is not None:
-                return m.output_message.content
-            if m.step_kind == StepKind.SUB_AGENT_DELEGATION and m.sub_workflow is not None:
-                return _sub_workflow_effective_output(m.sub_workflow)
-            return "(clone produced no output)"
-
+        round_index = _judge_post_round_index(workflow, judge_post_node) + 1
         summary_parts: list[str] = []
         catalog_parts: list[str] = []
-        for m in members:
+        for i, m in enumerate(members, start=1):
             label = (m.description.text or "").strip() or m.id
-            summary_parts.append(f"[{label}] (retried)\n{_clone_output(m)}")
+            status, body = _redo_clone_classification(m)
+            detail = ""
+            if status != "ok" and m.error:
+                detail = f' detail="{_escape_attr(m.error)}"'
+            header = (
+                f"[redo {i} round={round_index} id={m.id} status={status}{detail}]"
+            )
+            summary_parts.append(f"{header}\n{label}\n{body}")
             kind_desc = (
                 "worker redo" if m.step_kind == StepKind.LLM_CALL
                 else "delegation redo"
@@ -2455,6 +2456,27 @@ def _format_decompose_aggregation(
 def _escape_attr(s: str) -> str:
     """Inline-attribute escaping: collapse newlines, escape quotes."""
     return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def _redo_clone_classification(m: WorkFlowNode) -> tuple[str, str]:
+    """Classify a redo clone (worker or delegation) for the structured
+    redo_aggregation summary. Returns ``(status, body)`` using the same
+    vocabulary as ``_classify_sub_outcome`` for delegation clones, and
+    a worker-specific ``ok`` / ``worker_failed`` / ``empty`` for LLM
+    clones.
+    """
+    if m.step_kind == StepKind.LLM_CALL:
+        if m.status == NodeStatus.SUCCEEDED and m.output_message is not None:
+            return ("ok", m.output_message.content)
+        if m.status == NodeStatus.FAILED:
+            return (
+                "worker_failed",
+                f"worker raised: {m.error or 'unknown error'}",
+            )
+        return ("empty", "(worker produced no output)")
+    if m.step_kind == StepKind.SUB_AGENT_DELEGATION and m.sub_workflow is not None:
+        return _classify_sub_outcome(m.sub_workflow)
+    return ("empty", "(clone produced no output)")
 
 
 def _judge_post_response_text(workflow: WorkFlow) -> str | None:
