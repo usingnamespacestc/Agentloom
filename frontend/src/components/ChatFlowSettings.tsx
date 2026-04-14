@@ -36,6 +36,7 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
 
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
   const [modelKey, setModelKey] = useState("");
+  const [retryBudgetStr, setRetryBudgetStr] = useState("");
   const [saving, setSaving] = useState(false);
 
   const loadProviders = useCallback(async () => {
@@ -51,6 +52,7 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
     if (open) {
       void loadProviders();
       setModelKey(refKey(chatflow?.default_model ?? null));
+      setRetryBudgetStr(String(chatflow?.judge_retry_budget ?? 3));
     }
   }, [open, chatflow, loadProviders]);
 
@@ -78,8 +80,15 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
   const handleSave = async () => {
     setSaving(true);
     try {
+      const trimmed = retryBudgetStr.trim();
+      const parsed = trimmed === "" ? NaN : Number(trimmed);
+      const budget =
+        Number.isFinite(parsed) && Number.isInteger(parsed) && parsed >= -1
+          ? parsed
+          : (chatflow?.judge_retry_budget ?? 3);
       await patchChatFlow({
         default_model: parseRefKey(modelKey),
+        judge_retry_budget: budget,
       });
       onClose();
     } finally {
@@ -123,6 +132,24 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
               {t("chatflow_settings.no_models_hint")}
             </p>
           )}
+
+          <label className="block">
+            <span className="text-[11px] font-medium text-gray-500">
+              {t("chatflow_settings.judge_retry_budget")}
+            </span>
+            <input
+              type="number"
+              min={-1}
+              step={1}
+              value={retryBudgetStr}
+              onChange={(e) => setRetryBudgetStr(e.target.value)}
+              data-testid="judge-retry-budget-input"
+              className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+            />
+            <p className="mt-1 text-[10px] text-gray-400">
+              {t("chatflow_settings.judge_retry_budget_hint")}
+            </p>
+          </label>
         </div>
 
         <div className="flex justify-end gap-2 border-t border-gray-100 px-5 py-3">

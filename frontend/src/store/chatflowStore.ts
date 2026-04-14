@@ -137,6 +137,7 @@ export interface ChatFlowStoreState {
     tags?: string[];
     default_model?: ProviderModelRef | null;
     default_execution_mode?: ExecutionMode;
+    judge_retry_budget?: number;
   }) => Promise<void>;
 
   /** Which edge is currently hovered on the ChatFlow canvas — drives
@@ -455,6 +456,9 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     if ("default_model" in patch) updated.default_model = patch.default_model ?? null;
     if ("default_execution_mode" in patch && patch.default_execution_mode !== undefined) {
       updated.default_execution_mode = patch.default_execution_mode;
+    }
+    if ("judge_retry_budget" in patch && patch.judge_retry_budget !== undefined) {
+      updated.judge_retry_budget = patch.judge_retry_budget;
     }
     set({ chatflow: updated as typeof cf });
     // Refresh sidebar list too (title may have changed).

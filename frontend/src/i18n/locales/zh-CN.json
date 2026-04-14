@@ -156,7 +156,9 @@
     "execution_mode_auto": "Auto plan（含 during judge，可被 budget 拦下）",
     "execution_mode_direct_hint": "新对话轮次直接走 ReAct 循环，不生成 plan，没有 judge 节点。最快也最不可控。",
     "execution_mode_semi_auto_hint": "先生成 plan，pre/post judge 拦住明显问题；judge 不通过会让 Agent 反过来问你。",
-    "execution_mode_auto_hint": "在 semi-auto 之上再加 during judge 持续监控；连续 revise 超过预算时停下问你。"
+    "execution_mode_auto_hint": "在 semi-auto 之上再加 during judge 持续监控；连续 revise 超过预算时停下问你。",
+    "judge_retry_budget": "Judge 重试轮次上限",
+    "judge_retry_budget_hint": "judge_post 判定 retry 时最多重跑几轮。默认 3；填 -1 表示不限（直到 judge 自己放弃重试为止）。"
   },
   "canvas_prefs": {
     "show_node_id": "显示节点 ID",

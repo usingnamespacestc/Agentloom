@@ -74,6 +74,7 @@ export const api = {
       tags?: string[];
       default_model?: ProviderModelRef | null;
       default_execution_mode?: ExecutionMode;
+      judge_retry_budget?: number;
     },
   ) =>
     request<{ ok: boolean }>(`/api/chatflows/${id}`, {

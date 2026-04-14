@@ -53,6 +53,7 @@ function twoBranchFlow(): ChatFlow {
     tags: [],
     default_model: null,
     default_execution_mode: 'direct',
+    judge_retry_budget: 3,
     root_ids: ["a"],
     nodes: {
       a: node("a", [], "hello", "hi there", 0),

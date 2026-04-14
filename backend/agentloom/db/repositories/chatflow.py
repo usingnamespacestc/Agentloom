@@ -115,14 +115,15 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         tags: list[str] | None = ...,  # type: ignore[assignment]
         default_model: ProviderModelRef | None = ...,  # type: ignore[assignment]
         default_execution_mode: ExecutionMode | None = ...,  # type: ignore[assignment]
+        judge_retry_budget: int | None = ...,  # type: ignore[assignment]
     ) -> None:
         """Update metadata fields. Pass ``...`` (default) to skip a field.
 
         ``title`` / ``description`` / ``tags`` live on top-level columns
         (for efficient sidebar queries) AND inside the ``payload`` JSON
         (so ``get()`` which reads only the payload stays in sync).
-        ``default_model`` and ``default_execution_mode`` live only in the
-        payload.
+        ``default_model`` / ``default_execution_mode`` / ``judge_retry_budget``
+        live only in the payload.
         """
         stmt = (
             select(ChatFlowRow)
@@ -151,6 +152,9 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         if default_execution_mode is not ...:
             if default_execution_mode is not None:
                 payload["default_execution_mode"] = default_execution_mode.value
+        if judge_retry_budget is not ...:
+            if judge_retry_budget is not None:
+                payload["judge_retry_budget"] = judge_retry_budget
         row.payload = payload
         await self.session.flush()
 

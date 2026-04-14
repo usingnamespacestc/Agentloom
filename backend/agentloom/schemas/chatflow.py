@@ -121,6 +121,12 @@ class ChatFlow(BaseModel):
     #: rounds before the engine forces convergence (routes through
     #: judge_post). Applied to every new turn's inner WorkFlow. See §3.4.5.
     debate_round_budget: int = 3
+    #: Hard cap on judge_post retry rounds. When a judge_post returns
+    #: ``verdict=retry`` with ``redo_targets``, the engine re-spawns
+    #: those subtasks and re-aggregates — up to this many rounds total
+    #: (round 1 is the initial judgement). ``-1`` = unlimited. Applied
+    #: to every new turn's inner WorkFlow.
+    judge_retry_budget: int = 3
     #: Execution mode applied to every new turn's inner WorkFlow. The
     #: ChatFlowEngine derives the four switch defaults (``plan_enabled``,
     #: ``judge_pre_enabled``, ``judge_during_enabled``, ``judge_post_enabled``)

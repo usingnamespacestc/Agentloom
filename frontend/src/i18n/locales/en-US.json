@@ -156,7 +156,9 @@
     "execution_mode_auto": "Auto plan (with during judge, halts on budget)",
     "execution_mode_direct_hint": "New turns go straight to the ReAct loop. No plan, no judges. Fastest, least controlled.",
     "execution_mode_semi_auto_hint": "Plan first, with pre/post judges to catch obvious issues. A failing judge bounces back to ask you.",
-    "execution_mode_auto_hint": "Adds the during judge on top of semi-auto. Halts and asks you when revise exceeds budget."
+    "execution_mode_auto_hint": "Adds the during judge on top of semi-auto. Halts and asks you when revise exceeds budget.",
+    "judge_retry_budget": "Judge retry budget",
+    "judge_retry_budget_hint": "How many times judge_post can ask the engine to redo failing subtasks before halting. Default 3. Use -1 for unlimited (the judge itself decides when to stop retrying)."
   },
   "canvas_prefs": {
     "show_node_id": "Show node ID",

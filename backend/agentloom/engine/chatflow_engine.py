@@ -774,6 +774,7 @@ class ChatFlowEngine:
             inputs=EditableText.by_agent(_STOCK_INPUTS),
             expected_outcome=EditableText.by_agent(_STOCK_EXPECTED_OUTCOME),
             debate_round_budget=chatflow.debate_round_budget,
+            judge_retry_budget=chatflow.judge_retry_budget,
         )
 
         if switches.judge_pre:
@@ -1003,6 +1004,7 @@ class ChatFlowEngine:
             inputs=EditableText.by_agent(subtask.inputs),
             expected_outcome=EditableText.by_agent(subtask.expected_outcome),
             debate_round_budget=parent.debate_round_budget,
+            judge_retry_budget=parent.judge_retry_budget,
         )
         # judge_pre is the universal entry gate; the post-node hook then
         # spawns the planner / worker chain when it votes OK.
@@ -1626,9 +1628,11 @@ class ChatFlowEngine:
 
         # Halt fuse: count completed judge_post rounds in this chain
         # (including the one that just finished). Once we're at the
-        # budget, stop re-spawning and let the user decide.
+        # budget, stop re-spawning and let the user decide. A budget of
+        # ``-1`` disables the fuse entirely.
         round_index = _judge_post_round_index(workflow, judge_post_node)
-        if round_index >= workflow.debate_round_budget:
+        budget = workflow.judge_retry_budget
+        if budget >= 0 and round_index >= budget:
             from agentloom.engine.judge_formatter import format_judge_post_prompt
             workflow.pending_user_prompt = format_judge_post_prompt(verdict)
             return

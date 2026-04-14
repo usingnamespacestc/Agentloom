@@ -266,6 +266,8 @@ export interface ChatFlow {
   root_ids: NodeId[];
   default_model: ProviderModelRef | null;
   default_execution_mode: ExecutionMode;
+  /** Hard cap on judge_post retry rounds. ``-1`` means unlimited. */
+  judge_retry_budget: number;
   created_at: string;
 }
 

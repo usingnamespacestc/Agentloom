@@ -45,6 +45,7 @@ function seedChatFlow(): ChatFlow {
     tags: [],
     default_model: null,
     default_execution_mode: 'direct',
+    judge_retry_budget: 3,
     root_ids: ["n1"],
     created_at: "2026-04-10T00:00:00Z",
     nodes: {
@@ -237,6 +238,7 @@ describe("chatflowStore", () => {
       tags: [],
       default_model: null,
       default_execution_mode: 'direct',
+      judge_retry_budget: 3,
       root_ids: ["a"],
       nodes: {
         a: stubChatNode("a", []),
@@ -344,6 +346,7 @@ describe("chatflowStore", () => {
       tags: [],
       default_model: null,
       default_execution_mode: 'direct',
+      judge_retry_budget: 3,
       root_ids: ["a"],
       nodes: {
         a: stubChatNode("a", []),

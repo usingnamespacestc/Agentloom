@@ -22,6 +22,7 @@ function seed(): ChatFlow {
     tags: [],
     default_model: null,
     default_execution_mode: 'direct',
+    judge_retry_budget: 3,
     root_ids: ["a"],
     created_at: "2026-04-10T00:00:00Z",
     nodes: {
@@ -134,6 +135,7 @@ describe("ChatFlowCanvas rendering", () => {
           tags: [],
           default_model: null,
           default_execution_mode: 'direct',
+          judge_retry_budget: 3,
           root_ids: [],
           nodes: {},
           created_at: "2026-04-10T00:00:00Z",

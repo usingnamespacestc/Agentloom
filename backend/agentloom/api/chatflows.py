@@ -278,6 +278,7 @@ class PatchChatFlowRequest(BaseModel):
     tags: list[str] | None = None
     default_model: ProviderModelRef | None = None
     default_execution_mode: ExecutionMode | None = None
+    judge_retry_budget: int | None = None
 
 
 @router.patch("/{chatflow_id}")
@@ -300,6 +301,8 @@ async def patch_chatflow(
         kwargs["default_model"] = body.default_model
     if "default_execution_mode" in provided:
         kwargs["default_execution_mode"] = body.default_execution_mode
+    if "judge_retry_budget" in provided:
+        kwargs["judge_retry_budget"] = body.judge_retry_budget
     if not kwargs:
         return {"ok": True}
     try:
@@ -324,6 +327,8 @@ async def patch_chatflow(
             rt_chat.default_model = body.default_model
         if "default_execution_mode" in provided and body.default_execution_mode is not None:
             rt_chat.default_execution_mode = body.default_execution_mode
+        if "judge_retry_budget" in provided and body.judge_retry_budget is not None:
+            rt_chat.judge_retry_budget = body.judge_retry_budget
 
     return {"ok": True}
 

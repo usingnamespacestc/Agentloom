@@ -206,6 +206,13 @@ class WorkFlow(BaseModel):
     #: rounds before forcing convergence (§3.4.5). Ignored in ``direct``
     #: mode where there are no judges.
     debate_round_budget: int = 3
+    #: Hard cap on judge_post retry rounds before the engine stops re-
+    #: spawning redo clones and halts to the user. ``-1`` = unlimited
+    #: (the engine keeps retrying as long as the judge votes ``retry``
+    #: with redo_targets). Distinct from ``debate_round_budget`` —
+    #: debate rounds are the planner/worker inner convergence loop,
+    #: retry rounds are the judge_post outer "fix these subtasks" loop.
+    judge_retry_budget: int = 3
 
     #: Set by the engine when a judge pass decides the WorkFlow cannot
     #: proceed without user clarification (judge_pre says non-OK, or
