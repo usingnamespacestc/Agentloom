@@ -45,8 +45,14 @@ from typing import Any
 
 from agentloom.channels.base import ExternalTurn
 from agentloom.engine.events import EventBus, WorkflowEvent
+from agentloom.engine.recursive_planner_parser import (
+    AtomicBrief,
+    PlannerParseError,
+    RecursivePlannerOutput,
+    parse_recursive_planner_output,
+)
 from agentloom.engine.workflow_engine import PostNodeHook, ProviderCall, WorkflowEngine
-from agentloom.schemas.common import JudgeVariant, JudgeVerdict
+from agentloom.schemas.common import JudgeVariant, JudgeVerdict, WorkNodeRole
 from agentloom.schemas import (
     ChatFlow,
     ChatFlowNode,
@@ -859,6 +865,146 @@ class ChatFlowEngine:
         node.input_messages = [*(node.input_messages or []), *context_wire]
         return inner.add_node(node)
 
+    # ------------------------------------------------------------ planner spawns
+    #
+    # The recursive-planner pipeline (auto mode) inserts four extra
+    # WorkNode kinds between judge_pre and judge_post, in this order:
+    #
+    #     judge_pre → planner → planner_judge → worker → worker_judge → judge_post
+    #
+    # Each helper here materializes one of those nodes from its YAML
+    # fixture, splices it into the inner WorkFlow under the right
+    # parent, and returns it. Debate (revise → fresh planner / worker)
+    # and decompose (sub_agent_delegation) come in M12.4c / M12.4d;
+    # this layer only handles the atomic happy path.
+
+    def _spawn_planner(
+        self,
+        inner: WorkFlow,
+        parent_node: WorkFlowNode,
+        *,
+        resolved_model: ProviderModelRef | None,
+        prior_plan: str = "",
+        critique: str = "",
+        handoff_notes: str = "",
+    ) -> WorkFlowNode:
+        templated = instantiate_fixture(
+            self._fixture_plans["planner"],
+            {
+                **_trio_params(inner),
+                "prior_plan": prior_plan,
+                "critique": critique,
+                "handoff_notes": handoff_notes,
+            },
+            includes=self._fixture_includes,
+        )
+        node = _single_node(templated)
+        node.parent_ids = [parent_node.id]
+        node.model_override = resolved_model
+        return inner.add_node(node)
+
+    def _spawn_planner_judge(
+        self,
+        inner: WorkFlow,
+        planner_node: WorkFlowNode,
+        *,
+        round_index: int,
+    ) -> WorkFlowNode:
+        templated = instantiate_fixture(
+            self._fixture_plans["planner_judge"],
+            {
+                **_trio_params(inner),
+                "plan_json": (
+                    planner_node.output_message.content
+                    if planner_node.output_message
+                    else ""
+                ),
+                "round": str(round_index),
+                "round_budget": str(inner.debate_round_budget),
+            },
+            includes=self._fixture_includes,
+        )
+        node = _single_node(templated)
+        node.parent_ids = [planner_node.id]
+        node.judge_target_id = planner_node.id
+        return inner.add_node(node)
+
+    def _spawn_worker(
+        self,
+        inner: WorkFlow,
+        parent_node: WorkFlowNode,
+        atomic: AtomicBrief,
+        *,
+        resolved_model: ProviderModelRef | None,
+        prior_output: str = "",
+        critique: str = "",
+    ) -> WorkFlowNode:
+        """Spawn the worker WorkNode for an ``atomic`` planner brief.
+
+        The brief's trio (description / inputs / expected_outcome) is
+        the worker's *task* — distinct from the WorkFlow-level trio,
+        which the planner consumed. We pass the brief verbatim into
+        the worker template's params; the WorkFlow-level trio stays
+        unchanged for the eventual judge_post.
+        """
+        templated = instantiate_fixture(
+            self._fixture_plans["worker"],
+            {
+                "description": atomic.description,
+                "inputs": atomic.inputs,
+                "expected_outcome": atomic.expected_outcome,
+                "prior_output": prior_output,
+                "critique": critique,
+            },
+            includes=self._fixture_includes,
+        )
+        node = _single_node(templated)
+        node.parent_ids = [parent_node.id]
+        node.model_override = resolved_model
+        return inner.add_node(node)
+
+    def _spawn_worker_judge(
+        self,
+        inner: WorkFlow,
+        worker_node: WorkFlowNode,
+        *,
+        round_index: int,
+    ) -> WorkFlowNode:
+        # The worker_judge needs the worker's brief — which the planner
+        # produced and the worker consumed — not the WorkFlow trio.
+        # We reconstruct it from the worker's own ``description``
+        # (set by the worker template from the atomic brief), keeping
+        # the chain self-contained.
+        worker_brief_desc = (
+            worker_node.description.text if worker_node.description else ""
+        )
+        templated = instantiate_fixture(
+            self._fixture_plans["worker_judge"],
+            {
+                "description": worker_brief_desc,
+                # We don't separately track the brief's inputs /
+                # expected_outcome on the worker node — the planner's
+                # full brief is in the worker's input_messages, which
+                # the judge sees via ``worker_output``. Pass empty
+                # placeholders for the param dict; the system prompt
+                # explicitly cues the judge to read from worker_output.
+                "inputs": "",
+                "expected_outcome": "",
+                "worker_output": (
+                    worker_node.output_message.content
+                    if worker_node.output_message
+                    else ""
+                ),
+                "round": str(round_index),
+                "round_budget": str(inner.debate_round_budget),
+            },
+            includes=self._fixture_includes,
+        )
+        node = _single_node(templated)
+        node.parent_ids = [worker_node.id]
+        node.judge_target_id = worker_node.id
+        return inner.add_node(node)
+
     def _build_post_node_hook(
         self,
         chat_node: ChatFlowNode,
@@ -894,31 +1040,56 @@ class ChatFlowEngine:
                         switches=switches,
                         resolved_model=chat_node.resolved_model,
                     )
+                    return
+                if node.judge_variant == JudgeVariant.DURING:
+                    if node.role == WorkNodeRole.PLANNER_JUDGE:
+                        self._after_planner_judge(
+                            workflow,
+                            node,
+                            user_message_text=user_message_text,
+                            context_wire=context_wire,
+                            resolved_model=chat_node.resolved_model,
+                        )
+                    elif node.role == WorkNodeRole.WORKER_JUDGE:
+                        self._after_worker_judge(
+                            workflow,
+                            node,
+                            user_message_text=user_message_text,
+                            context_wire=context_wire,
+                        )
                 # judge_post halt → pending_user_prompt is set inside
                 # WorkflowEngine._run_judge_call; nothing to do here.
-                # judge_during is not in scope yet (M10.4).
                 return
-            if node.step_kind == StepKind.LLM_CALL and switches.judge_post:
-                # Only attach judge_post when this llm_call is terminal —
-                # i.e. it didn't request more tools. The tool-loop helper
-                # already spawned a follow-up llm_call when there were
-                # pending tool_uses; that follow-up will fire this hook
-                # again and we'll evaluate freshness then.
-                if node.output_message and node.output_message.tool_uses:
+
+            if node.step_kind == StepKind.LLM_CALL:
+                if node.role == WorkNodeRole.PLANNER:
+                    self._after_planner(workflow, node)
                     return
-                self._spawn_judge_post(
-                    workflow,
-                    user_message_text=user_message_text,
-                    context_wire=context_wire,
-                    parent_node=node,
-                    upstream_kind="completed",
-                    upstream_summary=(
-                        node.output_message.content if node.output_message else ""
-                    ),
-                    worknode_catalog=(
-                        f"{node.id}: terminal llm_call producing the agent's reply"
-                    ),
-                )
+                if node.role == WorkNodeRole.WORKER:
+                    # Workers can do tools too — wait for the terminal
+                    # llm_call before handing off to the worker_judge.
+                    if node.output_message and node.output_message.tool_uses:
+                        return
+                    self._after_worker(workflow, node)
+                    return
+                if switches.judge_post:
+                    # Direct/semi_auto: ordinary terminal llm_call routes
+                    # straight to judge_post (no recursive planner chain).
+                    if node.output_message and node.output_message.tool_uses:
+                        return
+                    self._spawn_judge_post(
+                        workflow,
+                        user_message_text=user_message_text,
+                        context_wire=context_wire,
+                        parent_node=node,
+                        upstream_kind="completed",
+                        upstream_summary=(
+                            node.output_message.content if node.output_message else ""
+                        ),
+                        worknode_catalog=(
+                            f"{node.id}: terminal llm_call producing the agent's reply"
+                        ),
+                    )
 
         return hook
 
@@ -963,9 +1134,22 @@ class ChatFlowEngine:
             )
             return
 
-        # Happy path: judge_pre cleared the run. Spawn the llm_call;
-        # the post-node hook will attach judge_post once it completes
-        # (and any tool loop has terminated).
+        # Happy path: judge_pre cleared the run.
+        if workflow.execution_mode == ExecutionMode.AUTO:
+            # Auto mode runs the recursive-planner pipeline:
+            #   judge_pre → planner → planner_judge → worker
+            #             → worker_judge → judge_post
+            # The hook handlers below grow the chain step by step.
+            self._spawn_planner(
+                workflow,
+                judge_pre_node,
+                resolved_model=resolved_model,
+            )
+            return
+
+        # Semi_auto / direct: spawn a plain llm_call; the post-node hook
+        # attaches judge_post once it completes (and any tool loop has
+        # terminated).
         workflow.add_node(
             WorkFlowNode(
                 step_kind=StepKind.LLM_CALL,
@@ -973,6 +1157,177 @@ class ChatFlowEngine:
                 input_messages=list(context_wire),
                 model_override=resolved_model,
             )
+        )
+
+    # --------------------------------------------------- recursive planner hooks
+    #
+    # These handlers grow the auto-mode chain one node at a time. Each
+    # is called from the post-node hook above when its predecessor
+    # node finishes successfully. M12.4b only handles the atomic happy
+    # path — non-continue verdicts and decompose plans short-circuit
+    # to judge_post halt; M12.4c / M12.4d will replace those bail-outs
+    # with debate-as-chain and sub_agent_delegation respectively.
+
+    def _after_planner(
+        self,
+        workflow: WorkFlow,
+        planner_node: WorkFlowNode,
+    ) -> None:
+        """Planner just produced its plan JSON. Attach planner_judge.
+
+        We don't parse the JSON here — the judge sees the raw plan and
+        decides; only when planner_judge votes ``continue`` and the
+        plan is ``atomic`` do we materialize a worker. That parse lives
+        in :meth:`_after_planner_judge`.
+        """
+        self._spawn_planner_judge(
+            workflow, planner_node, round_index=_round_index_for(workflow, planner_node)
+        )
+
+    def _after_planner_judge(
+        self,
+        workflow: WorkFlow,
+        planner_judge_node: WorkFlowNode,
+        *,
+        user_message_text: str,
+        context_wire: list[WireMessage],
+        resolved_model: ProviderModelRef | None,
+    ) -> None:
+        """Decide what to do with the planner's plan."""
+        verdict = planner_judge_node.judge_verdict
+        decision = verdict.during_verdict if verdict is not None else None
+
+        # Locate the planner this judge reviewed and re-parse its output.
+        planner_node = workflow.nodes.get(planner_judge_node.judge_target_id or "")
+        if planner_node is None or planner_node.output_message is None:
+            self._halt_to_post_judge(
+                workflow,
+                parent_node=planner_judge_node,
+                upstream_kind="planner_judge_halt",
+                upstream_summary=(
+                    "planner output unavailable for review"
+                ),
+                user_message_text=user_message_text,
+                context_wire=context_wire,
+            )
+            return
+
+        try:
+            plan = parse_recursive_planner_output(planner_node.output_message.content)
+        except PlannerParseError as exc:
+            self._halt_to_post_judge(
+                workflow,
+                parent_node=planner_judge_node,
+                upstream_kind="planner_parse_error",
+                upstream_summary=f"planner output failed to parse: {exc}",
+                user_message_text=user_message_text,
+                context_wire=context_wire,
+            )
+            return
+
+        # Atomic-only fast path. Anything else routes through judge_post
+        # halt for now; M12.4c (debate) and M12.4d (decompose) will
+        # replace these branches.
+        if decision == "continue" and plan.mode == "atomic" and plan.atomic is not None:
+            self._spawn_worker(
+                workflow,
+                planner_judge_node,
+                plan.atomic,
+                resolved_model=resolved_model,
+            )
+            return
+
+        upstream_summary = _summarize_planner_outcome(decision, plan)
+        self._halt_to_post_judge(
+            workflow,
+            parent_node=planner_judge_node,
+            upstream_kind="planner_judge_halt",
+            upstream_summary=upstream_summary,
+            user_message_text=user_message_text,
+            context_wire=context_wire,
+        )
+
+    def _after_worker(
+        self,
+        workflow: WorkFlow,
+        worker_node: WorkFlowNode,
+    ) -> None:
+        """Worker just produced its draft. Attach worker_judge."""
+        self._spawn_worker_judge(
+            workflow, worker_node, round_index=_round_index_for(workflow, worker_node)
+        )
+
+    def _after_worker_judge(
+        self,
+        workflow: WorkFlow,
+        worker_judge_node: WorkFlowNode,
+        *,
+        user_message_text: str,
+        context_wire: list[WireMessage],
+    ) -> None:
+        """On continue, pass the worker's output to judge_post; otherwise halt."""
+        verdict = worker_judge_node.judge_verdict
+        decision = verdict.during_verdict if verdict is not None else None
+        worker_node = workflow.nodes.get(worker_judge_node.judge_target_id or "")
+        worker_output = (
+            worker_node.output_message.content
+            if worker_node is not None and worker_node.output_message is not None
+            else ""
+        )
+
+        if decision == "continue" and worker_node is not None:
+            self._spawn_judge_post(
+                workflow,
+                user_message_text=user_message_text,
+                context_wire=context_wire,
+                parent_node=worker_judge_node,
+                upstream_kind="completed",
+                upstream_summary=worker_output,
+                worknode_catalog=(
+                    f"{worker_node.id}: worker draft accepted by worker_judge"
+                ),
+            )
+            return
+
+        # revise / halt / unparseable → judge_post halt.
+        self._halt_to_post_judge(
+            workflow,
+            parent_node=worker_judge_node,
+            upstream_kind="worker_judge_halt",
+            upstream_summary=(
+                f"worker_judge verdict={decision or 'unparseable'}; "
+                f"worker draft: {worker_output}"
+            ),
+            user_message_text=user_message_text,
+            context_wire=context_wire,
+        )
+
+    def _halt_to_post_judge(
+        self,
+        workflow: WorkFlow,
+        *,
+        parent_node: WorkFlowNode,
+        upstream_kind: str,
+        upstream_summary: str,
+        user_message_text: str,
+        context_wire: list[WireMessage],
+    ) -> None:
+        """Bail out of the recursive-planner chain by routing to
+        judge_post in halt-summary mode. Used for verdicts and plan
+        shapes M12.4b doesn't yet handle (revise, decompose, halt,
+        unparseable). M12.4c will replace the revise / debate branches
+        with debate-as-chain.
+        """
+        self._spawn_judge_post(
+            workflow,
+            user_message_text=user_message_text,
+            context_wire=context_wire,
+            parent_node=parent_node,
+            upstream_kind=upstream_kind,
+            upstream_summary=upstream_summary,
+            worknode_catalog=(
+                f"{parent_node.id}: planner-pipeline halt at {upstream_kind}"
+            ),
         )
 
     def _launch_execute(
@@ -1294,6 +1649,55 @@ def _render_judge_pre_halt(verdict: JudgeVerdict) -> str:
         parts.append("Missing inputs:")
         parts.extend(f"  - {m}" for m in verdict.missing_inputs)
     return "\n".join(parts) if parts else "(empty verdict)"
+
+
+def _round_index_for(workflow: WorkFlow, node: WorkFlowNode) -> int:
+    """Compute the 1-indexed debate round for ``node`` (a planner or
+    worker) by walking its parent chain and counting same-role
+    ancestors. M12.4b only ever spawns one round of each, so this
+    always returns 1; M12.4c (debate-as-chain) will surface higher
+    rounds as the planner / worker is rerun with critiques attached.
+    """
+    if node.role is None:
+        return 1
+    count = 1
+    cursor = node.parent_ids[0] if node.parent_ids else None
+    seen: set[str] = set()
+    while cursor is not None and cursor not in seen:
+        seen.add(cursor)
+        ancestor = workflow.nodes.get(cursor)
+        if ancestor is None:
+            break
+        if ancestor.role == node.role:
+            count += 1
+        cursor = ancestor.parent_ids[0] if ancestor.parent_ids else None
+    return count
+
+
+def _summarize_planner_outcome(
+    decision: str | None, plan: RecursivePlannerOutput
+) -> str:
+    """Render a one-paragraph halt summary for judge_post when the
+    planner-pipeline can't proceed atomically.
+
+    Distinct cases the user / judge_post should see:
+    - planner_judge said ``revise`` / ``halt`` (debate not implemented yet)
+    - planner emitted ``decompose`` (sub-WorkFlows not implemented yet)
+    - planner emitted ``infeasible`` (no decomposition exists)
+    """
+    if plan.mode == "infeasible":
+        return f"planner reported infeasible: {plan.reason or '(no reason)'}"
+    if plan.mode == "decompose":
+        return (
+            f"planner proposed {len(plan.subtasks or [])} sub-tasks "
+            "(decompose support is pending — M12.4d)"
+        )
+    if decision in ("revise", "halt"):
+        return (
+            f"planner_judge verdict={decision} "
+            "(debate-as-chain support is pending — M12.4c)"
+        )
+    return f"unhandled planner outcome: decision={decision} mode={plan.mode}"
 
 
 def _trio_params(workflow: WorkFlow) -> dict[str, str]:
