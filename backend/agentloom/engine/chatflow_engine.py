@@ -2401,7 +2401,7 @@ def _judge_post_round_index(
     """1-indexed retry round: count judge_post ancestors (including the
     current one) in this chain. Round 1 is the first judge_post; round
     N means N-1 redo cycles have already run. The halt fuse compares
-    this to ``workflow.debate_round_budget``."""
+    this to ``workflow.judge_retry_budget``."""
     count = 1
     for nid in workflow.ancestors(judge_post_node.id):
         n = workflow.nodes.get(nid)
@@ -2722,10 +2722,20 @@ def _atomic_brief_for_worker(
     the planner's plan JSON. Returns ``None`` if any link is missing or
     the plan no longer parses as atomic (which shouldn't happen on a
     happy debate path, but we'd rather halt than crash).
+
+    Redo clones are parented on ``judge_post``, not planner_judge — so
+    chase the ``redo_source_id`` chain back to the round-1 original first
+    to recover the planner debate context.
     """
-    if not worker_node.parent_ids:
+    cursor = worker_node
+    while cursor.redo_source_id is not None:
+        origin = workflow.nodes.get(cursor.redo_source_id)
+        if origin is None:
+            break
+        cursor = origin
+    if not cursor.parent_ids:
         return None
-    planner_judge = workflow.nodes.get(worker_node.parent_ids[0])
+    planner_judge = workflow.nodes.get(cursor.parent_ids[0])
     if planner_judge is None or not planner_judge.judge_target_id:
         return None
     planner = workflow.nodes.get(planner_judge.judge_target_id)
