@@ -1560,7 +1560,7 @@ class ChatFlowEngine:
             f"{(m.description.text if m.description else '').strip() or '(no description)'}"
             for m in members
         )
-        self._spawn_judge_post(
+        aggregator = self._spawn_judge_post(
             workflow,
             user_message_text=user_message_text,
             context_wire=context_wire,
@@ -1569,6 +1569,12 @@ class ChatFlowEngine:
             upstream_summary=upstream_summary,
             worknode_catalog=worknode_catalog,
         )
+        # The aggregating judge_post reads every member's output via
+        # _format_decompose_aggregation, so it depends on all of them
+        # — not just the last-finishing sibling that triggered this
+        # hook. Overwrite parent_ids so the DAG edge set matches that
+        # real dependency and the UI draws one edge per member.
+        aggregator.parent_ids = [m.id for m in members]
 
     def _after_judge_post(
         self,
@@ -1763,10 +1769,11 @@ class ChatFlowEngine:
             )
             catalog_parts.append(f"{m.id}: {kind_desc} for {label}")
 
-        # Parent the new judge_post on the most recently created clone
-        # so the DAG edge ordering mirrors execution order.
+        # Parent on the most recently created clone for judge_target_id
+        # continuity, then overwrite parent_ids to include every clone
+        # so the DAG edge set reflects the real dependency.
         last_clone = max(members, key=lambda n: n.created_at)
-        self._spawn_judge_post(
+        aggregator = self._spawn_judge_post(
             workflow,
             user_message_text=user_message_text,
             context_wire=context_wire,
@@ -1775,6 +1782,7 @@ class ChatFlowEngine:
             upstream_summary="\n\n".join(summary_parts),
             worknode_catalog="\n".join(catalog_parts),
         )
+        aggregator.parent_ids = [m.id for m in members]
 
     def _halt_to_post_judge(
         self,
