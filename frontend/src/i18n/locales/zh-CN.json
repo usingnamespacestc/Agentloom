@@ -39,6 +39,14 @@
       "tool_call": "工具调用",
       "judge_call": "评审",
       "sub_agent_delegation": "子代理"
+    },
+    "role": {
+      "pre_judge": "前置评判",
+      "planner": "规划",
+      "planner_judge": "规划评判",
+      "worker": "执行",
+      "worker_judge": "执行评判",
+      "post_judge": "后置评判"
     }
   },
   "chatflow": {

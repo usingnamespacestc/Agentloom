@@ -39,6 +39,14 @@
       "tool_call": "Tool call",
       "judge_call": "Judge",
       "sub_agent_delegation": "Sub-agent"
+    },
+    "role": {
+      "pre_judge": "pre-judge",
+      "planner": "planner",
+      "planner_judge": "plan judge",
+      "worker": "worker",
+      "worker_judge": "work judge",
+      "post_judge": "post-judge"
     }
   },
   "chatflow": {

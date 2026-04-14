@@ -16,6 +16,7 @@ import { useTranslation } from "react-i18next";
 
 import { StatusBadge } from "./StatusBadge";
 import { NodeIdLine } from "./NodeIdLine";
+import { getRoleStyle } from "./roleStyles";
 import { TokenBar } from "./ChatFlowNodeCard";
 import { useChatFlowStore } from "@/store/chatflowStore";
 import type { WorkFlowNode } from "@/types/schema";
@@ -42,23 +43,42 @@ function truncate(text: string, n = 140): string {
 export function WorkFlowNodeCard({ data }: NodeProps) {
   const { t } = useTranslation();
   const { node, isSelected, isRoot, isLeaf } = data as WorkFlowNodeData;
-  const accent = KIND_ACCENT[node.step_kind] ?? "border-gray-300 bg-white";
+  // Role-based styling takes precedence over step_kind — see roleStyles.ts.
+  // Legacy (direct-mode) nodes have role === null and fall back to the
+  // original step_kind accent so the MVP look is preserved.
+  const roleStyle = getRoleStyle(node.role);
+  const accent =
+    roleStyle?.container ??
+    KIND_ACCENT[node.step_kind] ??
+    "border border-gray-300 bg-white";
 
   return (
     <div
       data-testid={`workflow-node-${node.id}`}
+      data-role={node.role ?? "none"}
       className={[
-        "rounded-md border w-52 p-2 text-[11px] shadow-sm",
+        "rounded-md w-52 p-2 text-[11px] shadow-sm",
+        // When there's no roleStyle, the legacy KIND_ACCENT string only
+        // includes border-{hue}-300, so we need a default 1px border class.
+        roleStyle ? "" : "border",
         accent,
         isSelected ? "ring-2 ring-blue-300" : "",
       ].join(" ")}
     >
       {!isRoot && <Handle type="target" position={Position.Left} />}
 
-      <div className="flex items-center justify-between mb-1.5">
+      <div className="flex items-center justify-between mb-1.5 gap-1">
         <span className="font-semibold text-gray-700">
           {t(`node.kind.${node.step_kind}`)}
         </span>
+        {node.role && roleStyle && (
+          <span
+            data-testid={`role-badge-${node.role}`}
+            className={`inline-flex items-center rounded px-1 py-0.5 text-[9px] font-medium leading-none ${roleStyle.badge}`}
+          >
+            {t(`node.role.${node.role}`)}
+          </span>
+        )}
         <StatusBadge status={node.status} />
       </div>
 
