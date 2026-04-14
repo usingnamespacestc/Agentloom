@@ -416,10 +416,19 @@ class WorkflowEngine:
                 node.output_message.content,
                 node.judge_variant,
             )
-        except JudgeParseError as exc:
-            # Reraise as a plain exception so the outer _run_node marks
-            # FAILED. The raw output_message is already on the node.
-            raise RuntimeError(f"judge parse failed: {exc}") from exc
+        except JudgeParseError as first_exc:
+            # One-shot corrective retry — weaker local models sometimes
+            # emit JSON with unquoted strings or a stray trailing newline.
+            # Re-invoke with the bad output + a JSON-discipline reminder;
+            # if that also fails, raise with both errors so debugging is
+            # possible from the node's final output_message.
+            try:
+                await self._retry_judge_parse(workflow, node, first_exc)
+            except JudgeParseError as retry_exc:
+                raise RuntimeError(
+                    f"judge parse failed after retry: first={first_exc}; "
+                    f"retry={retry_exc}"
+                ) from retry_exc
 
         # Option B: judge_post is the WorkFlow's universal exit gate —
         # only it writes ``pending_user_prompt``. judge_pre's verdict
@@ -452,6 +461,74 @@ class WorkflowEngine:
                     budget=budget,
                     latest_verdict=verdict,
                 )
+
+    async def _retry_judge_parse(
+        self,
+        workflow: WorkFlow,
+        node: WorkFlowNode,
+        first_exc: JudgeParseError,
+    ) -> None:
+        """Re-invoke the judge with a JSON-discipline reminder.
+
+        On success, overwrites ``node.output_message`` and sets
+        ``node.judge_verdict``. On failure, re-raises
+        :class:`JudgeParseError` for the caller to surface.
+        """
+        assert node.output_message is not None  # _run_judge_call guarantees
+        assert node.judge_variant is not None
+        first_raw = node.output_message.content
+
+        # Build retry context: original input + the bad response + a
+        # terse corrective user message. Keeps the token cost small and
+        # shows the model exactly what it emitted.
+        base_messages = _wire_to_provider(node.input_messages or [])
+        retry_messages: list[Message] = [
+            *base_messages,
+            AssistantMessage(content=first_raw),
+            UserMessage(
+                content=(
+                    f"Your previous reply failed JSON parse: {first_exc}. "
+                    "Reply with ONLY a valid JSON object matching the "
+                    "required schema — no prose, no code fences, all "
+                    "string values quoted."
+                )
+            ),
+        ]
+
+        ref = effective_model_for(workflow, node.id)
+        model = (
+            f"{ref.provider_id}:{ref.model_id}" if ref and ref.provider_id
+            else (ref.model_id if ref else None)
+        )
+        response = await self._provider_call(retry_messages, [], model)
+        assistant = response.message
+        node.output_message = WireMessage(
+            role="assistant",
+            content=assistant.content or "",
+            tool_uses=[
+                SchemaToolUse(id=tu.id, name=tu.name, arguments=dict(tu.arguments))
+                for tu in assistant.tool_uses
+            ],
+            extras=dict(assistant.extras) if assistant.extras else {},
+        )
+        # Accumulate usage — the retry is real provider cost the user
+        # should see reflected on the node.
+        if response.usage is not None:
+            retry_usage = TokenUsage(**response.usage.model_dump())
+            if node.usage is None:
+                node.usage = retry_usage
+            else:
+                node.usage = TokenUsage(
+                    prompt_tokens=node.usage.prompt_tokens + retry_usage.prompt_tokens,
+                    completion_tokens=node.usage.completion_tokens + retry_usage.completion_tokens,
+                    total_tokens=node.usage.total_tokens + retry_usage.total_tokens,
+                    cached_tokens=node.usage.cached_tokens + retry_usage.cached_tokens,
+                    reasoning_tokens=node.usage.reasoning_tokens + retry_usage.reasoning_tokens,
+                )
+
+        node.judge_verdict = parse_judge_verdict(
+            node.output_message.content, node.judge_variant
+        )
 
 
 #: Cap on a single SharedNote's summary length. Picked at "fits in a
