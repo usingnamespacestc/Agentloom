@@ -2454,16 +2454,29 @@ def _sub_workflow_effective_output(sub: WorkFlow) -> str:
     2. Inner judge_post's ``user_message`` (halt path).
     3. Terminal worker / llm_call output.
     4. Pending user prompt (if the sub halted before completing).
+
+    Failed inner post_judge: prepend a marker so the aggregating judge
+    sees that the sub-layer's review crashed and can't silently trust
+    the worker draft. Without this, a malformed judge reply would
+    noiselessly fall through to the raw (unreviewed) worker output.
     """
     if sub.pending_user_prompt:
         return sub.pending_user_prompt
     # Find the latest judge_post in the sub-WorkFlow.
     for n in reversed(list(sub.nodes.values())):
-        if (
-            n.step_kind == StepKind.JUDGE_CALL
-            and n.judge_variant == JudgeVariant.POST
-            and n.judge_verdict is not None
-        ):
+        if n.step_kind != StepKind.JUDGE_CALL or n.judge_variant != JudgeVariant.POST:
+            continue
+        if n.status == NodeStatus.FAILED:
+            worker_out = ""
+            for w in reversed(list(sub.nodes.values())):
+                if w.step_kind == StepKind.LLM_CALL and w.output_message is not None:
+                    worker_out = w.output_message.content
+                    break
+            return (
+                f"(sub-layer judge_post failed: {n.error or 'unknown error'} — "
+                f"worker draft below is unreviewed)\n\n{worker_out}"
+            )
+        if n.judge_verdict is not None:
             v = n.judge_verdict
             if v.merged_response:
                 return v.merged_response
