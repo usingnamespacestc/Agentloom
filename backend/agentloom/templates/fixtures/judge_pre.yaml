@@ -21,6 +21,7 @@ plan:
       parent_ids: []
       step_kind: judge_call
       judge_variant: pre
+      role: pre_judge
       description:
         text: "Is this WorkFlow's stated goal feasible with the given inputs?"
         provenance: pure_agent

@@ -49,6 +49,7 @@ plan:
       parent_ids: []
       step_kind: judge_call
       judge_variant: post
+      role: post_judge
       description:
         text: "Decide accept/retry/fail and write the user-facing reply if needed."
         provenance: pure_agent
