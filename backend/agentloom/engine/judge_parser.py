@@ -30,6 +30,19 @@ _CODE_FENCE_RE = re.compile(
     r"^\s*```(?:json|JSON)?\s*\n?(?P<body>.*?)\n?\s*```\s*$", re.DOTALL
 )
 
+# JudgeVerdict fields whose Python type is a list. Models sometimes emit
+# ``"redo_targets": null`` (etc.) instead of ``[]``; pydantic rejects that
+# because the fields are typed ``list[...]``, not ``list[...] | None``.
+# We coerce those nulls to ``[]`` at the parse layer rather than widening
+# the schema — the engine semantics treat "absent" and "empty" the same.
+_LIST_FIELDS = (
+    "blockers",
+    "missing_inputs",
+    "critiques",
+    "issues",
+    "redo_targets",
+)
+
 
 class JudgeParseError(ValueError):
     """Raised when a judge_call's raw output cannot be parsed into a
@@ -74,6 +87,9 @@ def parse_judge_verdict(raw: str, variant: JudgeVariant) -> JudgeVerdict:
         raise JudgeParseError(
             f"judge output must be a JSON object, got {type(data).__name__}"
         )
+    for key in _LIST_FIELDS:
+        if data.get(key) is None and key in data:
+            data[key] = []
     try:
         verdict = JudgeVerdict.model_validate(data)
     except ValidationError as exc:
