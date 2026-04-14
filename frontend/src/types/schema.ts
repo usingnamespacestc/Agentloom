@@ -66,6 +66,11 @@ export interface Issue {
   reproduction: string;
 }
 
+export interface RedoTarget {
+  node_id: NodeId;
+  critique: string;
+}
+
 export interface JudgeVerdict {
   // pre
   feasibility: "ok" | "risky" | "infeasible" | null;
@@ -81,6 +86,19 @@ export interface JudgeVerdict {
   // the workflow halts; the ChatFlow layer surfaces it as the agent's
   // reply. Null on accept paths.
   user_message: string | null;
+  /** Synthesized output for accept on a decompose layer; becomes that
+   * layer's effective output (§3.4.6). Null on atomic layers. */
+  merged_response?: string | null;
+  /** Nodes the judge wants re-run before the layer completes. */
+  redo_targets?: RedoTarget[];
+}
+
+export interface SharedNote {
+  author_node_id: NodeId;
+  role: WorkNodeRole | null;
+  kind: "node_succeeded" | "judge_verdict";
+  summary: string;
+  at: string;
 }
 
 export type EditProvenance = "pure_user" | "pure_agent" | "mixed" | "unset";
@@ -195,6 +213,9 @@ export interface WorkFlow {
   /** Hard cap on planner↔planner_judge / worker↔worker_judge debate
    * rounds before forcing convergence (§3.4.5). */
   debate_round_budget?: number;
+  /** Layer-local blackboard. Engine appends a one-line summary on
+   * every WorkNode success. Not shared across nested WorkFlows. */
+  shared_notes?: SharedNote[];
 }
 
 export type PendingTurnSource = "web" | "discord" | "feishu" | "api" | "test";

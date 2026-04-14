@@ -282,6 +282,27 @@ class Issue(BaseModel):
     reproduction: str = ""
 
 
+class RedoTarget(BaseModel):
+    """A node a judge wants re-run, with the critique that motivates it.
+
+    Used by judges (currently judge_post — see ADR-024 §3.4.6) to bounce
+    work back into the chain rather than halting. ``node_id`` may point
+    at any ancestor in the same WorkFlow:
+
+    - a planner → re-run the planning step (engine spawns a fresh
+      planner sibling threading the critique)
+    - a sub_agent_delegation → re-run that sub-WorkFlow with the
+      critique as additional context
+    - a worker → spawn a fresh worker round (within debate budget)
+
+    The orchestrator decides the spawn shape from ``node_id``'s role;
+    the judge only declares "this needs another pass, here's why".
+    """
+
+    node_id: NodeId
+    critique: str
+
+
 class JudgeVerdict(BaseModel):
     """Structured parse of a ``judge_call`` WorkNode's output.
 
@@ -311,3 +332,37 @@ class JudgeVerdict(BaseModel):
     #: ``post_verdict != "accept"``; for accept the terminal llm_call's
     #: own output reaches the user untouched.
     user_message: str | None = None
+    #: Synthesized output for an ``accept`` judge_post on an aggregating
+    #: layer (one whose plan was ``decompose``). The merged text becomes
+    #: that layer's effective output — at the top it surfaces as
+    #: ``ChatNode.agent_response``; in a nested sub-WorkFlow it becomes
+    #: the parent ``sub_agent_delegation``'s output. ``None`` when the
+    #: layer was atomic (the worker's own output already serves).
+    merged_response: str | None = None
+    #: Nodes the judge wants re-run before the layer can be considered
+    #: done. Empty on ``accept``; populated on ``retry`` / ``fail`` when
+    #: the issue is fixable in-chain rather than user-facing. The
+    #: orchestrator inspects each target's role to pick the right
+    #: re-spawn shape (re-plan / re-run sub-WorkFlow / fresh worker).
+    redo_targets: list[RedoTarget] = Field(default_factory=list)
+
+
+class SharedNote(BaseModel):
+    """One entry in a WorkFlow's blackboard.
+
+    Engine appends a note when a WorkNode succeeds: a one-line summary
+    so downstream siblings / aggregators get a layer-wide picture
+    without pulling every full output into context. Full content lives
+    on the WorkNode itself (``workflow.nodes[author_node_id]``); callers
+    that need it pull it explicitly via prompt params.
+
+    Notes do NOT cross layer boundaries — each sub-WorkFlow has its own
+    blackboard. Information that needs to flow between layers travels
+    through ``sub_agent_delegation`` inputs / outputs explicitly.
+    """
+
+    author_node_id: NodeId
+    role: WorkNodeRole | None = None
+    kind: Literal["node_succeeded", "judge_verdict"] = "node_succeeded"
+    summary: str
+    at: datetime = Field(default_factory=utcnow)
