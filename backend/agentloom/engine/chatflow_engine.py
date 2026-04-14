@@ -50,6 +50,7 @@ from agentloom.engine.recursive_planner_parser import (
     AtomicBrief,
     PlannerParseError,
     RecursivePlannerOutput,
+    SubTask,
     parse_recursive_planner_output,
 )
 from agentloom.engine.workflow_engine import PostNodeHook, ProviderCall, WorkflowEngine
@@ -66,6 +67,7 @@ from agentloom.schemas.chatflow import PendingTurnSource, UpstreamFailurePolicy
 from agentloom.schemas.common import (
     EditableText,
     ExecutionMode,
+    NodeId,
     NodeStatus,
     ProviderModelRef,
     utcnow,
@@ -931,6 +933,82 @@ class ChatFlowEngine:
         node.judge_target_id = planner_node.id
         return inner.add_node(node)
 
+    def _spawn_decompose_delegations(
+        self,
+        inner: WorkFlow,
+        planner_judge_node: WorkFlowNode,
+        plan: RecursivePlannerOutput,
+    ) -> list[WorkFlowNode]:
+        """Materialize one ``sub_agent_delegation`` per subtask in the
+        plan, wired according to the ``after`` graph.
+
+        Each delegation owns a fresh sub-WorkFlow seeded for AUTO mode
+        — judge_pre at the root, AUTO switches, debate budget inherited,
+        and the subtask's trio set as the WorkFlow trio so the
+        planner/judges inside read from it via ``_trio_params``. Cross-
+        layer isolation: the sub-WorkFlow does NOT carry the parent
+        chat history; the trio is the entire context the children get.
+        """
+        if plan.subtasks is None or not plan.subtasks:
+            return []
+
+        order = _topo_order_subtasks(plan.subtasks)
+        spawned: list[WorkFlowNode] = []
+        # Map subtask index → spawned delegation id for parent wiring.
+        index_to_node_id: dict[int, NodeId] = {}
+
+        for idx in order:
+            sub = plan.subtasks[idx]
+            if sub.after:
+                parent_ids = [index_to_node_id[a] for a in sub.after]
+            else:
+                # Root subtasks share the planner_judge as parent so the
+                # decompose group is rooted under the planner_judge that
+                # produced it (used by ``_decompose_group_planner_judge``).
+                parent_ids = [planner_judge_node.id]
+
+            sub_workflow = self._build_sub_workflow_for_subtask(inner, sub)
+            delegation = WorkFlowNode(
+                step_kind=StepKind.SUB_AGENT_DELEGATION,
+                parent_ids=parent_ids,
+                sub_workflow=sub_workflow,
+                description=EditableText.by_agent(sub.description),
+                inputs=EditableText.by_agent(sub.inputs) if sub.inputs else None,
+                expected_outcome=EditableText.by_agent(sub.expected_outcome),
+            )
+            inner.add_node(delegation)
+            index_to_node_id[idx] = delegation.id
+            spawned.append(delegation)
+
+        return spawned
+
+    def _build_sub_workflow_for_subtask(
+        self, parent: WorkFlow, subtask: SubTask
+    ) -> WorkFlow:
+        """Construct the inner WorkFlow a delegation node will execute.
+
+        AUTO mode (so the planner pipeline can recurse). Trio comes
+        verbatim from the subtask. Debate budget inherited from the
+        parent WorkFlow. judge_pre seeded at the root with no chat
+        context — the trio is all the sub-WorkFlow gets, deliberately.
+        """
+        switches = derive_switches_from_mode(ExecutionMode.AUTO)
+        sub = WorkFlow(
+            execution_mode=ExecutionMode.AUTO,
+            plan_enabled=switches.plan,
+            judge_pre_enabled=switches.judge_pre,
+            judge_during_enabled=switches.judge_during,
+            judge_post_enabled=switches.judge_post,
+            description=EditableText.by_agent(subtask.description),
+            inputs=EditableText.by_agent(subtask.inputs),
+            expected_outcome=EditableText.by_agent(subtask.expected_outcome),
+            debate_round_budget=parent.debate_round_budget,
+        )
+        # judge_pre is the universal entry gate; the post-node hook then
+        # spawns the planner / worker chain when it votes OK.
+        self._spawn_judge_pre(sub, subtask.description, [])
+        return sub
+
     def _spawn_worker(
         self,
         inner: WorkFlow,
@@ -1014,23 +1092,38 @@ class ChatFlowEngine:
     ) -> "PostNodeHook":
         """Closure that grows the inner DAG dynamically.
 
-        Fired by ``WorkflowEngine`` after every node success. We only
-        act on (a) judge_pre completion — decide between the happy path
-        (spawn an llm_call) or the halt path (spawn judge_post directly),
-        and (b) terminal llm_call completion — when judge_post is
-        enabled and the llm_call has no pending tool_uses, attach
-        judge_post for the post-mortem.
+        Fired by ``WorkflowEngine`` after every node success — including
+        from inside ``_run_sub_agent_delegation`` for nested
+        sub-WorkFlows, so the same orchestration applies at every
+        recursion level. Per-call values that differ between the top
+        chat WorkFlow and a nested sub-WorkFlow (``user_message_text``,
+        ``context_wire``) are derived from the workflow itself when
+        we're not in the chat's own WorkFlow, honoring the cross-layer
+        isolation rule (sub-WorkFlows don't inherit chat context).
         """
-        switches = derive_switches_from_mode(chat_node.workflow.execution_mode)
-        user_message_text = (
+        chat_user_message_text = (
             chat_node.user_message.text if chat_node.user_message else ""
         )
-        # context_wire is the same shape we'd build at spawn time —
-        # rebuild it here so the hook stays a pure closure over chat_node.
-        context_wire = _build_chat_context(chatflow, list(chat_node.parent_ids))
-        context_wire.append(WireMessage(role="user", content=user_message_text))
+        chat_context_wire = _build_chat_context(chatflow, list(chat_node.parent_ids))
+        chat_context_wire.append(
+            WireMessage(role="user", content=chat_user_message_text)
+        )
+        top_workflow_id = chat_node.workflow.id
+
+        def _context_for(workflow: WorkFlow) -> tuple[str, list[WireMessage]]:
+            # Top WorkFlow: chat-derived. Nested sub-WorkFlow: derive
+            # from the WorkFlow's own trio (the planner already wrote
+            # the subtask brief in there). Empty context_wire — the
+            # judges/planner templates render the trio explicitly.
+            if workflow.id == top_workflow_id:
+                return chat_user_message_text, chat_context_wire
+            ut = workflow.description.text if workflow.description else ""
+            return ut, []
 
         def hook(workflow: WorkFlow, node: WorkFlowNode) -> None:
+            user_message_text, context_wire = _context_for(workflow)
+            switches = derive_switches_from_mode(workflow.execution_mode)
+
             if node.step_kind == StepKind.JUDGE_CALL:
                 if node.judge_variant == JudgeVariant.PRE:
                     self._after_judge_pre(
@@ -1062,6 +1155,15 @@ class ChatFlowEngine:
                         )
                 # judge_post halt → pending_user_prompt is set inside
                 # WorkflowEngine._run_judge_call; nothing to do here.
+                return
+
+            if node.step_kind == StepKind.SUB_AGENT_DELEGATION:
+                self._after_delegation(
+                    workflow,
+                    node,
+                    user_message_text=user_message_text,
+                    context_wire=context_wire,
+                )
                 return
 
             if node.step_kind == StepKind.LLM_CALL:
@@ -1238,6 +1340,19 @@ class ChatFlowEngine:
             )
             return
 
+        # Continue + decompose: spawn one sub_agent_delegation per
+        # subtask, wired by the ``after`` graph. Each runs its own
+        # AUTO-mode sub-WorkFlow recursively (no depth cap by design).
+        # Aggregation happens in ``_after_delegation`` once all siblings
+        # in the decompose group complete.
+        if (
+            decision == "continue"
+            and plan.mode == "decompose"
+            and plan.subtasks is not None
+        ):
+            self._spawn_decompose_delegations(workflow, planner_judge_node, plan)
+            return
+
         # Revise within debate budget: spawn a fresh planner sibling
         # under the planner_judge, threading the previous plan and the
         # judge's critiques. The post-node hook will then attach a new
@@ -1348,6 +1463,54 @@ class ChatFlowEngine:
             ),
             user_message_text=user_message_text,
             context_wire=context_wire,
+        )
+
+    def _after_delegation(
+        self,
+        workflow: WorkFlow,
+        delegation_node: WorkFlowNode,
+        *,
+        user_message_text: str,
+        context_wire: list[WireMessage],
+    ) -> None:
+        """One delegation just succeeded. If all siblings in this
+        decompose group are done, attach judge_post as the layer's
+        aggregator. Otherwise wait — the engine will invoke this hook
+        again as siblings complete.
+
+        The aggregating judge_post sees each delegation's effective
+        output as ``upstream_summary`` so it can both (a) judge whether
+        this layer's task is complete and (b) emit a ``merged_response``
+        that becomes the layer's effective output. The judge_post
+        template change for that merged-response shape lands in M12.4d5;
+        for now we pass the concatenated outputs as the legacy summary
+        so the existing template can still produce something coherent.
+        """
+        owner = _decompose_group_planner_judge(workflow, delegation_node)
+        if owner is None:
+            return
+        members = _decompose_group_members(workflow, owner.id)
+        if not all(m.status == NodeStatus.SUCCEEDED for m in members):
+            return
+        # Guard against duplicate spawning when multiple delegations
+        # finish in rapid succession.
+        if _decompose_group_already_aggregated(workflow, owner.id):
+            return
+
+        upstream_summary = _format_decompose_aggregation(workflow, members)
+        worknode_catalog = "\n".join(
+            f"{m.id}: sub_agent_delegation for "
+            f"{(m.description.text if m.description else '').strip() or '(no description)'}"
+            for m in members
+        )
+        self._spawn_judge_post(
+            workflow,
+            user_message_text=user_message_text,
+            context_wire=context_wire,
+            parent_node=delegation_node,
+            upstream_kind="decompose_aggregation",
+            upstream_summary=upstream_summary,
+            worknode_catalog=worknode_catalog,
         )
 
     def _halt_to_post_judge(
@@ -1484,6 +1647,7 @@ class ChatFlowEngine:
         async with runtime.lock:
             chat_node = chatflow.get(node_id)
             pending_prompt = chat_node.workflow.pending_user_prompt
+            judge_post_text = _judge_post_response_text(chat_node.workflow)
             terminal = _terminal_llm_call(chat_node.workflow)
             if runtime_error is not None:
                 chat_node.status = NodeStatus.FAILED
@@ -1495,6 +1659,14 @@ class ChatFlowEngine:
                 # reply creates a child ChatNode in the normal way.
                 # All user dialogue lives at the ChatFlow layer (§3.5).
                 chat_node.agent_response = EditableText.by_agent(pending_prompt)
+                chat_node.status = NodeStatus.SUCCEEDED
+            elif judge_post_text is not None:
+                # Decompose layers + halt paths: the outer judge_post
+                # is the universal exit gate, and its merged_response /
+                # user_message is the layer's effective reply. Takes
+                # precedence over any terminal llm_call so a worker's
+                # raw draft can't shadow the post-judge's verdict.
+                chat_node.agent_response = EditableText.by_agent(judge_post_text)
                 chat_node.status = NodeStatus.SUCCEEDED
             elif terminal is None:
                 chat_node.status = NodeStatus.FAILED
@@ -1762,6 +1934,159 @@ def _render_critiques(verdict: JudgeVerdict) -> str:
         ensure_ascii=False,
         indent=2,
     )
+
+
+def _topo_order_subtasks(subtasks: list[SubTask]) -> list[int]:
+    """Return subtask indices in dependency order.
+
+    Kahn's algorithm: subtasks with no unmet ``after`` references come
+    first; siblings at the same depth keep their declaration order. The
+    parser already validated the ``after`` graph (no self-refs, no
+    out-of-range), so we don't re-check here. Cycles would have been
+    rejected by validation; we still detect them defensively.
+    """
+    n = len(subtasks)
+    remaining = {i: set(s.after) for i, s in enumerate(subtasks)}
+    order: list[int] = []
+    while remaining:
+        ready = [i for i, deps in remaining.items() if not deps]
+        if not ready:
+            raise ValueError("decompose subtasks contain a cycle")
+        ready.sort()  # stable: declaration order among parallel siblings
+        for i in ready:
+            order.append(i)
+            remaining.pop(i)
+        for deps in remaining.values():
+            for i in ready:
+                deps.discard(i)
+    return order
+
+
+def _decompose_group_planner_judge(
+    workflow: WorkFlow, delegation_node: WorkFlowNode
+) -> WorkFlowNode | None:
+    """Walk back from a delegation through ``parent_ids[0]`` until we
+    hit the planner_judge that triggered the decompose. Returns
+    ``None`` if no planner_judge ancestor exists (= delegation wasn't
+    spawned by a planner_judge, e.g. test fixtures or future
+    user-authored decompose flows)."""
+    visited: set[NodeId] = set()
+    cursor = delegation_node.parent_ids[0] if delegation_node.parent_ids else None
+    while cursor is not None and cursor not in visited:
+        visited.add(cursor)
+        ancestor = workflow.nodes.get(cursor)
+        if ancestor is None:
+            break
+        if (
+            ancestor.step_kind == StepKind.JUDGE_CALL
+            and ancestor.role == WorkNodeRole.PLANNER_JUDGE
+        ):
+            return ancestor
+        cursor = ancestor.parent_ids[0] if ancestor.parent_ids else None
+    return None
+
+
+def _decompose_group_members(
+    workflow: WorkFlow, planner_judge_id: NodeId
+) -> list[WorkFlowNode]:
+    """Every sub_agent_delegation whose ancestor chain includes
+    ``planner_judge_id`` — i.e. the full decompose group spawned by
+    that planner_judge."""
+    out: list[WorkFlowNode] = []
+    for n in workflow.nodes.values():
+        if n.step_kind != StepKind.SUB_AGENT_DELEGATION:
+            continue
+        if planner_judge_id in workflow.ancestors(n.id):
+            out.append(n)
+    return out
+
+
+def _decompose_group_already_aggregated(
+    workflow: WorkFlow, planner_judge_id: NodeId
+) -> bool:
+    """Has a judge_post node whose ancestor chain includes
+    ``planner_judge_id`` already been spawned? Guards against
+    double-spawn when several delegations finish in quick succession."""
+    for n in workflow.nodes.values():
+        if (
+            n.step_kind == StepKind.JUDGE_CALL
+            and n.judge_variant == JudgeVariant.POST
+            and planner_judge_id in workflow.ancestors(n.id)
+        ):
+            return True
+    return False
+
+
+def _format_decompose_aggregation(
+    workflow: WorkFlow, members: list[WorkFlowNode]
+) -> str:
+    """Concatenate each delegation's effective sub-WorkFlow output for
+    the aggregating judge_post's ``upstream_summary``. Pulls the
+    sub-WorkFlow's terminal worker output (or merged_response when
+    nested judge_post produced one). M12.4d5 will swap this raw
+    summary for a structured payload the judge_post template can
+    consume directly."""
+    parts: list[str] = []
+    for m in members:
+        sub = m.sub_workflow
+        label = (m.description.text or "").strip() or m.id
+        if sub is None:
+            parts.append(f"[{label}] (no sub_workflow)")
+            continue
+        out = _sub_workflow_effective_output(sub)
+        parts.append(f"[{label}]\n{out}")
+    return "\n\n".join(parts)
+
+
+def _judge_post_response_text(workflow: WorkFlow) -> str | None:
+    """If the WorkFlow's judge_post produced a ``merged_response`` (the
+    decompose-accept aggregation case), return it so the ChatNode's
+    ``agent_response`` can use it as the layer's effective reply.
+
+    Returns ``None`` for atomic happy-paths (where the worker's draft
+    is the reply) and for halt paths (where ``pending_user_prompt`` is
+    already set via ``judge_post_needs_user_input``).
+    """
+    for n in reversed(list(workflow.nodes.values())):
+        if (
+            n.step_kind == StepKind.JUDGE_CALL
+            and n.judge_variant == JudgeVariant.POST
+            and n.judge_verdict is not None
+            and n.judge_verdict.merged_response
+        ):
+            return n.judge_verdict.merged_response
+    return None
+
+
+def _sub_workflow_effective_output(sub: WorkFlow) -> str:
+    """The text a sub-WorkFlow effectively produced.
+
+    Preference order:
+    1. Inner judge_post's ``merged_response`` (decompose layer).
+    2. Inner judge_post's ``user_message`` (halt path).
+    3. Terminal worker / llm_call output.
+    4. Pending user prompt (if the sub halted before completing).
+    """
+    if sub.pending_user_prompt:
+        return sub.pending_user_prompt
+    # Find the latest judge_post in the sub-WorkFlow.
+    for n in reversed(list(sub.nodes.values())):
+        if (
+            n.step_kind == StepKind.JUDGE_CALL
+            and n.judge_variant == JudgeVariant.POST
+            and n.judge_verdict is not None
+        ):
+            v = n.judge_verdict
+            if v.merged_response:
+                return v.merged_response
+            if v.user_message:
+                return v.user_message
+            break
+    # Fall back to the most recent llm_call output.
+    for n in reversed(list(sub.nodes.values())):
+        if n.step_kind == StepKind.LLM_CALL and n.output_message is not None:
+            return n.output_message.content
+    return "(sub-WorkFlow produced no output)"
 
 
 def _atomic_brief_for_worker(
