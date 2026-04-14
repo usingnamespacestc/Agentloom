@@ -137,20 +137,40 @@ plan:
                     to proceed.
               - ``redo_aggregation``: a prior judge_post returned
                 ``retry`` with ``redo_targets``; those clones have now
-                finished. The upstream_summary is structured blocks in
-                the same vocabulary as decompose_aggregation but with
-                a ``[redo N round=R id=... status=...]`` header — ``R``
-                is this aggregator's retry round (2 on first retry).
+                finished. The upstream_summary walks the retry lineage
+                back to round 1 and emits ONE block per round-1 subtask
+                showing its *latest surviving version*::
 
-                IMPORTANT: you only see the clones from THIS retry
-                round, not the sibling subtasks that succeeded in
-                earlier rounds. If a retry target still fails the
-                same way twice, it's usually unfixable — prefer
-                ``fail`` over another ``retry``, and write a
-                ``user_message`` that names what couldn't be done.
-                Do NOT claim "nothing was generated" when earlier
-                rounds already succeeded for other siblings — the
-                wording should stick to what you can observe here.
+                    [subtask N id=<worknode_id> status=<status> round=R{ detail="..."}]
+                    <label>
+                    <body>
+
+                ``round=R`` tells you which retry round that version
+                came from (R=1 means the original round-1 node, never
+                retried; R=2 means a round-2 clone; etc.). A status=ok
+                round=1 block is a sibling that succeeded originally
+                and was never retried — it is still part of the final
+                picture and should be aggregated into any
+                ``merged_response`` you produce.
+
+                Use the same decision rules as ``decompose_aggregation``
+                for the mix of statuses. Specifically:
+
+                  * All subtasks ``ok`` (across rounds): ``accept`` and
+                    synthesize all their bodies into a coherent
+                    ``merged_response``. The user never needed to know
+                    about the retry churn.
+                  * Some still failed: choose ``retry`` only if the
+                    failure looks newly-fixable. If a subtask has now
+                    failed twice in a row with the same kind of error,
+                    it is usually unfixable — prefer ``fail`` with a
+                    ``user_message`` that names what couldn't be done,
+                    or ``accept`` with a caveat in ``merged_response``
+                    if the failed piece isn't load-bearing.
+
+                Do NOT claim "nothing was generated" when earlier-round
+                siblings show up here with status=ok — the block list
+                is the full picture, read it carefully.
               - ``judge_pre_halt``: judge_pre vetoed before any work ran.
                 The upstream summary is the verdict it returned. Default
                 to ``fail``; the user_message should restate the blockers

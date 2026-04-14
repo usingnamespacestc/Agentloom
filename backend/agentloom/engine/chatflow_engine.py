@@ -1018,6 +1018,7 @@ class ChatFlowEngine:
         resolved_model: ProviderModelRef | None,
         prior_output: str = "",
         critique: str = "",
+        redo_source_id: NodeId | None = None,
     ) -> WorkFlowNode:
         """Spawn the worker WorkNode for an ``atomic`` planner brief.
 
@@ -1041,6 +1042,7 @@ class ChatFlowEngine:
         node = _single_node(templated)
         node.parent_ids = [parent_node.id]
         node.model_override = resolved_model
+        node.redo_source_id = redo_source_id
         return inner.add_node(node)
 
     def _spawn_worker_judge(
@@ -1688,6 +1690,7 @@ class ChatFlowEngine:
                     resolved_model=resolved_model,
                     prior_output=prior_output,
                     critique=target.critique,
+                    redo_source_id=original.id,
                 )
                 clones.append(clone)
             elif original.step_kind == StepKind.SUB_AGENT_DELEGATION:
@@ -1722,6 +1725,7 @@ class ChatFlowEngine:
                     description=EditableText.by_agent(desc + critique_suffix),
                     inputs=EditableText.by_agent(ins) if ins else None,
                     expected_outcome=EditableText.by_agent(exp),
+                    redo_source_id=original.id,
                 )
                 workflow.add_node(clone)
                 clones.append(clone)
@@ -1742,6 +1746,13 @@ class ChatFlowEngine:
         to re-evaluate — its parent is the most recently completed
         clone so the DAG shows the retry cycle cleanly. Otherwise wait
         for the remaining siblings to finish.
+
+        The upstream_summary walks the retry lineage back to the round-1
+        judge_post (the original decompose_aggregation, or the original
+        atomic judge_post) and emits one block per round-1 subtask
+        showing its *latest surviving version* — so siblings that
+        succeeded in earlier rounds remain in the picture even when the
+        current round only redid a subset.
         """
         members = _redo_group_members(workflow, judge_post_node.id)
         if not members or not all(
@@ -1751,24 +1762,9 @@ class ChatFlowEngine:
         if _redo_group_already_reaggregated(workflow, judge_post_node.id):
             return
 
-        round_index = _judge_post_round_index(workflow, judge_post_node) + 1
-        summary_parts: list[str] = []
-        catalog_parts: list[str] = []
-        for i, m in enumerate(members, start=1):
-            label = (m.description.text or "").strip() or m.id
-            status, body = _redo_clone_classification(m)
-            detail = ""
-            if status != "ok" and m.error:
-                detail = f' detail="{_escape_attr(m.error)}"'
-            header = (
-                f"[redo {i} round={round_index} id={m.id} status={status}{detail}]"
-            )
-            summary_parts.append(f"{header}\n{label}\n{body}")
-            kind_desc = (
-                "worker redo" if m.step_kind == StepKind.LLM_CALL
-                else "delegation redo"
-            )
-            catalog_parts.append(f"{m.id}: {kind_desc} for {label}")
+        summary_parts, catalog_parts = _format_redo_aggregation(
+            workflow, judge_post_node
+        )
 
         # Parent on the most recently created clone for judge_target_id
         # continuity, then overwrite parent_ids to include every clone
@@ -2456,6 +2452,108 @@ def _format_decompose_aggregation(
 def _escape_attr(s: str) -> str:
     """Inline-attribute escaping: collapse newlines, escape quotes."""
     return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def _find_round_one_judge_post(
+    workflow: WorkFlow, judge_post_node: WorkFlowNode
+) -> WorkFlowNode:
+    """Walk back through the retry lineage to the earliest judge_post.
+
+    The aggregator's ``parent_ids`` list the members of its own round
+    (round-1 decompose subtasks, or round-N redo clones). Each member's
+    ``parent_ids[0]`` is the preceding judge_post (or nothing, for
+    round-1 originals). Follow that link back until there is no further
+    judge_post — that is round-1.
+    """
+    current = judge_post_node
+    while True:
+        if not current.parent_ids:
+            return current
+        any_member = workflow.nodes.get(current.parent_ids[0])
+        if any_member is None or not any_member.parent_ids:
+            return current
+        pred = workflow.nodes.get(any_member.parent_ids[0])
+        if (
+            pred is None
+            or pred.step_kind != StepKind.JUDGE_CALL
+            or pred.judge_variant != JudgeVariant.POST
+        ):
+            return current
+        current = pred
+
+
+def _member_round_index(workflow: WorkFlow, member: WorkFlowNode) -> int:
+    """1-indexed round a member belongs to — how many post-judge
+    ancestors it sits below, plus one. Round-1 originals have no judge
+    ancestors; a clone whose parent is the round-1 judge is round 2."""
+    count = 1
+    for nid in workflow.ancestors(member.id):
+        n = workflow.nodes.get(nid)
+        if (
+            n is not None
+            and n.step_kind == StepKind.JUDGE_CALL
+            and n.judge_variant == JudgeVariant.POST
+        ):
+            count += 1
+    return count
+
+
+def _format_redo_aggregation(
+    workflow: WorkFlow, judge_post_node: WorkFlowNode
+) -> tuple[list[str], list[str]]:
+    """Build structured upstream_summary + worknode catalog for a redo
+    re-aggregation.
+
+    One block per round-1 subtask, showing the latest surviving version
+    (the tail of its redo chain). The block's ``round=`` attribute tells
+    the judge which retry round that version came from — letting it
+    see the full cross-round picture instead of only the current round's
+    clones.
+    """
+    round_one = _find_round_one_judge_post(workflow, judge_post_node)
+    round_one_members = [
+        workflow.nodes[mid]
+        for mid in round_one.parent_ids
+        if mid in workflow.nodes
+    ]
+
+    replaced_by: dict[NodeId, NodeId] = {}
+    for n in workflow.nodes.values():
+        if n.redo_source_id is not None:
+            replaced_by[n.redo_source_id] = n.id
+
+    summary_parts: list[str] = []
+    catalog_parts: list[str] = []
+    for i, original in enumerate(round_one_members, start=1):
+        surviving_id = original.id
+        while surviving_id in replaced_by:
+            surviving_id = replaced_by[surviving_id]
+        surviving = workflow.nodes[surviving_id]
+        round_idx = _member_round_index(workflow, surviving)
+
+        label = (
+            (surviving.description.text or "").strip()
+            if surviving.description is not None
+            else ""
+        ) or surviving.id
+        status, body = _redo_clone_classification(surviving)
+        detail = ""
+        if status != "ok" and surviving.error:
+            detail = f' detail="{_escape_attr(surviving.error)}"'
+        header = (
+            f"[subtask {i} id={surviving.id} status={status} round={round_idx}{detail}]"
+        )
+        summary_parts.append(f"{header}\n{label}\n{body}")
+
+        kind_desc = (
+            "worker" if surviving.step_kind == StepKind.LLM_CALL
+            else "delegation"
+        )
+        catalog_parts.append(
+            f"{surviving.id}: {kind_desc} (round {round_idx}) for {label}"
+        )
+
+    return summary_parts, catalog_parts
 
 
 def _redo_clone_classification(m: WorkFlowNode) -> tuple[str, str]:

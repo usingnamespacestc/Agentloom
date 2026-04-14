@@ -93,6 +93,14 @@ class WorkFlowNode(NodeBase):
     # --- sub_agent_delegation ---
     sub_workflow: "WorkFlow | None" = None
 
+    #: If this node is a redo clone spawned by a judge_post ``retry``
+    #: verdict, the id of the node it was cloned from (worker or
+    #: delegation). Lets the re-aggregation walk the retry lineage so
+    #: later rounds can carry forward the latest surviving version of
+    #: each round-1 subtask — siblings that succeeded in earlier rounds
+    #: still belong in the picture. ``None`` for non-clones.
+    redo_source_id: NodeId | None = None
+
     @model_validator(mode="after")
     def _validate_step_kind_fields(self) -> "WorkFlowNode":
         """Only the fields belonging to the declared ``step_kind`` may be set.
