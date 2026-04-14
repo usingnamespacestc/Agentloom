@@ -429,7 +429,15 @@ class WorkflowEngine:
         # except for the auto-mode revise budget halt below.
         verdict = node.judge_verdict
         if node.judge_variant == JudgeVariant.POST and judge_post_needs_user_input(verdict):
-            workflow.pending_user_prompt = format_judge_post_prompt(verdict)
+            # Retry + redo_targets is the hook's responsibility: the
+            # post-node hook re-spawns the targeted nodes and schedules
+            # re-aggregation. Only if the hook decides the retry budget
+            # is exhausted (or redo_targets is empty) does
+            # ``pending_user_prompt`` get set — by the hook itself.
+            if verdict.post_verdict == "retry" and verdict.redo_targets:
+                pass
+            else:
+                workflow.pending_user_prompt = format_judge_post_prompt(verdict)
         elif node.judge_variant == JudgeVariant.DURING and verdict.during_verdict == "revise":
             # Monitoring mode (ADR-020) — the WorkFlow keeps running on
             # a single "revise", but auto-mode maintains a running count

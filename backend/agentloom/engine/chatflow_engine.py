@@ -1153,8 +1153,14 @@ class ChatFlowEngine:
                             context_wire=context_wire,
                             resolved_model=chat_node.resolved_model,
                         )
-                # judge_post halt → pending_user_prompt is set inside
-                # WorkflowEngine._run_judge_call; nothing to do here.
+                if node.judge_variant == JudgeVariant.POST:
+                    self._after_judge_post(
+                        workflow,
+                        node,
+                        user_message_text=user_message_text,
+                        context_wire=context_wire,
+                        resolved_model=chat_node.resolved_model,
+                    )
                 return
 
             if node.step_kind == StepKind.SUB_AGENT_DELEGATION:
@@ -1175,7 +1181,12 @@ class ChatFlowEngine:
                     # llm_call before handing off to the worker_judge.
                     if node.output_message and node.output_message.tool_uses:
                         return
-                    self._after_worker(workflow, node)
+                    self._after_worker(
+                        workflow,
+                        node,
+                        user_message_text=user_message_text,
+                        context_wire=context_wire,
+                    )
                     return
                 if switches.judge_post:
                     # Direct/semi_auto: ordinary terminal llm_call routes
@@ -1393,8 +1404,24 @@ class ChatFlowEngine:
         self,
         workflow: WorkFlow,
         worker_node: WorkFlowNode,
+        *,
+        user_message_text: str,
+        context_wire: list[WireMessage],
     ) -> None:
-        """Worker just produced its draft. Attach worker_judge."""
+        """Worker just produced its draft. Normal workers hand off to a
+        worker_judge for debate; redo clones (M12.4d6 — workers spawned
+        directly under a judge_post by a retry verdict) skip debate and
+        trigger re-aggregation when the whole redo group has completed.
+        """
+        redo_owner = _redo_group_judge_post(workflow, worker_node)
+        if redo_owner is not None:
+            self._try_reaggregate_redo_group(
+                workflow,
+                redo_owner,
+                user_message_text=user_message_text,
+                context_wire=context_wire,
+            )
+            return
         self._spawn_worker_judge(
             workflow, worker_node, round_index=_round_index_for(workflow, worker_node)
         )
@@ -1495,7 +1522,21 @@ class ChatFlowEngine:
         template change for that merged-response shape lands in M12.4d5;
         for now we pass the concatenated outputs as the legacy summary
         so the existing template can still produce something coherent.
+
+        Redo-clone delegations (M12.4d6 — a delegation spawned directly
+        under a judge_post by a retry verdict) are handled by the
+        re-aggregation path instead of normal decompose aggregation.
         """
+        redo_owner = _redo_group_judge_post(workflow, delegation_node)
+        if redo_owner is not None:
+            self._try_reaggregate_redo_group(
+                workflow,
+                redo_owner,
+                user_message_text=user_message_text,
+                context_wire=context_wire,
+            )
+            return
+
         owner = _decompose_group_planner_judge(workflow, delegation_node)
         if owner is None:
             return
@@ -1521,6 +1562,212 @@ class ChatFlowEngine:
             upstream_kind="decompose_aggregation",
             upstream_summary=upstream_summary,
             worknode_catalog=worknode_catalog,
+        )
+
+    def _after_judge_post(
+        self,
+        workflow: WorkFlow,
+        judge_post_node: WorkFlowNode,
+        *,
+        user_message_text: str,
+        context_wire: list[WireMessage],
+        resolved_model: ProviderModelRef | None,
+    ) -> None:
+        """judge_post finished. Decide what happens next:
+
+        - ``accept``: nothing — the WorkFlow is done, agent_response is
+          derived by the ChatFlow layer from the verdict (merged_response)
+          or the terminal llm_call.
+        - ``retry`` + ``redo_targets``: re-spawn each target as a fresh
+          sibling under this judge_post, threading the target-specific
+          critique as context. When all redo clones complete, the hook
+          will re-aggregate via a new judge_post (option a, M12.4d6).
+        - ``fail``, ``retry`` without redo_targets, or retry-round budget
+          exhausted: halt with ``pending_user_prompt``.
+
+        Retry-round budget reuses ``debate_round_budget`` (§3.4.5). The
+        round count is the number of judge_post ancestors in this
+        judge_post's chain, so each judge_post→redo→judge_post cycle
+        advances the counter by one. When the count reaches the budget
+        the hook halts instead of re-spawning — that's the fuse.
+
+        Judges whose targets are redo clones don't get judged again
+        themselves; the re-aggregation judge_post is the single arbiter.
+        """
+        verdict = judge_post_node.judge_verdict
+        if verdict is None:
+            return
+
+        # accept → nothing to do; agent_response derivation happens in
+        # _execute_node via _judge_post_response_text / _terminal_llm_call.
+        if verdict.post_verdict == "accept":
+            return
+
+        # redo_targets only matter on a retry verdict. fail / retry-
+        # without-targets fall through to the halt set in workflow_engine.
+        if verdict.post_verdict != "retry" or not verdict.redo_targets:
+            # workflow_engine._run_judge_call already set pending_user_prompt
+            # in this case; nothing to do here.
+            return
+
+        # Halt fuse: count completed judge_post rounds in this chain
+        # (including the one that just finished). Once we're at the
+        # budget, stop re-spawning and let the user decide.
+        round_index = _judge_post_round_index(workflow, judge_post_node)
+        if round_index >= workflow.debate_round_budget:
+            from agentloom.engine.judge_formatter import format_judge_post_prompt
+            workflow.pending_user_prompt = format_judge_post_prompt(verdict)
+            return
+
+        # Spawn redo clones for each target the judge named. Unknown or
+        # unsupported targets are skipped — the re-aggregation judge_post
+        # will see whatever actually got re-run.
+        spawned = self._spawn_redo_clones(
+            workflow,
+            judge_post_node,
+            verdict,
+            resolved_model=resolved_model,
+        )
+        if not spawned:
+            # Judge asked for retry but every target was unusable (missing
+            # or unsupported kind). Treat as a halt so the user still
+            # gets a message rather than a silent accept.
+            from agentloom.engine.judge_formatter import format_judge_post_prompt
+            workflow.pending_user_prompt = format_judge_post_prompt(verdict)
+
+    def _spawn_redo_clones(
+        self,
+        workflow: WorkFlow,
+        judge_post_node: WorkFlowNode,
+        verdict: JudgeVerdict,
+        *,
+        resolved_model: ProviderModelRef | None,
+    ) -> list[WorkFlowNode]:
+        """Materialize a fresh clone for each ``redo_target`` the judge
+        cited, parented on ``judge_post_node`` so the re-aggregation
+        walk (``_redo_group_*`` helpers) can find them.
+
+        Supported kinds: worker (LLM_CALL with role=WORKER) and
+        sub_agent_delegation. Other kinds are skipped — judges shouldn't
+        ask us to redo judges, and redoing tool_calls in isolation
+        would divorce them from their parent llm_call.
+        """
+        clones: list[WorkFlowNode] = []
+        for target in verdict.redo_targets:
+            original = workflow.nodes.get(target.node_id)
+            if original is None:
+                continue
+            if (
+                original.step_kind == StepKind.LLM_CALL
+                and original.role == WorkNodeRole.WORKER
+            ):
+                atomic = _atomic_brief_for_worker(workflow, original)
+                if atomic is None:
+                    continue
+                prior_output = (
+                    original.output_message.content
+                    if original.output_message
+                    else ""
+                )
+                clone = self._spawn_worker(
+                    workflow,
+                    judge_post_node,
+                    atomic,
+                    resolved_model=resolved_model,
+                    prior_output=prior_output,
+                    critique=target.critique,
+                )
+                clones.append(clone)
+            elif original.step_kind == StepKind.SUB_AGENT_DELEGATION:
+                # Reconstruct a SubTask from the delegation's trio and
+                # append the judge's critique to its description so the
+                # fresh sub-WorkFlow's planner sees what to fix.
+                desc = original.description.text if original.description else ""
+                ins = original.inputs.text if original.inputs else ""
+                exp = (
+                    original.expected_outcome.text
+                    if original.expected_outcome
+                    else ""
+                )
+                critique_suffix = (
+                    f"\n\n[critique from prior attempt]\n{target.critique}"
+                    if target.critique
+                    else ""
+                )
+                subtask = SubTask(
+                    description=desc + critique_suffix,
+                    inputs=ins,
+                    expected_outcome=exp,
+                    after=[],
+                )
+                sub_workflow = self._build_sub_workflow_for_subtask(
+                    workflow, subtask
+                )
+                clone = WorkFlowNode(
+                    step_kind=StepKind.SUB_AGENT_DELEGATION,
+                    parent_ids=[judge_post_node.id],
+                    sub_workflow=sub_workflow,
+                    description=EditableText.by_agent(desc + critique_suffix),
+                    inputs=EditableText.by_agent(ins) if ins else None,
+                    expected_outcome=EditableText.by_agent(exp),
+                )
+                workflow.add_node(clone)
+                clones.append(clone)
+            # Other kinds: silently skip. The re-aggregation judge_post
+            # will see the partial retry and decide.
+        return clones
+
+    def _try_reaggregate_redo_group(
+        self,
+        workflow: WorkFlow,
+        judge_post_node: WorkFlowNode,
+        *,
+        user_message_text: str,
+        context_wire: list[WireMessage],
+    ) -> None:
+        """One redo clone (worker or delegation) just succeeded. If
+        every sibling in this redo group is done, spawn a new judge_post
+        to re-evaluate — its parent is the most recently completed
+        clone so the DAG shows the retry cycle cleanly. Otherwise wait
+        for the remaining siblings to finish.
+        """
+        members = _redo_group_members(workflow, judge_post_node.id)
+        if not members or not all(
+            m.status == NodeStatus.SUCCEEDED for m in members
+        ):
+            return
+        if _redo_group_already_reaggregated(workflow, judge_post_node.id):
+            return
+
+        def _clone_output(m: WorkFlowNode) -> str:
+            if m.step_kind == StepKind.LLM_CALL and m.output_message is not None:
+                return m.output_message.content
+            if m.step_kind == StepKind.SUB_AGENT_DELEGATION and m.sub_workflow is not None:
+                return _sub_workflow_effective_output(m.sub_workflow)
+            return "(clone produced no output)"
+
+        summary_parts: list[str] = []
+        catalog_parts: list[str] = []
+        for m in members:
+            label = (m.description.text or "").strip() or m.id
+            summary_parts.append(f"[{label}] (retried)\n{_clone_output(m)}")
+            kind_desc = (
+                "worker redo" if m.step_kind == StepKind.LLM_CALL
+                else "delegation redo"
+            )
+            catalog_parts.append(f"{m.id}: {kind_desc} for {label}")
+
+        # Parent the new judge_post on the most recently created clone
+        # so the DAG edge ordering mirrors execution order.
+        last_clone = max(members, key=lambda n: n.created_at)
+        self._spawn_judge_post(
+            workflow,
+            user_message_text=user_message_text,
+            context_wire=context_wire,
+            parent_node=last_clone,
+            upstream_kind="redo_aggregation",
+            upstream_summary="\n\n".join(summary_parts),
+            worknode_catalog="\n".join(catalog_parts),
         )
 
     def _halt_to_post_judge(
@@ -2058,6 +2305,77 @@ def _decompose_group_already_aggregated(
         ):
             return True
     return False
+
+
+def _redo_group_judge_post(
+    workflow: WorkFlow, clone_node: WorkFlowNode
+) -> WorkFlowNode | None:
+    """Return the judge_post that directly spawned ``clone_node`` as a
+    redo clone (M12.4d6). A redo clone's immediate parent is always a
+    judge_post — that's the distinguishing mark vs a normal worker
+    (parented on a planner_judge or worker_judge)."""
+    if not clone_node.parent_ids:
+        return None
+    parent = workflow.nodes.get(clone_node.parent_ids[0])
+    if (
+        parent is not None
+        and parent.step_kind == StepKind.JUDGE_CALL
+        and parent.judge_variant == JudgeVariant.POST
+    ):
+        return parent
+    return None
+
+
+def _redo_group_members(
+    workflow: WorkFlow, judge_post_id: NodeId
+) -> list[WorkFlowNode]:
+    """All direct redo clones of ``judge_post_id`` — i.e. every non-judge
+    child whose immediate parent is that judge_post. The re-aggregation
+    judge_post is also a child of the original, but it's excluded from
+    the redo group (it's the aggregator, not a member)."""
+    out: list[WorkFlowNode] = []
+    for n in workflow.nodes.values():
+        if not n.parent_ids or n.parent_ids[0] != judge_post_id:
+            continue
+        if n.step_kind == StepKind.JUDGE_CALL:
+            continue
+        out.append(n)
+    return out
+
+
+def _redo_group_already_reaggregated(
+    workflow: WorkFlow, judge_post_id: NodeId
+) -> bool:
+    """Has a new judge_post already been spawned to re-aggregate this
+    redo group? Guards against duplicate spawning when multiple clones
+    finish in rapid succession."""
+    for n in workflow.nodes.values():
+        if (
+            n.step_kind == StepKind.JUDGE_CALL
+            and n.judge_variant == JudgeVariant.POST
+            and judge_post_id in workflow.ancestors(n.id)
+        ):
+            return True
+    return False
+
+
+def _judge_post_round_index(
+    workflow: WorkFlow, judge_post_node: WorkFlowNode
+) -> int:
+    """1-indexed retry round: count judge_post ancestors (including the
+    current one) in this chain. Round 1 is the first judge_post; round
+    N means N-1 redo cycles have already run. The halt fuse compares
+    this to ``workflow.debate_round_budget``."""
+    count = 1
+    for nid in workflow.ancestors(judge_post_node.id):
+        n = workflow.nodes.get(nid)
+        if (
+            n is not None
+            and n.step_kind == StepKind.JUDGE_CALL
+            and n.judge_variant == JudgeVariant.POST
+        ):
+            count += 1
+    return count
 
 
 def _format_decompose_aggregation(
