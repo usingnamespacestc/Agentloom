@@ -2416,22 +2416,45 @@ def _judge_post_round_index(
 def _format_decompose_aggregation(
     workflow: WorkFlow, members: list[WorkFlowNode]
 ) -> str:
-    """Concatenate each delegation's effective sub-WorkFlow output for
-    the aggregating judge_post's ``upstream_summary``. Pulls the
-    sub-WorkFlow's terminal worker output (or merged_response when
-    nested judge_post produced one). M12.4d5 will swap this raw
-    summary for a structured payload the judge_post template can
-    consume directly."""
+    """Build the aggregating judge_post's ``upstream_summary`` as a set
+    of structured per-subtask blocks so the judge can tell the
+    ``ok`` / ``sub_halt`` / ``worker_failed`` / ``sub_judge_post_*``
+    cases apart without guessing from prose.
+
+    Block shape (one per subtask, 1-indexed)::
+
+        [subtask N id=<worknode_id> status=<status>{ detail="..."}]
+        <label>
+        <body>
+
+    Status vocabulary matches ``_classify_sub_outcome``. The judge is
+    told in its system prompt to decide between aggregate / partial
+    aggregate / retry / escalate based on the mix of statuses.
+    """
     parts: list[str] = []
-    for m in members:
-        sub = m.sub_workflow
+    for i, m in enumerate(members, start=1):
         label = (m.description.text or "").strip() or m.id
+        sub = m.sub_workflow
         if sub is None:
-            parts.append(f"[{label}] (no sub_workflow)")
+            parts.append(
+                f"[subtask {i} id={m.id} status=empty]\n{label}\n(no sub_workflow)"
+            )
             continue
-        out = _sub_workflow_effective_output(sub)
-        parts.append(f"[{label}]\n{out}")
+        status, body = _classify_sub_outcome(sub)
+        detail = ""
+        if status != "ok" and m.error:
+            # ``error`` was set by workflow_engine when it absorbed a
+            # sub halt. Surface it in the header so the judge can see
+            # the short reason alongside the classifier's body.
+            detail = f' detail="{_escape_attr(m.error)}"'
+        header = f"[subtask {i} id={m.id} status={status}{detail}]"
+        parts.append(f"{header}\n{label}\n{body}")
     return "\n\n".join(parts)
+
+
+def _escape_attr(s: str) -> str:
+    """Inline-attribute escaping: collapse newlines, escape quotes."""
+    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
 
 
 def _judge_post_response_text(workflow: WorkFlow) -> str | None:
@@ -2454,48 +2477,114 @@ def _judge_post_response_text(workflow: WorkFlow) -> str | None:
     return None
 
 
-def _sub_workflow_effective_output(sub: WorkFlow) -> str:
-    """The text a sub-WorkFlow effectively produced.
+def _classify_sub_outcome(sub: WorkFlow) -> tuple[str, str]:
+    """Classify a sub-WorkFlow's outcome. Returns ``(status, body)``.
 
-    Preference order:
-    1. Inner judge_post's ``merged_response`` (decompose layer).
-    2. Inner judge_post's ``user_message`` (halt path).
-    3. Terminal worker / llm_call output.
-    4. Pending user prompt (if the sub halted before completing).
+    Status vocabulary (used in structured upstream_summary blocks):
 
-    Failed inner post_judge: prepend a marker so the aggregating judge
-    sees that the sub-layer's review crashed and can't silently trust
-    the worker draft. Without this, a malformed judge reply would
-    noiselessly fall through to the raw (unreviewed) worker output.
+    - ``ok`` — sub produced a usable result (``merged_response`` or a
+      successful worker draft).
+    - ``sub_pre_halt`` — judge_pre vetoed before any worker ran
+      (infeasible / missing inputs).
+    - ``worker_failed`` — worker ``llm_call`` node is FAILED (provider
+      error / validation failure).
+    - ``sub_judge_post_failed`` — judge_post crashed (malformed JSON,
+      etc.) — the worker's draft is unreviewed.
+    - ``sub_judge_post_fail`` — judge_post returned ``post_verdict=fail``.
+    - ``sub_judge_post_retry_exhausted`` — judge_post returned
+      ``retry`` after exhausting its budget.
+    - ``empty`` — no recognizable output (pathological).
+
+    The outer aggregating judge_post reads these to decide between
+    full aggregate, partial aggregate, retry, and escalate.
     """
-    if sub.pending_user_prompt:
-        return sub.pending_user_prompt
-    # Find the latest judge_post in the sub-WorkFlow.
+    # 1. judge_pre veto (no worker ever ran)
+    for n in sub.nodes.values():
+        if (
+            n.step_kind == StepKind.JUDGE_CALL
+            and n.judge_variant == JudgeVariant.PRE
+            and n.judge_verdict is not None
+            and n.judge_verdict.feasibility
+            and n.judge_verdict.feasibility != "ok"
+        ):
+            v = n.judge_verdict
+            reason_bits: list[str] = []
+            if v.blockers:
+                reason_bits.append("blockers: " + "; ".join(v.blockers))
+            if v.missing_inputs:
+                reason_bits.append("missing_inputs: " + ", ".join(v.missing_inputs))
+            if v.user_message:
+                reason_bits.append(v.user_message)
+            body = " | ".join(reason_bits) or f"judge_pre={v.feasibility}"
+            return ("sub_pre_halt", body)
+
+    # 2. Worker crashed
+    for n in sub.nodes.values():
+        if (
+            n.step_kind == StepKind.LLM_CALL
+            and n.role == WorkNodeRole.WORKER
+            and n.status == NodeStatus.FAILED
+        ):
+            return ("worker_failed", f"worker raised: {n.error or 'unknown error'}")
+
+    # 3. judge_post state (terminal)
     for n in reversed(list(sub.nodes.values())):
         if n.step_kind != StepKind.JUDGE_CALL or n.judge_variant != JudgeVariant.POST:
             continue
         if n.status == NodeStatus.FAILED:
-            worker_out = ""
-            for w in reversed(list(sub.nodes.values())):
-                if w.step_kind == StepKind.LLM_CALL and w.output_message is not None:
-                    worker_out = w.output_message.content
-                    break
+            worker_out = _latest_worker_output(sub) or "(no draft)"
             return (
-                f"(sub-layer judge_post failed: {n.error or 'unknown error'} — "
-                f"worker draft below is unreviewed)\n\n{worker_out}"
+                "sub_judge_post_failed",
+                f"judge_post crashed: {n.error or 'unknown error'}\n"
+                f"worker draft (unreviewed):\n{worker_out}",
             )
-        if n.judge_verdict is not None:
-            v = n.judge_verdict
-            if v.merged_response:
-                return v.merged_response
-            if v.user_message:
-                return v.user_message
+        if n.judge_verdict is None:
             break
-    # Fall back to the most recent llm_call output.
+        v = n.judge_verdict
+        if v.post_verdict == "accept":
+            if v.merged_response:
+                return ("ok", v.merged_response)
+            # Atomic accept — terminal llm_call is the effective output.
+            worker_out = _latest_worker_output(sub)
+            if worker_out:
+                return ("ok", worker_out)
+            break
+        if v.post_verdict == "fail":
+            return (
+                "sub_judge_post_fail",
+                v.user_message or "judge_post=fail (no user_message)",
+            )
+        if v.post_verdict == "retry":
+            return (
+                "sub_judge_post_retry_exhausted",
+                v.user_message or "judge_post=retry exhausted (no user_message)",
+            )
+        break
+
+    # 4. Fallback — latest worker output even without a judge_post.
+    worker_out = _latest_worker_output(sub)
+    if worker_out:
+        return ("ok", worker_out)
+    return ("empty", "(sub-WorkFlow produced no output)")
+
+
+def _latest_worker_output(sub: WorkFlow) -> str:
+    """Return the most-recent llm_call output's content, or empty."""
     for n in reversed(list(sub.nodes.values())):
         if n.step_kind == StepKind.LLM_CALL and n.output_message is not None:
             return n.output_message.content
-    return "(sub-WorkFlow produced no output)"
+    return ""
+
+
+def _sub_workflow_effective_output(sub: WorkFlow) -> str:
+    """Back-compat shim: the single-string view of a sub's outcome.
+
+    Used by the redo-aggregation path, which still emits a flat
+    ``[label] (retried)\\n<out>`` summary. Decompose aggregation uses
+    the structured classifier directly.
+    """
+    _status, body = _classify_sub_outcome(sub)
+    return body
 
 
 def _atomic_brief_for_worker(

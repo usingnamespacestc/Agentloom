@@ -89,12 +89,52 @@ plan:
               - ``completed``: an llm_call produced output you should
                 judge against the expected outcome.
               - ``decompose_aggregation``: all child sub_agent_delegations
-                in a decompose group finished. The upstream_summary
-                concatenates each child's effective output under a
-                ``[description]`` header. On accept, synthesize those
-                into a coherent ``merged_response`` for the user; on
-                retry/fail, cite specific children in ``issues`` /
-                ``redo_targets``.
+                in a decompose group finished. The upstream_summary is
+                a sequence of structured per-subtask blocks::
+
+                    [subtask N id=<worknode_id> status=<status>{ detail="..."}]
+                    <label>
+                    <body>
+
+                ``status`` is one of:
+                  * ``ok`` — subtask produced a usable result (body is
+                    its merged_response or worker draft).
+                  * ``sub_pre_halt`` — the subtask's own judge_pre
+                    vetoed it as infeasible / missing inputs. Body
+                    holds blockers / missing_inputs / reason.
+                  * ``worker_failed`` — the subtask's worker llm_call
+                    raised. Body holds the error.
+                  * ``sub_judge_post_failed`` — the subtask's
+                    judge_post crashed. Body holds the crash reason
+                    plus the unreviewed worker draft.
+                  * ``sub_judge_post_fail`` / ``sub_judge_post_retry_exhausted`` —
+                    the subtask's judge_post rejected or ran out of
+                    retries. Body holds its ``user_message`` (advice
+                    to YOU, not to the user).
+                  * ``empty`` — pathological no-output case.
+
+                Remember: sub-layer failures are INTERNAL signals.
+                Decide based on the mix of statuses and whether the
+                task can still be answered:
+
+                  * All subtasks ``ok``: ``accept`` — synthesize their
+                    bodies into a coherent ``merged_response`` for the
+                    user.
+                  * Some ``ok``, some failed but NOT load-bearing for
+                    the user's request (e.g. a redundant / gratuitous
+                    subtask the planner added): ``accept`` — aggregate
+                    the ``ok`` bodies and ignore the failures.
+                  * Some ``ok``, some failed AND load-bearing: choose
+                    ``retry`` with ``redo_targets`` naming the failed
+                    subtasks' ids with specific critiques, OR
+                    ``accept`` with a caveat in ``merged_response``
+                    noting what couldn't be delivered. Prefer retry
+                    if the failure looks fixable (infeasibility was a
+                    planner mistake, worker error was transient).
+                  * ALL subtasks failed, or every successful one is
+                    off-topic: ``fail`` with a ``user_message``
+                    restating what couldn't be done and asking how
+                    to proceed.
               - ``judge_pre_halt``: judge_pre vetoed before any work ran.
                 The upstream summary is the verdict it returned. Default
                 to ``fail``; the user_message should restate the blockers
