@@ -206,9 +206,7 @@ class WorkflowEngine:
             elif node.step_kind == StepKind.JUDGE_CALL:
                 await self._run_judge_call(workflow, node)
             elif node.step_kind == StepKind.SUB_AGENT_DELEGATION:
-                raise NotImplementedError(
-                    "sub_agent_delegation is not implemented yet"
-                )
+                await self._run_sub_agent_delegation(workflow, node)
             else:  # pragma: no cover — enum exhaustiveness
                 raise ValueError(f"unknown step_kind {node.step_kind}")
         except Exception as exc:  # noqa: BLE001 — engine boundary
@@ -326,6 +324,53 @@ class WorkflowEngine:
         if self._tools is not None and node.output_message.tool_uses:
             _assert_tool_loop_budget(workflow, node, self._effective_budget)
             _spawn_tool_loop_children(workflow, node)
+
+    async def _run_sub_agent_delegation(
+        self, workflow: WorkFlow, node: WorkFlowNode
+    ) -> None:
+        """Execute the delegation's sub-WorkFlow recursively.
+
+        Stash + restore per-call engine state (budgets, revise counter,
+        post-node hook) around the recursive ``execute()`` so the outer
+        WorkFlow's state isn't clobbered when control returns. The
+        same provider, bus, tool registry, and post_node_hook are
+        passed through — auto-mode orchestration applies at every
+        level so the planner pipeline can keep recursing.
+
+        The outer-resolved budgets are passed as the inner's
+        "chatflow defaults" so a sub-WorkFlow without its own override
+        inherits the running effective values rather than the bare
+        :data:`MAX_TOOL_LOOP_ITERATIONS`.
+        """
+        sub = node.sub_workflow
+        if sub is None:
+            raise ValueError(
+                f"sub_agent_delegation {node.id} has no sub_workflow"
+            )
+
+        saved_budget = self._effective_budget
+        saved_revise_budget = self._effective_revise_budget
+        saved_revise_count = self._revise_count
+        saved_hook = self._post_node_hook
+        try:
+            await self.execute(
+                sub,
+                chatflow_tool_loop_budget=saved_budget,
+                chatflow_auto_mode_revise_budget=saved_revise_budget,
+                post_node_hook=saved_hook,
+            )
+        finally:
+            self._effective_budget = saved_budget
+            self._effective_revise_budget = saved_revise_budget
+            self._revise_count = saved_revise_count
+            self._post_node_hook = saved_hook
+
+        # Bubble a halt: if the sub-WorkFlow's judge_post pinned a
+        # pending_user_prompt (or judge_pre vetoed inside the sub), the
+        # parent layer can't aggregate — propagate the halt outward so
+        # the ChatFlow eventually surfaces it.
+        if sub.pending_user_prompt is not None:
+            workflow.pending_user_prompt = sub.pending_user_prompt
 
     async def _run_tool_call(self, workflow: WorkFlow, node: WorkFlowNode) -> None:
         """Execute a single tool_call node. Requires a registry."""
