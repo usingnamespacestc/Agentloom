@@ -1371,10 +1371,15 @@ class ChatFlowEngine:
             )
             return
 
-        # Decompose, infeasible, halt, revise-at-budget, or unparseable
-        # → judge_post halt. M12.4d will replace decompose; M12.4e will
-        # surface budget-exhausted concerns through judge_post itself.
+        # Infeasible, halt, revise-at-budget, or unparseable → judge_post
+        # halt. On revise-at-budget we surface the accumulated critiques
+        # from every debate round so judge_post's user_message can cite
+        # what the critic kept flagging (M12.4e).
         upstream_summary = _summarize_planner_outcome(decision, plan)
+        if decision == "revise" and verdict is not None:
+            concerns = _collect_debate_concerns(workflow, planner_judge_node)
+            if concerns:
+                upstream_summary = f"{upstream_summary}\n\n{concerns}"
         self._halt_to_post_judge(
             workflow,
             parent_node=planner_judge_node,
@@ -1451,16 +1456,21 @@ class ChatFlowEngine:
                 return
 
         # halt / revise-at-budget / unparseable / brief-recovery-failed
-        # → judge_post halt. M12.4e will route budget-exhausted concerns
-        # through judge_post itself.
+        # → judge_post halt. On revise-at-budget we thread accumulated
+        # critiques from every debate round (M12.4e).
+        upstream_summary = (
+            f"worker_judge verdict={decision or 'unparseable'}; "
+            f"worker draft: {worker_output}"
+        )
+        if decision == "revise" and verdict is not None:
+            concerns = _collect_debate_concerns(workflow, worker_judge_node)
+            if concerns:
+                upstream_summary = f"{upstream_summary}\n\n{concerns}"
         self._halt_to_post_judge(
             workflow,
             parent_node=worker_judge_node,
             upstream_kind="worker_judge_halt",
-            upstream_summary=(
-                f"worker_judge verdict={decision or 'unparseable'}; "
-                f"worker draft: {worker_output}"
-            ),
+            upstream_summary=upstream_summary,
             user_message_text=user_message_text,
             context_wire=context_wire,
         )
@@ -1934,6 +1944,39 @@ def _render_critiques(verdict: JudgeVerdict) -> str:
         ensure_ascii=False,
         indent=2,
     )
+
+
+def _collect_debate_concerns(
+    workflow: WorkFlow, last_judge: WorkFlowNode
+) -> str:
+    """Walk every same-role judge ancestor of ``last_judge`` (plus the
+    judge itself) and render their critiques as a multi-round concerns
+    block. Used when a debate exhausts its round budget — judge_post
+    sees the full trail of objections, not just the final round's
+    verdict, so its user_message can summarize what the critic kept
+    flagging across rounds.
+
+    Returns an empty string when no critiques were recorded (shouldn't
+    happen on a revise path but we stay defensive).
+    """
+    if last_judge.role is None:
+        return ""
+    ancestor_ids = workflow.ancestors(last_judge.id)
+    same_role_judges: list[WorkFlowNode] = []
+    for nid in ancestor_ids:
+        n = workflow.nodes.get(nid)
+        if n is not None and n.role == last_judge.role:
+            same_role_judges.append(n)
+    same_role_judges.append(last_judge)
+
+    rendered: list[str] = []
+    for idx, judge in enumerate(same_role_judges, start=1):
+        v = judge.judge_verdict
+        if v is None or not v.critiques:
+            continue
+        body = _render_critiques(v)
+        rendered.append(f"Round {idx} critiques:\n{body}")
+    return "\n\n".join(rendered)
 
 
 def _topo_order_subtasks(subtasks: list[SubTask]) -> list[int]:
