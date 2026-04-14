@@ -365,12 +365,23 @@ class WorkflowEngine:
             self._revise_count = saved_revise_count
             self._post_node_hook = saved_hook
 
-        # Bubble a halt: if the sub-WorkFlow's judge_post pinned a
-        # pending_user_prompt (or judge_pre vetoed inside the sub), the
-        # parent layer can't aggregate — propagate the halt outward so
-        # the ChatFlow eventually surfaces it.
+        # Absorb sub-layer halt signals into this delegation node
+        # instead of bubbling. The outer ChatNode-level judge is the
+        # sole user-facing halt authority (Phase 1 of the 2026-04-14
+        # redesign). A sub-WorkFlow's pending_user_prompt / failed
+        # worker / failed judge_post become inputs to the *outer*
+        # aggregating post_judge, which decides whether to aggregate
+        # partials, retry, or escalate to the user.
+        #
+        # Record the sub's halt reason on this delegation's ``error``
+        # field so the aggregator (via _sub_workflow_effective_output)
+        # and operators have a single read-point for what went wrong.
+        # Then clear sub.pending_user_prompt so the field isn't
+        # externally visible on a child WorkFlow — per design, only
+        # the outermost WorkFlow may carry one.
         if sub.pending_user_prompt is not None:
-            workflow.pending_user_prompt = sub.pending_user_prompt
+            node.error = f"sub-WorkFlow halted: {sub.pending_user_prompt}"
+            sub.pending_user_prompt = None
 
     async def _run_tool_call(self, workflow: WorkFlow, node: WorkFlowNode) -> None:
         """Execute a single tool_call node. Requires a registry."""
