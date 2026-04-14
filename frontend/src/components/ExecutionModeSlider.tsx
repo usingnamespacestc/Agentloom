@@ -36,7 +36,7 @@ export function ExecutionModeSlider() {
 
   return (
     <div className="inline-flex h-7 flex-shrink-0 items-center rounded border border-gray-300 bg-gray-50 p-0.5">
-      {EXECUTION_MODES.map((mode) => {
+      {EXECUTION_MODES.filter((m) => m !== "semi_auto").map((mode) => {
         const active = mode === value;
         return (
           <button
