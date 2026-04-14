@@ -63,13 +63,22 @@ plan:
 
             Decide ``post_verdict``:
               - accept: the WorkFlow's output meets the expected outcome
-                with no blocking issues. The terminal llm_call's own
-                output will reach the user verbatim — do not write a
-                ``user_message`` in this case.
+                with no blocking issues.
+                  * On ``completed`` (atomic): the terminal llm_call's
+                    own output will reach the user verbatim — do not
+                    write a ``user_message`` or ``merged_response``.
+                  * On ``decompose_aggregation``: you MUST emit a
+                    ``merged_response`` that synthesizes the children's
+                    outputs into the single reply the user should see.
+                    That merged text (not any child draft) becomes the
+                    layer's output.
               - retry:  fixable gap — specific issues should be resolved
                         by rerunning one or more WorkNodes. Write a
                         ``user_message`` explaining the gap and asking
-                        the user how to proceed.
+                        the user how to proceed. Optionally populate
+                        ``redo_targets`` with the node ids you want re-
+                        run (each with a short ``critique``); the engine
+                        uses those hints to re-spawn just those nodes.
               - fail:   the WorkFlow cannot succeed as built (or a halt
                         condition fired before completion). Write a
                         ``user_message`` explaining the situation and
@@ -78,6 +87,13 @@ plan:
             ``upstream_kind`` tells you why you were invoked:
               - ``completed``: an llm_call produced output you should
                 judge against the expected outcome.
+              - ``decompose_aggregation``: all child sub_agent_delegations
+                in a decompose group finished. The upstream_summary
+                concatenates each child's effective output under a
+                ``[description]`` header. On accept, synthesize those
+                into a coherent ``merged_response`` for the user; on
+                retry/fail, cite specific children in ``issues`` /
+                ``redo_targets``.
               - ``judge_pre_halt``: judge_pre vetoed before any work ran.
                 The upstream summary is the verdict it returned. Default
                 to ``fail``; the user_message should restate the blockers
@@ -85,6 +101,9 @@ plan:
               - ``judge_during_halt``: judge_during ran out of revise
                 budget. Default to ``retry`` or ``fail`` depending on
                 whether the partial work is salvageable.
+              - ``planner_judge_halt`` / ``worker_judge_halt`` /
+                ``planner_parse_error``: planner-pipeline halts. Default
+                to ``fail`` with a user_message restating the halt cause.
               - ``node_error``: an upstream node raised. Default to
                 ``fail``; the user_message should describe the failure.
 
@@ -95,8 +114,10 @@ plan:
               {"post_verdict": "accept"|"retry"|"fail",
                "issues": [{"location": worknode_id, "expected": str,
                            "actual": str, "reproduction": str}, ...],
-               "user_message": str | null}.
-            No other prose.
+               "user_message": str | null,
+               "merged_response": str | null,
+               "redo_targets": [{"node_id": str, "critique": str}, ...]}.
+            Omit fields you don't need; never include extra prose.
         - role: user
           content: |
             WorkFlow trio
