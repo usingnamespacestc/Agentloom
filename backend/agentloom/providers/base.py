@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from agentloom.providers.types import ChatResponse, Message, ToolDefinition
+
+#: Optional per-token callback. Invoked with each text fragment as it
+#: arrives from the provider's SSE stream so the engine can republish
+#: a live preview to the frontend. ``None`` means non-streaming —
+#: adapters that don't support streaming must still accept the
+#: parameter but may ignore it.
+TokenCallback = Callable[[str], Awaitable[None]]
 
 
 class ProviderError(Exception):
@@ -42,8 +50,15 @@ class ProviderAdapter(ABC):
         temperature: float = 0.0,
         max_tokens: int | None = None,
         extra: dict[str, Any] | None = None,
+        on_token: TokenCallback | None = None,
     ) -> ChatResponse:
-        """Call the chat completions endpoint and return a typed response."""
+        """Call the chat completions endpoint and return a typed response.
+
+        When ``on_token`` is supplied the adapter SHOULD use the
+        provider's streaming endpoint and invoke the callback as each
+        text fragment arrives. The final return value is still the
+        fully assembled ``ChatResponse``.
+        """
 
     @abstractmethod
     async def list_models(self) -> list[str]:

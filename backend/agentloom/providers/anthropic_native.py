@@ -31,7 +31,7 @@ from typing import Any
 
 import httpx
 
-from agentloom.providers.base import ProviderAdapter, ProviderError
+from agentloom.providers.base import ProviderAdapter, ProviderError, TokenCallback
 from agentloom.providers.types import (
     AssistantMessage,
     ChatResponse,
@@ -281,6 +281,7 @@ class AnthropicNativeAdapter(ProviderAdapter):
         temperature: float = 0.0,
         max_tokens: int | None = None,
         extra: dict[str, Any] | None = None,
+        on_token: TokenCallback | None = None,  # noqa: ARG002 — streaming TBD
     ) -> ChatResponse:
         system_blocks, body = self._split_system(messages)
         payload: dict[str, Any] = {
