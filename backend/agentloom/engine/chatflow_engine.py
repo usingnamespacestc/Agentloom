@@ -1537,6 +1537,10 @@ class ChatFlowEngine:
         under a judge_post by a retry verdict) are handled by the
         re-aggregation path instead of normal decompose aggregation.
         """
+        self._inject_upstream_outputs_into_ready_children(
+            workflow, delegation_node
+        )
+
         redo_owner = _redo_group_judge_post(workflow, delegation_node)
         if redo_owner is not None:
             self._try_reaggregate_redo_group(
@@ -1579,6 +1583,91 @@ class ChatFlowEngine:
         # hook. Overwrite parent_ids so the DAG edge set matches that
         # real dependency and the UI draws one edge per member.
         aggregator.parent_ids = [m.id for m in members]
+
+    def _inject_upstream_outputs_into_ready_children(
+        self, workflow: WorkFlow, finished_parent: WorkFlowNode
+    ) -> None:
+        """Pass upstream delegation outputs into their dependent children.
+
+        Background: sub-WorkFlows are built eagerly at spawn time, before
+        upstream siblings have run — so a dependent subtask's judge_pre
+        only sees the planner's fabricated ``inputs`` placeholder and no
+        upstream context. When every SUB_AGENT_DELEGATION parent of a
+        child has succeeded, rewrite the child's ``sub.inputs`` with the
+        parents' effective outputs and re-template the existing judge_pre
+        node's ``input_messages`` so it reads the fresh trio.
+        """
+        for child in workflow.nodes.values():
+            if child.step_kind != StepKind.SUB_AGENT_DELEGATION:
+                continue
+            if finished_parent.id not in child.parent_ids:
+                continue
+            if child.status != NodeStatus.PLANNED:
+                continue
+            sub = child.sub_workflow
+            if sub is None:
+                continue
+            delegation_parents = [
+                workflow.nodes[pid]
+                for pid in child.parent_ids
+                if workflow.nodes.get(pid) is not None
+                and workflow.nodes[pid].step_kind == StepKind.SUB_AGENT_DELEGATION
+            ]
+            if not delegation_parents:
+                continue
+            if not all(
+                p.status == NodeStatus.SUCCEEDED for p in delegation_parents
+            ):
+                continue
+            if any(n.status != NodeStatus.PLANNED for n in sub.nodes.values()):
+                # Sub already started — too late, leave alone.
+                continue
+            self._inject_upstream_outputs(sub, delegation_parents)
+
+    def _inject_upstream_outputs(
+        self, sub: WorkFlow, parents: list[WorkFlowNode]
+    ) -> None:
+        blocks: list[str] = []
+        for p in parents:
+            label = (
+                (p.description.text if p.description else "").strip()
+                or "(no description)"
+            )
+            out = (
+                _sub_workflow_effective_output(p.sub_workflow)
+                if p.sub_workflow is not None
+                else ""
+            )
+            blocks.append(f"## Upstream: {label}\n{out}")
+        injected = "\n\n".join(blocks)
+
+        original = sub.inputs.text if sub.inputs else ""
+        new_text = (
+            f"{original}\n\n---\nUpstream dependency outputs:\n\n{injected}"
+            if original
+            else f"Upstream dependency outputs:\n\n{injected}"
+        )
+        sub.inputs = EditableText.by_agent(new_text)
+
+        judge_pre = next(
+            (
+                n
+                for n in sub.nodes.values()
+                if n.step_kind == StepKind.JUDGE_CALL
+                and n.judge_variant == JudgeVariant.PRE
+                and n.status == NodeStatus.PLANNED
+            ),
+            None,
+        )
+        if judge_pre is None:
+            return
+        templated = instantiate_fixture(
+            self._fixture_plans["judge_pre"],
+            _trio_params(sub),
+            includes=self._fixture_includes,
+        )
+        fresh = _single_node(templated)
+        judge_pre.input_messages = fresh.input_messages
 
     def _after_judge_post(
         self,

@@ -45,7 +45,7 @@ async def main() -> int:
             api_key_source="env_var",
             api_key_env_var=ENV_VAR,
             available_models=[
-                ModelInfo(id="ark-code-latest", pinned=True),
+                ModelInfo(id="ark-code-latest", pinned=True, context_window=128_000),
             ],
         )
         await repo.create(config)

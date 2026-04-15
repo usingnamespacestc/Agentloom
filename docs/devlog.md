@@ -757,3 +757,84 @@ WorkNode 允许递归包含 WorkFlow，三条硬约束：context 跨层不透明
 - 通知外部通道（webhook / desktop / 邮件）（M10 之后按需加）
 - judge_during 的中断模式（MVP 是 monitoring 模式，中断模式挂在 post-MVP 选项）
 - 字符级编辑溯源 / CRDT（仍然 v2+）
+
+---
+
+# Round 14 — 2026-04-13/14 · 递归 planner 全量落地 + 自动模式 e2e 跑通
+
+Round 13 收口的 M10 设计这一轮全部代码落地，并且在跑复杂多步任务时把原本"plan → judge → executor"线性结构升级成 **planner 自身可决定 atomic / decompose 的递归形态（M12）**。最终自动模式 e2e 跑通：mixed / parallel / sequential / nested 4 种 decompose 形态 + clarify-then-succeed 多轮 halt-then-resume 流。
+
+## 主线：M10 → M11 → M12
+
+### M10：按 Round 13 的子阶段切
+
+`M10.0` schema 迁移（trio + execution_mode + judge 字段）→ `M10.1` template 引擎 + 4 个 builtin fixture（plan/judge_pre/judge_during/judge_post）→ `M10.2a` effective_model_for walker + per-WorkFlow tool_loop_budget → `M10.3` judge_call step handler → `M10.4-6` execution-mode orchestration + judge re-run API。
+
+### M11：model picker 改版
+
+composer-model picker 取代节点上的小 badge；边 hover ribbon 替代 ring 高亮；ChatFlowNode 落地 `resolved_model` 快照（spawn 时冻结）。
+
+### M12：递归 planner
+
+跑 5 份并行长文 / 3 阶段串行分析这种任务，原 M10 的线性结构会把所有 step 摊在一层 WorkFlow 里，judge_pre 一眼看不完。重做成 planner 自己决定要 atomic 还是 decompose；每个子任务是 `SUB_AGENT_DELEGATION` 节点，内部带独立 sub-WorkFlow，递归走完整 plan/judge/work/judge 管线。
+
+子阶段：`M12.1` schema（sub_workflow / parent_ids / SUB_AGENT_DELEGATION）→ `M12.2` nested drill-in + breadcrumb → `M12.3` planner/planner_judge/worker/worker_judge 4 模板 → `M12.4a/b/c` spawn trio fixture / typed parser / debate-as-chain（多轮反馈循环）→ `M12.4d1~d6` decompose 拉满（schema → engine 递归 → orchestrate spawn → aggregating judge_post → retry+redo_targets → 跨轮 concerns thread）→ `M12.5` role-based 渲染。
+
+## 期间踩的并发 / 依赖 / halt 坑（按调试顺序）
+
+### 坑 1：sub-layer halt 自动 bubble 到上层 ChatFlow
+
+子层 judge_post halt 通过 pending_user_prompt 一路冒泡，sibling 还在跑就被整个 chatflow 拉停。**Phase 1**：把 halt 吸收到 `SUB_AGENT_DELEGATION` 节点身上当 fail，由父层 aggregator 决定要不要 halt。语义从"任意 sub 失败=全停"变成"父层重判"。
+
+### 坑 2：aggregating judge_post 看不到失败细节
+
+sub fail 时只有 status，aggregator 不知道为什么失败。**Phase 2**：扩 `upstream_summary` 带 failure 类型 + 子层最后一条 critique；judge_post 模板新增 failure 词汇表，让 aggregator 能决定 redo / accept_with_caveats / halt。
+
+### 坑 3：retry 和 revise 共用预算
+
+只有一个 `revise_budget`，复杂任务的 judge retry 一不小心吃光。**Phase 3**：拆独立 `judge_retry_budget`（默认 3，-1=无限）+ ChatFlow 设置 UI。
+
+### 坑 4：跨轮 redo 丢上轮 issues
+
+同轮内 redo_targets OK，但下一轮 worker 拿不到上轮被指出的具体 issues。补跨轮 carry-forward + 全 round concerns 拼进 judge_post 输入。`b437d08` 顺带修了 `_atomic_brief_for_worker` 在 redo-cloned worker 上的索引错。
+
+### 坑 5（这一轮重点）：decompose 子任务拿不到上游产出
+
+`mixed_chinese` e2e 暴露：综述子任务应基于前置 `bio_a/b/c` 输出做对比，但 spawn 时 sub-WorkFlow 的 `inputs` 和 judge_pre `input_messages` 已经冻结，不知道上游会产出什么。
+
+**Option A**：在 `_after_delegation` 加 `_inject_upstream_outputs_into_ready_children` hook，遍历刚 finish 的节点的 child `SUB_AGENT_DELEGATION`，当所有 `SUB_AGENT_DELEGATION` parents 都 SUCCEEDED **且** sub-WorkFlow 还全部 PLANNED 时，把上游 effective_output 拼进 sub.inputs 并 re-template judge_pre 的 input_messages。`NodeStatus.PLANNED` 守门保幂等。修完后 mixed e2e 的综述节点能正确引用三个 bio 的具体人名 + 共性/差异。
+
+## 测试
+
+`tests/e2e/_helpers.py` 加 `run_headed_multi_turn`：复用 `run_headed_turn` 的 setup（new chat / 切 mode / patch 元数据 / 选模型），然后循环 prompts → fill → send → poll → report。任一轮非 succeeded 就停，但 chatflow 不删，方便 UI 排查。
+
+新建：
+
+- **`multi_turn_chinese_headed.py`** — 3 轮：5 份独立科普长文（parallel）→ 3 阶段串行分析（sequential，stage B/C 必须引用前阶段）→ 4 章入门小册子（nested decompose）。第二次跑：turn 1 decompose 9 顶层/39 总；turn 3 decompose 4 章；turn 2 atomic（planner 选择，不算 bug）。
+- **`clarify_then_succeed_headed.py`** — turn 1 模糊 prompt → judge_pre `infeasible` → judge_post `fail` → agent_response 是补全清单（19s）；turn 2 用户补全具体活动信息 → judge_pre `ok` → 完整方案 4 部分齐全（98s）。`pending_user_prompt` + 跨轮 chat-context 整条流跑通。
+
+实测：mixed 212s ✅、clarify turn1 19s + turn2 98s ✅、multi-turn 3 轮全过。
+
+## 副产物 / 顺手修
+
+### 前端 context-% bug
+
+ChatNode token bar 写死 32k 分母，44k 就显示 100%。改：`ChatFlowCanvas` fetch providers，建 `contextWindowMap`，按 `resolved_model` → `default_model` 链解析每节点真实 `context_window` 传给 `TokenBar`；fallback 仍是 32k。`seed_volcengine_provider.py` 同步加 `context_window=128_000`（注意：seed 是一次性，存量 provider 行需 Settings UI 手动补）。
+
+### 隐藏 semi_auto
+
+M10 定的三模式中 `semi_auto` 实装太重（要画布关键帧 UI），先在 mode slider 隐藏，只暴露 direct / auto。代码留着，等关键帧 UI 一起做。
+
+### 其他小修
+
+- `8ed495f`：judge_pre `risky` verdict 改"带 assumptions 当 handoff notes 继续"，只有 `infeasible` 才真 halt
+- `efc3e9d` / `ac68379`：judge 输出 JSON 解析失败时给一次自我修正机会；list 字段 null 容错
+
+## 故意没动的（next-step 候选清单）
+
+- 半自动模式 UI（关键帧画布、locked/unlocked 操作）
+- MCP runtime wiring（M7.5 backlog，lib 已有）
+- Skill 模块 / 记忆模块（全新模块，未设计）
+- redo_aggregation 路径仍 flat-format（Phase 3 surface 出来的次级 gap）
+- 通知外部通道（webhook / desktop / 邮件）
+

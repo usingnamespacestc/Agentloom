@@ -23,7 +23,10 @@ import { NodeIdLine } from "./NodeIdLine";
 import { formatTokensKM } from "@/lib/tokenFormat";
 import type { ChatFlowNode } from "@/types/schema";
 
-/** Temporary hard-coded context limit — will become per-model config. */
+/** Fallback denominator when the node's resolved model has no
+ * configured ``context_window`` (e.g. a provider seeded before the
+ * field was added). Keeps the bar showing a plausible ratio instead
+ * of hiding it. */
 export const DEFAULT_MAX_CONTEXT_TOKENS = 32_000;
 
 export interface ChatFlowNodeData extends Record<string, unknown> {
@@ -37,6 +40,10 @@ export interface ChatFlowNodeData extends Record<string, unknown> {
   isRoot: boolean;
   /** Accumulated context tokens from root to this node (inclusive). */
   contextTokens: number;
+  /** Context window of the node's resolved model, or ``null`` when the
+   * provider didn't declare one — in that case the bar falls back to
+   * :data:`DEFAULT_MAX_CONTEXT_TOKENS`. */
+  maxContextTokens: number | null;
 }
 
 const TRUNCATE = 90;
@@ -55,6 +62,7 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
     isLeaf,
     isRoot,
     contextTokens,
+    maxContextTokens,
   } = data as ChatFlowNodeData;
   const isMerge = node.parent_ids.length >= 2;
   const isGreetingRoot = node.user_message === null;
@@ -192,7 +200,9 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
         </button>
       )}
 
-      {contextTokens > 0 && <TokenBar tokens={contextTokens} />}
+      {contextTokens > 0 && (
+        <TokenBar tokens={contextTokens} maxTokens={maxContextTokens} />
+      )}
 
       <NodeIdLine nodeId={node.id} />
 
@@ -201,12 +211,19 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
   );
 }
 
-export function TokenBar({ tokens }: { tokens: number }) {
-  const pct = Math.min(100, (tokens / DEFAULT_MAX_CONTEXT_TOKENS) * 100);
+export function TokenBar({
+  tokens,
+  maxTokens,
+}: {
+  tokens: number;
+  maxTokens?: number | null;
+}) {
+  const denom = maxTokens && maxTokens > 0 ? maxTokens : DEFAULT_MAX_CONTEXT_TOKENS;
+  const pct = Math.min(100, (tokens / denom) * 100);
   const color =
     pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-yellow-400" : "bg-blue-400";
   return (
-    <div className="mt-1.5" title={`${tokens} / ${formatTokensKM(DEFAULT_MAX_CONTEXT_TOKENS)} tokens`}>
+    <div className="mt-1.5" title={`${tokens} / ${formatTokensKM(denom)} tokens`}>
       <div className="flex items-center justify-between text-[9px] text-gray-500 mb-0.5">
         <span>{formatTokensKM(tokens)}</span>
         <span>{pct.toFixed(0)}%</span>

@@ -53,9 +53,9 @@ import { layoutDag } from "./layout";
 import { ModelRibbonLayer } from "./ModelRibbonLayer";
 import { MODEL_KINDS, colorForModel, edgeModel } from "./effectiveModel";
 import { ChatFlowNodeCard, type ChatFlowNodeData } from "./nodes/ChatFlowNodeCard";
-import { api } from "@/lib/api";
+import { api, type ProviderSummary } from "@/lib/api";
 import { useChatFlowStore } from "@/store/chatflowStore";
-import type { ChatFlow, ChatFlowNode, NodeId } from "@/types/schema";
+import type { ChatFlow, ChatFlowNode, NodeId, ProviderModelRef } from "@/types/schema";
 
 interface ContextMenuState {
   nodeId: string;
@@ -130,6 +130,28 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
     return () => window.removeEventListener("agentloom:delete-node", handler);
   }, [deleteNode]);
 
+  // Providers list feeds the per-node context-window lookup below so the
+  // TokenBar denominator matches the actual model's window (e.g. Ark's
+  // 128k) instead of a hard-coded default. Fetched once per canvas
+  // mount; changes to Settings won't propagate until reload, which is
+  // fine — the numbers are diagnostic, not load-bearing.
+  const [providers, setProviders] = useState<ProviderSummary[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .listProviders()
+      .then((list) => {
+        if (!cancelled) setProviders(list);
+      })
+      .catch(() => {
+        // Silent — TokenBar falls back to the default window.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const contextWindowByModel = contextWindowMap(providers);
+
   const [nodes, setNodes] = useState<Node<ChatFlowNodeData>[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   // User-dragged positions survive graph reconciliation (SSE patches,
@@ -161,14 +183,14 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
       dirtyPositions.current.clear();
       lastChatflowId.current = chatflow?.id ?? null;
     }
-    const laid = buildGraph(chatflow, selectedNodeId);
+    const laid = buildGraph(chatflow, selectedNodeId, contextWindowByModel);
     const merged = laid.nodes.map((n) => ({
       ...n,
       position: dragPositions.current[n.id] ?? n.position,
     }));
     setNodes(merged);
     setEdges(laid.edges);
-  }, [chatflow, selectedNodeId]);
+  }, [chatflow, selectedNodeId, contextWindowByModel]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     // Drop React Flow's own select events — the store is the single
@@ -406,10 +428,45 @@ function computeContextTokens(
   return cache;
 }
 
+/** Look up the context window of a node's resolved model, falling back
+ * to the chatflow's default model if the node was spawned before a
+ * resolved_model snapshot existed. Returns ``null`` when no window is
+ * configured — callers can treat that as "use the default". */
+function resolveContextWindow(
+  ref: ProviderModelRef | null | undefined,
+  defaultRef: ProviderModelRef | null | undefined,
+  byModel: Record<string, number>,
+): number | null {
+  const picks = [ref, defaultRef];
+  for (const p of picks) {
+    if (!p) continue;
+    const key = `${p.provider_id}:${p.model_id}`;
+    if (key in byModel) return byModel[key];
+  }
+  return null;
+}
+
+/** Build ``"provider_id:model_id" → context_window`` from a providers
+ * list, skipping models that don't declare a window. */
+export function contextWindowMap(
+  providers: ProviderSummary[],
+): Record<string, number> {
+  const map: Record<string, number> = {};
+  for (const p of providers) {
+    for (const m of p.available_models) {
+      if (m.context_window != null) {
+        map[`${p.id}:${m.id}`] = m.context_window;
+      }
+    }
+  }
+  return map;
+}
+
 /** Pure function so it can be unit-tested without rendering React Flow. */
 export function buildGraph(
   chatflow: ChatFlow | null,
   selectedNodeId: string | null,
+  contextWindowByModel: Record<string, number> = {},
 ): { nodes: Node<ChatFlowNodeData>[]; edges: Edge[] } {
   if (!chatflow) return { nodes: [], edges: [] };
   const laidOut = layoutDag<ChatFlowNode>(chatflow.nodes, chatflow.root_ids);
@@ -435,6 +492,11 @@ export function buildGraph(
         isLeaf: leaves.has(node.id),
         isRoot,
         contextTokens: ctxTokens[node.id] ?? 0,
+        maxContextTokens: resolveContextWindow(
+          node.resolved_model,
+          chatflow.default_model,
+          contextWindowByModel,
+        ),
       },
       selectable: false,
     };
