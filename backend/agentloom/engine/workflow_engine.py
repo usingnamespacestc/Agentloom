@@ -248,36 +248,37 @@ class WorkflowEngine:
                     data={"error": node.error},
                 )
             )
-            return
-
-        # A handler may have already marked the node terminal (e.g.
-        # ``_run_sub_agent_delegation`` flips to FAILED when it absorbs
-        # a sub-layer halt). Don't overwrite that decision.
-        if node.status == NodeStatus.RUNNING:
-            node.status = NodeStatus.SUCCEEDED
-            node.finished_at = utcnow()
-            _append_shared_note(workflow, node)
-            await self._bus.publish(
-                WorkflowEvent(
-                    workflow_id=workflow.id,
-                    kind="node.succeeded",
-                    node_id=node.id,
-                    data={"usage": node.usage.model_dump() if node.usage else None},
+        else:
+            # A handler may have already marked the node terminal (e.g.
+            # ``_run_sub_agent_delegation`` flips to FAILED when it
+            # absorbs a sub-layer halt). Don't overwrite that decision.
+            if node.status == NodeStatus.RUNNING:
+                node.status = NodeStatus.SUCCEEDED
+                node.finished_at = utcnow()
+                _append_shared_note(workflow, node)
+                await self._bus.publish(
+                    WorkflowEvent(
+                        workflow_id=workflow.id,
+                        kind="node.succeeded",
+                        node_id=node.id,
+                        data={"usage": node.usage.model_dump() if node.usage else None},
+                    )
                 )
-            )
-        elif node.status == NodeStatus.FAILED:
-            await self._bus.publish(
-                WorkflowEvent(
-                    workflow_id=workflow.id,
-                    kind="node.failed",
-                    node_id=node.id,
-                    data={"error": node.error},
+            elif node.status == NodeStatus.FAILED:
+                await self._bus.publish(
+                    WorkflowEvent(
+                        workflow_id=workflow.id,
+                        kind="node.failed",
+                        node_id=node.id,
+                        data={"error": node.error},
+                    )
                 )
-            )
 
         # Let the caller grow the DAG before the next iteration picks
         # up the new nodes (Option B: judge_pre / llm_call completion
         # decides whether to spawn judge_post or an llm_call follow-up).
+        # The hook also fires for FAILED nodes so post_judge crashes can
+        # be retried — the hook itself filters which kinds it acts on.
         if self._post_node_hook is not None:
             self._post_node_hook(workflow, node)
 
