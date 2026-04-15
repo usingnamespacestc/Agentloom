@@ -503,7 +503,19 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
       if (factory) {
         const sub = subscribeEvents(
           api.eventsUrl(id),
-          { onEvent: (evt) => get().applyEvent(evt) },
+          {
+            onEvent: (evt) => get().applyEvent(evt),
+            // Reconnect-safe: backend doesn't tag SSE events with
+            // ``id:`` so missed events during a disconnect window
+            // can't be replayed. Re-fetch full state on every open
+            // so chat.turn.completed (and the agent_response payload
+            // it brings) can't be silently lost.
+            onOpen: () => {
+              if (get().chatflow?.id !== id) return;
+              if (get()._optimisticIds.size > 0) return;
+              void get().refreshChatFlow();
+            },
+          },
           factory,
         );
         set({ sseSubscription: sub });
