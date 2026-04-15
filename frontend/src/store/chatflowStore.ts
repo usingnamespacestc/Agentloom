@@ -113,6 +113,13 @@ export interface ChatFlowStoreState {
   sseSubscription: SSESubscription | null;
   sseFactory: SSEFactory | null;
 
+  /** Per-WorkNode streaming buffer, keyed by inner node id. Populated
+   * by ``chat.workflow.node.token`` events and cleared on the next
+   * ``running``/``succeeded``/``failed`` for that node. UI components
+   * should only display this when the node's status is ``running`` —
+   * once it terminates, the refreshed full payload is authoritative. */
+  streamingDeltas: Record<NodeId, string>;
+
   /** Fetch the chatflow list and folders for the sidebar. */
   fetchChatFlowList: () => Promise<void>;
   /** Create a new chatflow and switch to it. */
@@ -281,6 +288,7 @@ const INITIAL: Omit<
   hoveredEdge: null,
   sseSubscription: null,
   sseFactory: null,
+  streamingDeltas: {},
 };
 
 function autoLeafForChatFlow(chat: ChatFlow | null): NodeId | null {
@@ -820,6 +828,26 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     const kind = event.kind;
     const data = event.data ?? {};
 
+    // High-frequency streaming token events: append to the per-node
+    // buffer, do NOT trigger a server refresh (one fragment per
+    // chunk, so a long generation can fire 100+ events). The UI
+    // reads ``streamingDeltas[node_id]`` for the live preview while
+    // the node is RUNNING; once it terminates, the refresh fired
+    // by ``running``/``succeeded``/``failed`` brings in authoritative
+    // text and the buffer is cleared.
+    if (kind === "chat.workflow.node.token" && event.node_id) {
+      const delta = typeof data.delta === "string" ? data.delta : "";
+      if (!delta) return;
+      const current = get().streamingDeltas;
+      set({
+        streamingDeltas: {
+          ...current,
+          [event.node_id]: (current[event.node_id] ?? "") + delta,
+        },
+      });
+      return;
+    }
+
     // Structure-changing events: reload the full chatflow from the
     // server — BUT skip if there are optimistic nodes in flight.
     // sendTurn's own refreshChatFlow (after enqueue resolves) will
@@ -831,6 +859,22 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
       kind === "chat.turn.completed" ||
       kind.startsWith("chat.workflow.node.")
     ) {
+      // Drain stale streaming buffer for this worknode so the next
+      // run starts from empty (and the now-authoritative server
+      // payload fully owns the rendered text).
+      if (
+        event.node_id &&
+        (kind === "chat.workflow.node.running" ||
+          kind === "chat.workflow.node.succeeded" ||
+          kind === "chat.workflow.node.failed")
+      ) {
+        const buf = get().streamingDeltas;
+        if (event.node_id in buf) {
+          const next = { ...buf };
+          delete next[event.node_id];
+          set({ streamingDeltas: next });
+        }
+      }
       if (get()._optimisticIds.size === 0) {
         void get().refreshChatFlow();
       }

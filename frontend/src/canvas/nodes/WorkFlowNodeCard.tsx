@@ -104,7 +104,15 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
 
 function LlmCallBody({ node }: { node: WorkFlowNode }) {
   const { t } = useTranslation();
+  // While the node is RUNNING, show the live streaming buffer (one
+  // SSE event per provider chunk). Once it terminates, the
+  // server-refreshed ``output_message`` becomes authoritative and
+  // the buffer is cleared by the store.
+  const streamingDelta = useChatFlowStore(
+    (s) => s.streamingDeltas[node.id] ?? "",
+  );
   const output = node.output_message?.content ?? "";
+  const live = node.status === "running" && streamingDelta;
   const thinking = node.output_message?.extras?.thinking;
   const usage = node.usage;
   const modelRef = node.model_override;
@@ -120,7 +128,16 @@ function LlmCallBody({ node }: { node: WorkFlowNode }) {
         <ThinkingToggle text={thinking} label={t("conversation.thinking")} />
       )}
       <div className="prose prose-sm max-w-none text-[11px] text-gray-800 break-words">
-        {output ? <Markdown>{truncate(output)}</Markdown> : <span className="italic text-gray-400">—</span>}
+        {live ? (
+          <span data-testid="streaming-preview">
+            <Markdown>{truncate(streamingDelta)}</Markdown>
+            <span className="inline-block w-1 h-3 align-middle bg-sky-400 animate-pulse ml-0.5" />
+          </span>
+        ) : output ? (
+          <Markdown>{truncate(output)}</Markdown>
+        ) : (
+          <span className="italic text-gray-400">—</span>
+        )}
       </div>
       {usage && usage.prompt_tokens > 0 && <TokenBar tokens={usage.prompt_tokens} />}
     </div>
@@ -154,6 +171,10 @@ function JudgeCallBody({ node }: { node: WorkFlowNode }) {
   const { t } = useTranslation();
   const variant = node.judge_variant;
   const verdict = node.judge_verdict;
+  const streamingDelta = useChatFlowStore(
+    (s) => s.streamingDeltas[node.id] ?? "",
+  );
+  const live = node.status === "running" && streamingDelta;
 
   // Pick the one-word headline that matches the variant's discriminator.
   const headline = verdict
@@ -203,7 +224,15 @@ function JudgeCallBody({ node }: { node: WorkFlowNode }) {
           )}
         />
       )}
-      {node.output_message?.content && !verdict && (
+      {live && (
+        <div className="prose prose-sm max-w-none text-[11px] text-gray-500 italic break-words">
+          <span data-testid="streaming-preview">
+            <Markdown>{truncate(streamingDelta, 80)}</Markdown>
+            <span className="inline-block w-1 h-3 align-middle bg-amber-500 animate-pulse ml-0.5" />
+          </span>
+        </div>
+      )}
+      {!live && node.output_message?.content && !verdict && (
         <div className="prose prose-sm max-w-none text-[11px] text-gray-500 italic break-words">
           <Markdown>{truncate(node.output_message.content, 80)}</Markdown>
         </div>
