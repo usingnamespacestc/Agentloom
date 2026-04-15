@@ -54,10 +54,18 @@ from agentloom.schemas.common import ToolUse as SchemaToolUse
 from agentloom.schemas.workflow import WireMessage
 from agentloom.tools.base import ToolContext, ToolRegistry
 
+#: Provider call surface — the engine never instantiates an adapter
+#: directly, the caller injects a closure. ``on_token`` is the
+#: streaming hook: when supplied, the closure should run the provider
+#: with stream=true and forward each fragment via the callback so the
+#: engine can republish a live preview to the bus. ``None`` keeps the
+#: legacy non-streaming behavior so test doubles don't have to
+#: implement streaming.
 ProviderCall = Callable[
-    [list[Message], list[ToolDefinition], str | None],
+    ...,
     Awaitable[ChatResponse],
 ]
+TokenCallback = Callable[[str], Awaitable[None]]
 
 #: Callback fired after a node transitions to SUCCEEDED. The hook is
 #: free to mutate ``workflow`` (typically: add new nodes that the next
@@ -213,6 +221,32 @@ class WorkflowEngine:
         )
         return workflow
 
+    def _token_callback(
+        self, workflow: WorkFlow, node: WorkFlowNode
+    ) -> TokenCallback:
+        """Build the per-token publish closure handed to the provider.
+
+        Each fragment becomes a ``node.token`` event on the bus. The
+        chatflow_engine relay re-publishes it as
+        ``chat.workflow.node.token`` so the frontend can render a
+        live preview while a slow model (e.g. local 27B Ollama
+        loading from cold) is still generating.
+        """
+        wf_id = workflow.id
+        node_id = node.id
+
+        async def publish(piece: str) -> None:
+            await self._bus.publish(
+                WorkflowEvent(
+                    workflow_id=wf_id,
+                    kind="node.token",
+                    node_id=node_id,
+                    data={"delta": piece},
+                )
+            )
+
+        return publish
+
     async def _run_node(self, workflow: WorkFlow, node: WorkFlowNode) -> None:
         node.status = NodeStatus.RUNNING
         node.started_at = utcnow()
@@ -328,7 +362,12 @@ class WorkflowEngine:
                 if d["name"] not in self._disabled_tool_names
             ]
 
-        response = await self._provider_call(messages, tool_defs, model)
+        response = await self._provider_call(
+            messages,
+            tool_defs,
+            model,
+            on_token=self._token_callback(workflow, node),
+        )
 
         # Freeze the result on the node.
         assistant = response.message
@@ -560,7 +599,12 @@ class WorkflowEngine:
             f"{ref.provider_id}:{ref.model_id}" if ref and ref.provider_id
             else (ref.model_id if ref else None)
         )
-        response = await self._provider_call(retry_messages, [], model)
+        response = await self._provider_call(
+            retry_messages,
+            [],
+            model,
+            on_token=self._token_callback(workflow, node),
+        )
         assistant = response.message
         node.output_message = WireMessage(
             role="assistant",

@@ -361,7 +361,7 @@ def _provider_call_from_settings():
     from agentloom.db.repositories.provider import ProviderRepository
     from agentloom.providers.registry import build_adapter
 
-    async def call(messages, tools, model):  # type: ignore[no-untyped-def]
+    async def call(messages, tools, model, on_token=None):  # type: ignore[no-untyped-def]
         async with get_session_maker()() as session:
             repo = ProviderRepository(session, workspace_id=DEFAULT_WORKSPACE_ID)
             providers = await repo.list_all()
@@ -412,6 +412,7 @@ def _provider_call_from_settings():
                 tools=tools,
                 model=model_id,
                 extra=extra or None,
+                on_token=on_token,
             )
 
     return call
