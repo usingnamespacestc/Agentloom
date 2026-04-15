@@ -16,9 +16,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ReactFlow,
+  ReactFlowProvider,
   Background,
   Controls,
   applyNodeChanges,
+  useReactFlow,
   type Edge,
   type Node,
   type NodeChange,
@@ -28,6 +30,7 @@ import "@xyflow/react/dist/style.css";
 import { useTranslation } from "react-i18next";
 
 import { layoutDag } from "./layout";
+import { WorkFlowBlackboard } from "./WorkFlowBlackboard";
 import { WorkFlowNodeCard, type WorkFlowNodeData } from "./nodes/WorkFlowNodeCard";
 import { api } from "@/lib/api";
 import { useChatFlowStore } from "@/store/chatflowStore";
@@ -46,11 +49,20 @@ export interface WorkFlowCanvasProps {
   nested: boolean;
 }
 
-export function WorkFlowCanvas({ workflow, outerChatNodeId, nested }: WorkFlowCanvasProps) {
+export function WorkFlowCanvas(props: WorkFlowCanvasProps) {
+  return (
+    <ReactFlowProvider>
+      <WorkFlowCanvasInner {...props} />
+    </ReactFlowProvider>
+  );
+}
+
+function WorkFlowCanvasInner({ workflow, outerChatNodeId, nested }: WorkFlowCanvasProps) {
   const { t } = useTranslation();
   const chatflowId = useChatFlowStore((s) => s.chatflow?.id ?? null);
   const workflowSelectedNodeId = useChatFlowStore((s) => s.workflowSelectedNodeId);
   const selectWorkflowNode = useChatFlowStore((s) => s.selectWorkflowNode);
+  const reactFlow = useReactFlow();
 
   const [nodes, setNodes] = useState<Node<WorkFlowNodeData>[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
@@ -109,6 +121,20 @@ export function WorkFlowCanvas({ workflow, outerChatNodeId, nested }: WorkFlowCa
     selectWorkflowNode(node.id);
   };
 
+  const handleSelectNote = useCallback(
+    (nodeId: string) => {
+      selectWorkflowNode(nodeId);
+      const rfNode = reactFlow.getNode(nodeId);
+      if (!rfNode) return;
+      const width = rfNode.measured?.width ?? 200;
+      const height = rfNode.measured?.height ?? 100;
+      const cx = rfNode.position.x + width / 2;
+      const cy = rfNode.position.y + height / 2;
+      reactFlow.setCenter(cx, cy, { zoom: reactFlow.getZoom(), duration: 300 });
+    },
+    [reactFlow, selectWorkflowNode],
+  );
+
   if (!workflow) {
     return (
       <div
@@ -150,6 +176,11 @@ export function WorkFlowCanvas({ workflow, outerChatNodeId, nested }: WorkFlowCa
         <Background />
         <Controls showInteractive={false} />
       </ReactFlow>
+      <WorkFlowBlackboard
+        notes={workflow.shared_notes}
+        selectedNodeId={workflowSelectedNodeId}
+        onSelectNote={handleSelectNote}
+      />
     </div>
   );
 }

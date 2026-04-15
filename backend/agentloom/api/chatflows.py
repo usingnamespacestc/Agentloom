@@ -31,6 +31,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
+from agentloom import tenancy_runtime
 from agentloom.api import workflows as _workflows_api
 from agentloom.db.base import get_session
 from agentloom.db.models.tenancy import DEFAULT_WORKSPACE_ID
@@ -47,7 +48,7 @@ from agentloom.engine.events import get_event_bus
 from agentloom.schemas import ChatFlow, PendingTurn, make_chatflow
 from agentloom.schemas.chatflow import PendingTurnSource
 from agentloom.schemas.common import ExecutionMode, FrozenNodeError, ProviderModelRef
-from agentloom.tools import default_registry
+from agentloom.mcp.runtime import get_shared_registry
 from agentloom.tools.base import ToolContext
 
 router = APIRouter(prefix="/api/chatflows", tags=["chatflows"])
@@ -107,7 +108,7 @@ def _get_engine(request: Request) -> ChatFlowEngine:
         engine = ChatFlowEngine(
             _workflows_api._provider_call_from_settings(),
             get_event_bus(),
-            tool_registry=default_registry(),
+            tool_registry=get_shared_registry(),
             tool_context=ToolContext(workspace_id=DEFAULT_WORKSPACE_ID),
         )
         app.state.chatflow_engine = engine
@@ -150,6 +151,10 @@ class SubmitTurnRequest(BaseModel):
     #: Composer's model pick for this turn. ``None`` → the spawned
     #: ChatNode inherits from its primary parent's ``resolved_model``.
     spawn_model: ProviderModelRef | None = None
+    #: Per-kind composer overrides. ``None`` falls back to the
+    #: chatflow's default for that kind, then to ``spawn_model``.
+    judge_spawn_model: ProviderModelRef | None = None
+    tool_call_spawn_model: ProviderModelRef | None = None
 
 
 class SubmitTurnResponse(BaseModel):
@@ -162,6 +167,8 @@ class EnqueueRequest(BaseModel):
     text: str
     source: PendingTurnSource = "web"
     spawn_model: ProviderModelRef | None = None
+    judge_spawn_model: ProviderModelRef | None = None
+    tool_call_spawn_model: ProviderModelRef | None = None
 
 
 class PendingTurnPayload(BaseModel):
@@ -215,6 +222,15 @@ async def create_chatflow(
     chat = make_chatflow(title=(body.title if body else None))
     prov_repo = _provider_repo(session)
     chat.default_model = await _resolve_default_model(prov_repo, None)
+    # Pre-fill disabled_tool_names from the workspace tool_states so
+    # tools marked ``available`` or ``disabled`` stay unchecked in the
+    # ChatFlow settings picker. ``default_allow`` tools are omitted so
+    # they remain visible by default.
+    ws_settings = tenancy_runtime.get_settings(DEFAULT_WORKSPACE_ID)
+    registered_names = [t.name for t in get_shared_registry().all()]
+    chat.disabled_tool_names = ws_settings.pre_disabled_for_new_chatflow(
+        registered_names
+    )
     await _repo(session).create(chat)
     await session.commit()
     return CreateChatFlowResponse(id=chat.id)
@@ -277,8 +293,11 @@ class PatchChatFlowRequest(BaseModel):
     description: str | None = None
     tags: list[str] | None = None
     default_model: ProviderModelRef | None = None
+    default_judge_model: ProviderModelRef | None = None
+    default_tool_call_model: ProviderModelRef | None = None
     default_execution_mode: ExecutionMode | None = None
     judge_retry_budget: int | None = None
+    disabled_tool_names: list[str] | None = None
 
 
 @router.patch("/{chatflow_id}")
@@ -299,10 +318,16 @@ async def patch_chatflow(
         kwargs["tags"] = body.tags
     if "default_model" in provided:
         kwargs["default_model"] = body.default_model
+    if "default_judge_model" in provided:
+        kwargs["default_judge_model"] = body.default_judge_model
+    if "default_tool_call_model" in provided:
+        kwargs["default_tool_call_model"] = body.default_tool_call_model
     if "default_execution_mode" in provided:
         kwargs["default_execution_mode"] = body.default_execution_mode
     if "judge_retry_budget" in provided:
         kwargs["judge_retry_budget"] = body.judge_retry_budget
+    if "disabled_tool_names" in provided:
+        kwargs["disabled_tool_names"] = body.disabled_tool_names
     if not kwargs:
         return {"ok": True}
     try:
@@ -325,10 +350,16 @@ async def patch_chatflow(
             rt_chat.tags = body.tags or []
         if "default_model" in provided:
             rt_chat.default_model = body.default_model
+        if "default_judge_model" in provided:
+            rt_chat.default_judge_model = body.default_judge_model
+        if "default_tool_call_model" in provided:
+            rt_chat.default_tool_call_model = body.default_tool_call_model
         if "default_execution_mode" in provided and body.default_execution_mode is not None:
             rt_chat.default_execution_mode = body.default_execution_mode
         if "judge_retry_budget" in provided and body.judge_retry_budget is not None:
             rt_chat.judge_retry_budget = body.judge_retry_budget
+        if "disabled_tool_names" in provided and body.disabled_tool_names is not None:
+            rt_chat.disabled_tool_names = body.disabled_tool_names
 
     return {"ok": True}
 
@@ -413,7 +444,12 @@ async def submit_turn(
 
     try:
         chat_node = await engine.submit_user_turn(
-            chat, body.text, parent_id=body.parent_id, spawn_model=body.spawn_model
+            chat,
+            body.text,
+            parent_id=body.parent_id,
+            spawn_model=body.spawn_model,
+            judge_spawn_model=body.judge_spawn_model,
+            tool_call_spawn_model=body.tool_call_spawn_model,
         )
     except KeyError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -446,7 +482,13 @@ async def enqueue_queue_item(
     if node_id not in chat.nodes:
         raise HTTPException(404, f"node {node_id} not in chatflow {chatflow_id}")
     pending = await engine.enqueue(
-        chat.id, node_id, body.text, source=body.source, spawn_model=body.spawn_model
+        chat.id,
+        node_id,
+        body.text,
+        source=body.source,
+        spawn_model=body.spawn_model,
+        judge_spawn_model=body.judge_spawn_model,
+        tool_call_spawn_model=body.tool_call_spawn_model,
     )
     await repo.save(chat)
     await session.commit()

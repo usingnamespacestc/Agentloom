@@ -15,6 +15,7 @@ Design notes:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 
 from agentloom.engine.events import EventBus, WorkflowEvent
@@ -25,6 +26,10 @@ from agentloom.engine.judge_formatter import (
 )
 from agentloom.engine.judge_parser import JudgeParseError, parse_judge_verdict
 from agentloom.engine.model_resolution import effective_model_for
+from agentloom.engine.recursive_planner_parser import (
+    PlannerParseError,
+    parse_recursive_planner_output,
+)
 from agentloom.providers.types import (
     AssistantMessage,
     ChatResponse,
@@ -42,6 +47,7 @@ from agentloom.schemas.common import (
     SharedNote,
     StepKind,
     TokenUsage,
+    WorkNodeRole,
     utcnow,
 )
 from agentloom.schemas.common import ToolUse as SchemaToolUse
@@ -88,6 +94,11 @@ class WorkflowEngine:
         self._bus = event_bus
         self._tools = tool_registry
         self._tool_ctx = tool_context or ToolContext()
+        #: Per-``execute()`` filter — tool names hidden from the LLM and
+        #: refused if invoked. Populated from the chatflow's
+        #: ``disabled_tool_names`` list by ChatFlowEngine. Empty
+        #: frozenset means "no extra filter on top of constraints".
+        self._disabled_tool_names: frozenset[str] = frozenset()
         #: Resolved once per ``execute()`` call; read by
         #: :func:`_assert_tool_loop_budget`. ``None`` means unlimited.
         self._effective_budget: int | None = MAX_TOOL_LOOP_ITERATIONS
@@ -111,6 +122,7 @@ class WorkflowEngine:
         chatflow_tool_loop_budget: int | None | object = _UNSET,
         chatflow_auto_mode_revise_budget: int | None | object = _UNSET,
         post_node_hook: PostNodeHook | None = None,
+        disabled_tool_names: frozenset[str] | None = None,
     ) -> WorkFlow:
         """Run every planned node in topological order. Mutates and
         returns the workflow.
@@ -141,12 +153,19 @@ class WorkflowEngine:
         )
         self._revise_count = 0
         self._post_node_hook = post_node_hook
+        self._disabled_tool_names = disabled_tool_names or frozenset()
         broken: set[str] = set()
         done: set[str] = set()
 
+        # Parallel-ready scheduling: each outer pass collects every node
+        # whose parents are all in ``done`` and runs the batch
+        # concurrently via ``asyncio.gather``. The tool loop and
+        # ``post_node_hook`` can mutate the DAG inside ``_run_node`` —
+        # any nodes they add land in the next pass's ready set after
+        # ``topological_order()`` is recomputed.
         while True:
             order = workflow.topological_order()
-            progressed = False
+            ready: list[WorkFlowNode] = []
             for node_id in order:
                 if node_id in done:
                     continue
@@ -162,23 +181,31 @@ class WorkflowEngine:
                     done.add(node_id)
                     continue
 
-                await self._run_node(workflow, node)
-                if node.status == NodeStatus.FAILED:
-                    broken.add(node.id)
-                done.add(node_id)
-                progressed = True
-                # If a judge pass decided the WorkFlow must bounce back
-                # to the ChatFlow layer for user clarification, stop
-                # running — remaining planned nodes stay dashed, and
-                # the ChatFlow engine opens a new ChatNode whose
-                # agent_response is the pending prompt.
-                if workflow.pending_user_prompt is not None:
-                    break
-                # The tool loop may have added new nodes; break to
-                # recompute topological order and see them this pass.
+                # Only schedule once every parent has finished this run.
+                # Parents that are still planned/running in a later
+                # batch will let this node appear in a future pass.
+                if not all(p in done for p in node.parent_ids):
+                    continue
+
+                ready.append(node)
+
+            if not ready:
                 break
 
-            if not progressed or workflow.pending_user_prompt is not None:
+            await asyncio.gather(
+                *(self._run_node(workflow, n) for n in ready)
+            )
+            for n in ready:
+                if n.status == NodeStatus.FAILED:
+                    broken.add(n.id)
+                done.add(n.id)
+
+            # If a judge pass decided the WorkFlow must bounce back
+            # to the ChatFlow layer for user clarification, stop
+            # running — remaining planned nodes stay dashed, and
+            # the ChatFlow engine opens a new ChatNode whose
+            # agent_response is the pending prompt.
+            if workflow.pending_user_prompt is not None:
                 break
 
         await self._bus.publish(
@@ -223,17 +250,30 @@ class WorkflowEngine:
             )
             return
 
-        node.status = NodeStatus.SUCCEEDED
-        node.finished_at = utcnow()
-        _append_shared_note(workflow, node)
-        await self._bus.publish(
-            WorkflowEvent(
-                workflow_id=workflow.id,
-                kind="node.succeeded",
-                node_id=node.id,
-                data={"usage": node.usage.model_dump() if node.usage else None},
+        # A handler may have already marked the node terminal (e.g.
+        # ``_run_sub_agent_delegation`` flips to FAILED when it absorbs
+        # a sub-layer halt). Don't overwrite that decision.
+        if node.status == NodeStatus.RUNNING:
+            node.status = NodeStatus.SUCCEEDED
+            node.finished_at = utcnow()
+            _append_shared_note(workflow, node)
+            await self._bus.publish(
+                WorkflowEvent(
+                    workflow_id=workflow.id,
+                    kind="node.succeeded",
+                    node_id=node.id,
+                    data={"usage": node.usage.model_dump() if node.usage else None},
+                )
             )
-        )
+        elif node.status == NodeStatus.FAILED:
+            await self._bus.publish(
+                WorkflowEvent(
+                    workflow_id=workflow.id,
+                    kind="node.failed",
+                    node_id=node.id,
+                    data={"error": node.error},
+                )
+            )
 
         # Let the caller grow the DAG before the next iteration picks
         # up the new nodes (Option B: judge_pre / llm_call completion
@@ -284,6 +324,7 @@ class WorkflowEngine:
             tool_defs = [
                 ToolDefinition(**d)
                 for d in self._tools.definitions_for_constraints(node.tool_constraints)
+                if d["name"] not in self._disabled_tool_names
             ]
 
         response = await self._provider_call(messages, tool_defs, model)
@@ -330,17 +371,17 @@ class WorkflowEngine:
     ) -> None:
         """Execute the delegation's sub-WorkFlow recursively.
 
-        Stash + restore per-call engine state (budgets, revise counter,
-        post-node hook) around the recursive ``execute()`` so the outer
-        WorkFlow's state isn't clobbered when control returns. The
-        same provider, bus, tool registry, and post_node_hook are
-        passed through — auto-mode orchestration applies at every
-        level so the planner pipeline can keep recursing.
-
-        The outer-resolved budgets are passed as the inner's
-        "chatflow defaults" so a sub-WorkFlow without its own override
-        inherits the running effective values rather than the bare
-        :data:`MAX_TOOL_LOOP_ITERATIONS`.
+        Spawns a fresh :class:`WorkflowEngine` for the recursive
+        ``execute()`` so per-call state (budgets, revise counter,
+        disabled-tool filter, post-node hook) lives on its own instance
+        rather than on ``self``. This is what lets sibling
+        sub_agent_delegations run concurrently under ``asyncio.gather``
+        without clobbering each other's counters — a single engine's
+        save/restore pattern is not safe across parallel awaits. Same
+        provider, bus, tool registry, and tool context are shared; the
+        outer-resolved budgets are passed as the inner's "chatflow
+        defaults" so a sub-WorkFlow without its own override inherits
+        the running effective values.
         """
         sub = node.sub_workflow
         if sub is None:
@@ -348,39 +389,33 @@ class WorkflowEngine:
                 f"sub_agent_delegation {node.id} has no sub_workflow"
             )
 
-        saved_budget = self._effective_budget
-        saved_revise_budget = self._effective_revise_budget
-        saved_revise_count = self._revise_count
-        saved_hook = self._post_node_hook
-        try:
-            await self.execute(
-                sub,
-                chatflow_tool_loop_budget=saved_budget,
-                chatflow_auto_mode_revise_budget=saved_revise_budget,
-                post_node_hook=saved_hook,
-            )
-        finally:
-            self._effective_budget = saved_budget
-            self._effective_revise_budget = saved_revise_budget
-            self._revise_count = saved_revise_count
-            self._post_node_hook = saved_hook
+        sub_engine = WorkflowEngine(
+            self._provider_call,
+            self._bus,
+            self._tools,
+            self._tool_ctx,
+        )
+        await sub_engine.execute(
+            sub,
+            chatflow_tool_loop_budget=self._effective_budget,
+            chatflow_auto_mode_revise_budget=self._effective_revise_budget,
+            post_node_hook=self._post_node_hook,
+            disabled_tool_names=self._disabled_tool_names,
+        )
 
         # Absorb sub-layer halt signals into this delegation node
         # instead of bubbling. The outer ChatNode-level judge is the
         # sole user-facing halt authority (Phase 1 of the 2026-04-14
-        # redesign). A sub-WorkFlow's pending_user_prompt / failed
-        # worker / failed judge_post become inputs to the *outer*
-        # aggregating post_judge, which decides whether to aggregate
-        # partials, retry, or escalate to the user.
-        #
-        # Record the sub's halt reason on this delegation's ``error``
-        # field so the aggregator (via _sub_workflow_effective_output)
-        # and operators have a single read-point for what went wrong.
-        # Then clear sub.pending_user_prompt so the field isn't
-        # externally visible on a child WorkFlow — per design, only
-        # the outermost WorkFlow may carry one.
+        # redesign). The delegation node is marked FAILED so the outer
+        # aggregating judge_post sees a structured failure via
+        # ``_classify_sub_outcome`` / ``_format_decompose_aggregation``
+        # and can choose to partial-aggregate, retry, or escalate.
+        # ``sub.pending_user_prompt`` is cleared so only the outermost
+        # WorkFlow may carry a user-facing prompt.
         if sub.pending_user_prompt is not None:
             node.error = f"sub-WorkFlow halted: {sub.pending_user_prompt}"
+            node.status = NodeStatus.FAILED
+            node.finished_at = utcnow()
             sub.pending_user_prompt = None
 
     async def _run_tool_call(self, workflow: WorkFlow, node: WorkFlowNode) -> None:
@@ -391,6 +426,19 @@ class WorkflowEngine:
             )
         if not node.tool_name:
             raise ValueError(f"tool_call node {node.id} has no tool_name")
+        if node.tool_name in self._disabled_tool_names:
+            # Defensive: the LLM never sees disabled tools in the prompt,
+            # but a hallucinated tool_use still lands here. Surface a
+            # normal tool failure so the model can apologize on retry.
+            from agentloom.schemas.common import ToolResult
+
+            node.tool_result = ToolResult(
+                content=(
+                    f"tool {node.tool_name!r} is not enabled for this chatflow"
+                ),
+                is_error=True,
+            )
+            return
         result = await self._tools.execute(
             node.tool_name,
             dict(node.tool_args or {}),
@@ -552,32 +600,104 @@ _SHARED_NOTE_SUMMARY_MAX = 200
 def _summarize_for_shared_note(node: WorkFlowNode) -> str | None:
     """Pull a one-line summary out of a freshly-succeeded WorkNode.
 
+    Read by judge_post (only consumer today) to evaluate sibling state
+    and target redo on specific node ids. Summaries are role-aware so
+    each entry actually carries information judge_post can act on:
+
+    - judge_call: verdict label + the human ask (user_message) /
+      blockers / critique count / redo target count, whichever apply.
+      Lets judge_post see *why* a prior judge said what it did.
+    - llm_call planner: parsed plan shape (``atomic <step_kind>`` or
+      ``decompose N subtasks``), not the raw JSON. The previous
+      "first line of output" gave back ``{`` because JSON starts with
+      a brace.
+    - llm_call worker / aggregator / other: first substantive line of
+      the markdown output (skips blank lines and lone braces).
+    - tool_call: ``tool_name → first-line-of-result``.
+    - sub_agent_delegation: best-effort one-liner from the sub-WorkFlow's
+      effective output (judge_post merged_response if present, else
+      latest worker draft).
+
     Returns ``None`` when there's nothing meaningful to record yet —
-    e.g. the dashed planning shell of a tool_call node that completed
-    without a result. Engine callers skip the append in that case.
+    callers skip the append in that case.
     """
     if node.step_kind == StepKind.JUDGE_CALL and node.judge_verdict is not None:
-        v = node.judge_verdict
-        if v.during_verdict:
-            verdict_label = v.during_verdict
-        elif v.post_verdict:
-            verdict_label = v.post_verdict
-        elif v.feasibility:
-            verdict_label = v.feasibility
-        else:
-            verdict_label = "verdict"
-        return f"{node.judge_variant.value if node.judge_variant else 'judge'}: {verdict_label}"
+        return _summarize_judge(node)
     if node.step_kind == StepKind.LLM_CALL and node.output_message is not None:
-        return _truncate_one_line(node.output_message.content)
+        return _summarize_llm(node)
     if node.step_kind == StepKind.TOOL_CALL and node.tool_result is not None:
         return _truncate_one_line(
             f"{node.tool_name or 'tool'} → {node.tool_result.content or '(empty)'}"
         )
     if node.step_kind == StepKind.SUB_AGENT_DELEGATION and node.sub_workflow is not None:
-        # Sub-WorkFlow's own judge_post should have produced the
-        # delegation's effective output; surface that one-liner.
-        return _truncate_one_line(_sub_workflow_summary(node))
+        body = _sub_workflow_summary(node)
+        return _truncate_one_line(body) if body else None
     return None
+
+
+def _summarize_judge(node: WorkFlowNode) -> str:
+    v = node.judge_verdict
+    assert v is not None  # caller guards
+    if v.during_verdict:
+        verdict_label = v.during_verdict
+    elif v.post_verdict:
+        verdict_label = v.post_verdict
+    elif v.feasibility:
+        verdict_label = v.feasibility
+    else:
+        verdict_label = "verdict"
+    variant_label = node.judge_variant.value if node.judge_variant else "judge"
+    extras: list[str] = []
+    if v.user_message:
+        extras.append(_truncate_one_line(v.user_message))
+    if v.blockers:
+        extras.append("blockers: " + "; ".join(v.blockers))
+    if v.missing_inputs:
+        extras.append("missing: " + ", ".join(v.missing_inputs))
+    if v.critiques:
+        extras.append(f"{len(v.critiques)} critiques")
+    if v.redo_targets:
+        extras.append(f"redo {len(v.redo_targets)}")
+    suffix = " — " + " | ".join(extras) if extras else ""
+    return _truncate_one_line(f"{variant_label}: {verdict_label}{suffix}")
+
+
+def _summarize_llm(node: WorkFlowNode) -> str:
+    assert node.output_message is not None  # caller guards
+    content = node.output_message.content
+    if node.role == WorkNodeRole.PLANNER:
+        try:
+            plan = parse_recursive_planner_output(content)
+        except PlannerParseError:
+            return _truncate_one_line(f"plan: parse-error — {content}")
+        if plan.mode == "atomic" and plan.atomic is not None:
+            return _truncate_one_line(
+                f"plan: atomic {plan.atomic.step_kind.value} — {plan.atomic.description}"
+            )
+        if plan.mode == "decompose" and plan.subtasks:
+            heads = ", ".join(st.description for st in plan.subtasks[:3])
+            more = "" if len(plan.subtasks) <= 3 else f" (+{len(plan.subtasks) - 3} more)"
+            return _truncate_one_line(
+                f"plan: decompose {len(plan.subtasks)} — {heads}{more}"
+            )
+        return _truncate_one_line(f"plan: infeasible — {plan.reason or ''}")
+    return _first_substantive_line(content)
+
+
+def _first_substantive_line(text: str) -> str:
+    """First non-empty, non-syntactic line — skips blank lines and lone
+    braces / brackets so JSON-shaped outputs don't degenerate to ``{``.
+    """
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line in {"{", "}", "[", "]"}:
+            continue
+        if len(line) <= _SHARED_NOTE_SUMMARY_MAX:
+            return line
+        return line[: _SHARED_NOTE_SUMMARY_MAX - 1] + "…"
+    return ""
 
 
 def _truncate_one_line(text: str) -> str:
@@ -588,9 +708,33 @@ def _truncate_one_line(text: str) -> str:
 
 
 def _sub_workflow_summary(node: WorkFlowNode) -> str:
-    """Best-effort one-liner for a delegation node — implemented in
-    M12.4d4 once sub-WorkFlow output extraction is wired. Today returns
-    an empty string so the SharedNote is skipped."""
+    """Best-effort one-liner for a delegation node.
+
+    Walks the sub-WorkFlow looking for the most informative output:
+    judge_post's ``merged_response`` (decompose aggregation) →
+    judge_post's ``user_message`` (halt path) → most recent worker
+    draft → empty. Kept inline (rather than calling chatflow_engine's
+    full ``_classify_sub_outcome``) to avoid an import cycle and
+    because the blackboard only needs a single line, not a structured
+    classification.
+    """
+    sub = node.sub_workflow
+    if sub is None:
+        return ""
+    for n in reversed(list(sub.nodes.values())):
+        if n.step_kind != StepKind.JUDGE_CALL or n.judge_variant != JudgeVariant.POST:
+            continue
+        v = n.judge_verdict
+        if v is None:
+            continue
+        if v.merged_response:
+            return v.merged_response
+        if v.user_message:
+            return v.user_message
+        break
+    for n in reversed(list(sub.nodes.values())):
+        if n.step_kind == StepKind.LLM_CALL and n.output_message is not None:
+            return n.output_message.content
     return ""
 
 
@@ -719,11 +863,15 @@ def _spawn_tool_loop_children(workflow: WorkFlow, parent_llm: WorkFlowNode) -> N
         workflow.add_node(tc)
         tool_call_ids.append(tc.id)
 
+    # Tool-call follow-up llm_calls honor the chatflow-level
+    # ``default_tool_call_model`` when the WorkFlow carries one (see
+    # WorkFlow.tool_call_model_override). Falls back to the parent
+    # llm_call's pin so direct-mode chats keep their existing behavior.
     follow_up = WorkFlowNode(
         step_kind=StepKind.LLM_CALL,
         parent_ids=tool_call_ids,
         tool_constraints=parent_llm.tool_constraints,
-        model_override=parent_llm.model_override,
+        model_override=workflow.tool_call_model_override or parent_llm.model_override,
     )
     workflow.add_node(follow_up)
 

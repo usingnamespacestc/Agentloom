@@ -53,6 +53,7 @@ from agentloom.engine.recursive_planner_parser import (
     SubTask,
     parse_recursive_planner_output,
 )
+from agentloom import tenancy_runtime
 from agentloom.engine.workflow_engine import PostNodeHook, ProviderCall, WorkflowEngine
 from agentloom.schemas.common import JudgeVariant, JudgeVerdict, WorkNodeRole
 from agentloom.schemas import (
@@ -296,6 +297,8 @@ class ChatFlowEngine:
         source_metadata: dict[str, Any] | None = None,
         on_upstream_failure: UpstreamFailurePolicy = "discard",
         spawn_model: ProviderModelRef | None = None,
+        judge_spawn_model: ProviderModelRef | None = None,
+        tool_call_spawn_model: ProviderModelRef | None = None,
     ) -> ChatFlowNode:
         """Submit a user turn and wait until its node finishes.
 
@@ -316,6 +319,8 @@ class ChatFlowEngine:
             source_metadata=source_metadata or {},
             on_upstream_failure=on_upstream_failure,
             spawn_model=spawn_model,
+            judge_spawn_model=judge_spawn_model,
+            tool_call_spawn_model=tool_call_spawn_model,
         )
         future: asyncio.Future[ChatFlowNode] = asyncio.get_running_loop().create_future()
 
@@ -356,6 +361,8 @@ class ChatFlowEngine:
         source_metadata: dict[str, Any] | None = None,
         on_upstream_failure: UpstreamFailurePolicy = "discard",
         spawn_model: ProviderModelRef | None = None,
+        judge_spawn_model: ProviderModelRef | None = None,
+        tool_call_spawn_model: ProviderModelRef | None = None,
     ) -> PendingTurn:
         """Append a PendingTurn to the live tip of the chain rooted
         at ``node_id``.
@@ -375,6 +382,8 @@ class ChatFlowEngine:
             source_metadata=source_metadata or {},
             on_upstream_failure=on_upstream_failure,
             spawn_model=spawn_model,
+            judge_spawn_model=judge_spawn_model,
+            tool_call_spawn_model=tool_call_spawn_model,
         )
         async with runtime.lock:
             if node_id not in runtime.chatflow.nodes:
@@ -550,11 +559,25 @@ class ChatFlowEngine:
 
             inherited_queue = list(failed.pending_queue)
             failed.pending_queue = []
+            # Retry = "re-run this turn with the same parameters".
+            # Preserve the failed node's resolved model so a composer
+            # override (e.g. the user picked Qwen for the original
+            # turn) survives the retry instead of silently falling back
+            # to parent inheritance. Per-kind judge/tool_call overrides
+            # live on the failed node's inner WorkFlow — preserve those
+            # too. We pass them as *_spawn_model overrides; the
+            # *_or_default fallback in _spawn_turn_node would otherwise
+            # paper over differences from the chatflow defaults.
+            failed_judge = failed.workflow.judge_model_override
+            failed_tool_call = failed.workflow.tool_call_model_override
             sibling = self._spawn_turn_node(
                 runtime,
                 parent_ids=list(failed.parent_ids),
                 user_message_text=failed.user_message.text,
                 pending_queue=inherited_queue,
+                spawn_model=failed.resolved_model,
+                judge_spawn_model=failed_judge,
+                tool_call_spawn_model=failed_tool_call,
             )
             await self._publish_node_created(runtime, sibling.id)
             await self._publish_queue_updated(runtime, node_id)
@@ -649,6 +672,8 @@ class ChatFlowEngine:
                 user_message_text=pending.text,
                 pending_queue=[],
                 spawn_model=pending.spawn_model,
+                judge_spawn_model=pending.judge_spawn_model,
+                tool_call_spawn_model=pending.tool_call_spawn_model,
             )
             await self._publish_node_created(runtime, node.id)
             self._launch_execute(
@@ -666,6 +691,8 @@ class ChatFlowEngine:
                 user_message_text=pending.text,
                 pending_queue=[],
                 spawn_model=pending.spawn_model,
+                judge_spawn_model=pending.judge_spawn_model,
+                tool_call_spawn_model=pending.tool_call_spawn_model,
             )
             await self._publish_node_created(runtime, node.id)
             self._launch_execute(
@@ -711,6 +738,8 @@ class ChatFlowEngine:
             user_message_text=pending.text,
             pending_queue=tail,
             spawn_model=pending.spawn_model,
+            judge_spawn_model=pending.judge_spawn_model,
+            tool_call_spawn_model=pending.tool_call_spawn_model,
         )
         await self._publish_node_created(runtime, child.id)
         await self._publish_queue_updated(runtime, node_id)
@@ -725,6 +754,8 @@ class ChatFlowEngine:
         user_message_text: str,
         pending_queue: list[PendingTurn],
         spawn_model: ProviderModelRef | None = None,
+        judge_spawn_model: ProviderModelRef | None = None,
+        tool_call_spawn_model: ProviderModelRef | None = None,
     ) -> ChatFlowNode:
         """Create a PLANNED ChatFlowNode and attach it to the chatflow.
 
@@ -775,6 +806,27 @@ class ChatFlowEngine:
             expected_outcome=EditableText.by_agent(_STOCK_EXPECTED_OUTCOME),
             debate_round_budget=chatflow.debate_round_budget,
             judge_retry_budget=chatflow.judge_retry_budget,
+            # Snapshot per-call-type overrides at spawn time so this
+            # turn's judges / tool-call follow-ups have a stable pin
+            # even if the chatflow defaults change mid-run. If the
+            # chatflow doesn't pin a per-kind model, fall back to the
+            # turn's resolved model so judges share the main turn's
+            # provider/model rather than silently using the provider's
+            # arbitrary default.
+            # Per-turn composer override > chatflow default > main turn
+            # model. Per-turn beats chatflow default so the user can
+            # route a single turn's judges to a cheap model without
+            # touching the chatflow-wide setting.
+            judge_model_override=(
+                judge_spawn_model
+                or chatflow.default_judge_model
+                or resolved
+            ),
+            tool_call_model_override=(
+                tool_call_spawn_model
+                or chatflow.default_tool_call_model
+                or resolved
+            ),
         )
 
         if switches.judge_pre:
@@ -828,6 +880,7 @@ class ChatFlowEngine:
         node = _single_node(templated)
         node.parent_ids = []
         node.input_messages = [*(node.input_messages or []), *context_wire]
+        node.model_override = inner.judge_model_override
         return inner.add_node(node)
 
     def _spawn_judge_post(
@@ -861,6 +914,12 @@ class ChatFlowEngine:
                 "upstream_kind": upstream_kind,
                 "upstream_summary": upstream_summary,
                 "worknode_catalog": worknode_catalog,
+                # Layer-local blackboard. Only judge_post reads it —
+                # planner / worker / planner_judge / worker_judge get
+                # their context via input_messages, this gives the exit
+                # gate a sibling-by-sibling trail with node-id anchors
+                # for redo_targets.
+                "layer_notes": _format_layer_notes(inner.shared_notes),
             },
             includes=self._fixture_includes,
         )
@@ -868,6 +927,7 @@ class ChatFlowEngine:
         node.parent_ids = [parent_node.id]
         node.judge_target_id = parent_node.id
         node.input_messages = [*(node.input_messages or []), *context_wire]
+        node.model_override = inner.judge_model_override
         return inner.add_node(node)
 
     # ------------------------------------------------------------ planner spawns
@@ -932,6 +992,7 @@ class ChatFlowEngine:
         node = _single_node(templated)
         node.parent_ids = [planner_node.id]
         node.judge_target_id = planner_node.id
+        node.model_override = inner.judge_model_override
         return inner.add_node(node)
 
     def _spawn_decompose_delegations(
@@ -1005,6 +1066,8 @@ class ChatFlowEngine:
             expected_outcome=EditableText.by_agent(subtask.expected_outcome),
             debate_round_budget=parent.debate_round_budget,
             judge_retry_budget=parent.judge_retry_budget,
+            judge_model_override=parent.judge_model_override,
+            tool_call_model_override=parent.tool_call_model_override,
         )
         # judge_pre is the universal entry gate; the post-node hook then
         # spawns the planner / worker chain when it votes OK.
@@ -1087,6 +1150,7 @@ class ChatFlowEngine:
         node = _single_node(templated)
         node.parent_ids = [worker_node.id]
         node.judge_target_id = worker_node.id
+        node.model_override = inner.judge_model_override
         return inner.add_node(node)
 
     def _build_post_node_hook(
@@ -1722,8 +1786,14 @@ class ChatFlowEngine:
         round_index = _judge_post_round_index(workflow, judge_post_node)
         budget = workflow.judge_retry_budget
         if budget >= 0 and round_index >= budget:
-            from agentloom.engine.judge_formatter import format_judge_post_prompt
-            workflow.pending_user_prompt = format_judge_post_prompt(verdict)
+            workflow.pending_user_prompt = _compose_retry_halt_message(
+                workflow,
+                judge_post_node,
+                verdict,
+                reason="budget_exhausted",
+                round_index=round_index,
+                budget=budget,
+            )
             return
 
         # Spawn redo clones for each target the judge named. Unknown or
@@ -1739,8 +1809,14 @@ class ChatFlowEngine:
             # Judge asked for retry but every target was unusable (missing
             # or unsupported kind). Treat as a halt so the user still
             # gets a message rather than a silent accept.
-            from agentloom.engine.judge_formatter import format_judge_post_prompt
-            workflow.pending_user_prompt = format_judge_post_prompt(verdict)
+            workflow.pending_user_prompt = _compose_retry_halt_message(
+                workflow,
+                judge_post_node,
+                verdict,
+                reason="no_usable_targets",
+                round_index=round_index,
+                budget=budget,
+            )
 
     def _spawn_redo_clones(
         self,
@@ -1979,12 +2055,21 @@ class ChatFlowEngine:
         )
 
         runtime_error: str | None = None
+        # Workspace-level "disabled" tools are a harder gate than the
+        # per-chatflow denylist: even if the chatflow has opted-in to a
+        # tool, the workspace veto wins. Union them here so the engine
+        # gets a single frozenset to refuse against.
+        ws_settings = tenancy_runtime.get_settings(self._inner._tool_ctx.workspace_id)
+        effective_disabled = (
+            frozenset(chatflow.disabled_tool_names) | frozenset(ws_settings.globally_disabled())
+        )
         try:
             await self._inner.execute(
                 chat_node.workflow,
                 chatflow_tool_loop_budget=chatflow.tool_loop_budget,
                 chatflow_auto_mode_revise_budget=chatflow.auto_mode_revise_budget,
                 post_node_hook=self._build_post_node_hook(chat_node, chatflow),
+                disabled_tool_names=effective_disabled,
             )
         except Exception as exc:  # noqa: BLE001 — engine boundary
             log.exception("chat node %s inner workflow raised", node_id)
@@ -2649,6 +2734,97 @@ def _format_redo_aggregation(
     return summary_parts, catalog_parts
 
 
+#: Map structured-status tokens to short human-readable phrases for the
+#: halt prompt. Keys match the vocabulary of ``_classify_sub_outcome`` /
+#: ``_redo_clone_classification``.
+_STATUS_HUMAN = {
+    "ok": "completed successfully",
+    "worker_failed": "worker failed",
+    "sub_pre_halt": "sub-agent refused before starting",
+    "sub_judge_post_failed": "sub-agent's reviewer crashed",
+    "sub_judge_post_fail": "sub-agent's reviewer returned fail",
+    "sub_judge_post_retry_exhausted": "sub-agent's retry budget ran out",
+    "empty": "produced no output",
+}
+
+
+def _compose_retry_halt_message(
+    workflow: WorkFlow,
+    judge_post_node: WorkFlowNode,
+    verdict: JudgeVerdict,
+    *,
+    reason: str,
+    round_index: int,
+    budget: int,
+) -> str:
+    """Deterministic halt message for retry-budget exhaustion and
+    retry-with-no-usable-targets.
+
+    Rather than echoing the last judge's ``user_message`` verbatim (which
+    may only describe round-N's view and can factually misrepresent
+    successes from earlier rounds — 2026-04-14 gemma4 regression), walk
+    every round-1 subtask to its latest surviving version and report
+    per-subtask final status. That way partial successes stay visible
+    even when the overall layer halts.
+
+    For atomic (non-decompose) layers the walk still works — round-1
+    parent_ids is a single worker/llm node and we report its latest
+    clone's status.
+    """
+    round_one = _find_round_one_judge_post(workflow, judge_post_node)
+    round_one_members = [
+        workflow.nodes[mid]
+        for mid in round_one.parent_ids
+        if mid in workflow.nodes
+    ]
+    replaced_by: dict[NodeId, NodeId] = {}
+    for n in workflow.nodes.values():
+        if n.redo_source_id is not None:
+            replaced_by[n.redo_source_id] = n.id
+
+    lines: list[str] = []
+    if reason == "budget_exhausted":
+        lines.append(
+            f"I retried {round_index} round(s) but hit the retry budget "
+            f"of {budget} without landing a clean result. Here is where "
+            "each part of the plan stands:"
+        )
+    else:  # no_usable_targets
+        lines.append(
+            "The reviewer asked to retry, but none of the targets it "
+            "named could be redone. Here is where each part of the plan "
+            "stands:"
+        )
+    lines.append("")
+
+    for i, original in enumerate(round_one_members, start=1):
+        surviving_id = original.id
+        while surviving_id in replaced_by:
+            surviving_id = replaced_by[surviving_id]
+        surviving = workflow.nodes[surviving_id]
+        round_idx = _member_round_index(workflow, surviving)
+
+        label = (
+            (surviving.description.text or "").strip()
+            if surviving.description is not None
+            else ""
+        ) or surviving.id
+
+        if surviving.step_kind == StepKind.SUB_AGENT_DELEGATION and surviving.sub_workflow is not None:
+            status, _body = _classify_sub_outcome(surviving.sub_workflow)
+        else:
+            status, _body = _redo_clone_classification(surviving)
+        phrase = _STATUS_HUMAN.get(status, status)
+
+        round_note = "" if round_idx == 1 else f" (after {round_idx - 1} retry round(s))"
+        detail = f" — {surviving.error}" if status != "ok" and surviving.error else ""
+        lines.append(f"- **{label}** — {phrase}{round_note}{detail}")
+
+    lines.append("")
+    lines.append("How would you like to proceed?")
+    return "\n".join(lines)
+
+
 def _redo_clone_classification(m: WorkFlowNode) -> tuple[str, str]:
     """Classify a redo clone (worker or delegation) for the structured
     redo_aggregation summary. Returns ``(status, body)`` using the same
@@ -2835,6 +3011,27 @@ def _atomic_brief_for_worker(
     except PlannerParseError:
         return None
     return plan.atomic if plan.mode == "atomic" else None
+
+
+def _format_layer_notes(notes: list) -> str:
+    """Render the WorkFlow's blackboard for the judge_post template.
+
+    Empty list → empty string (template uses Jinja's truthy check to
+    skip the section). Otherwise one line per note, prefixed with the
+    ``author_node_id`` so the judge can target redo_targets directly:
+
+        [019d8eaa role=planner kind=node_succeeded]
+          plan: decompose 4 — bio_a, bio_b, bio_c (+1 more)
+    """
+    if not notes:
+        return ""
+    lines: list[str] = []
+    for n in notes:
+        role_label = n.role.value if n.role else "—"
+        lines.append(
+            f"[{n.author_node_id} role={role_label} kind={n.kind}]\n  {n.summary}"
+        )
+    return "\n".join(lines)
 
 
 def _trio_params(workflow: WorkFlow) -> dict[str, str]:

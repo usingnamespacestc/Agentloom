@@ -35,7 +35,7 @@
  * - animated flow when the target is running
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ReactFlow,
   Background,
@@ -150,7 +150,10 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
       cancelled = true;
     };
   }, []);
-  const contextWindowByModel = contextWindowMap(providers);
+  const contextWindowByModel = useMemo(
+    () => contextWindowMap(providers),
+    [providers],
+  );
 
   const [nodes, setNodes] = useState<Node<ChatFlowNodeData>[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
@@ -395,37 +398,56 @@ function computeLeafIds(nodes: Record<string, ChatFlowNode>): Set<string> {
   return leaves;
 }
 
-/** Sum total_tokens across all WorkNodes in a ChatNode's workflow. */
+/**
+ * Tokens that would be carried into a *next* turn spawned from this
+ * ChatNode — i.e. the realistic context-window load the user pays for
+ * when continuing the conversation here.
+ *
+ * Formula:
+ *   incoming = first worknode's prompt_tokens
+ *     (already includes all ancestor user/agent turns + this turn's
+ *      user_message — _build_chat_context walks the full parent chain)
+ *   outgoing = last worknode's completion_tokens
+ *     (this turn's agent_response — what becomes part of the next
+ *      turn's prompt)
+ *
+ * Internal WorkFlow chatter (intermediate judge/tool/llm calls) is NOT
+ * counted: it never crosses the ChatNode boundary into the next turn's
+ * input. This drives the auto-compress trigger downstream.
+ */
 function nodeTokens(node: ChatFlowNode): number {
-  let sum = 0;
+  let first: { started_at: string; prompt_tokens: number } | null = null;
+  let last: { finished_at: string; completion_tokens: number } | null = null;
   for (const wn of Object.values(node.workflow.nodes)) {
-    if (wn.usage) sum += wn.usage.total_tokens;
+    if (!wn.usage || !wn.started_at) continue;
+    const startedAt = wn.started_at;
+    const promptTokens = wn.usage.prompt_tokens;
+    if (first === null || startedAt < first.started_at) {
+      first = { started_at: startedAt, prompt_tokens: promptTokens };
+    }
+    if (wn.finished_at) {
+      const finishedAt = wn.finished_at;
+      const completionTokens = wn.usage.completion_tokens;
+      if (last === null || finishedAt > last.finished_at) {
+        last = { finished_at: finishedAt, completion_tokens: completionTokens };
+      }
+    }
   }
-  return sum;
+  const incoming = first?.prompt_tokens ?? 0;
+  const outgoing = last?.completion_tokens ?? 0;
+  return incoming + outgoing;
 }
 
 /**
- * For each ChatNode, compute accumulated context tokens from root to
- * that node (following parent_ids[0] as the primary path).
+ * Per-node context-token map. No parent walk needed — each ChatNode's
+ * first worknode prompt_tokens already accumulates ancestor history.
  */
 function computeContextTokens(
   nodes: Record<string, ChatFlowNode>,
 ): Record<string, number> {
-  const cache: Record<string, number> = {};
-
-  function walk(id: string): number {
-    if (id in cache) return cache[id];
-    const node = nodes[id];
-    if (!node) return 0;
-    const own = nodeTokens(node);
-    const parentId = node.parent_ids[0] ?? null;
-    const inherited = parentId ? walk(parentId) : 0;
-    cache[id] = inherited + own;
-    return cache[id];
-  }
-
-  for (const id of Object.keys(nodes)) walk(id);
-  return cache;
+  const out: Record<string, number> = {};
+  for (const [id, n] of Object.entries(nodes)) out[id] = nodeTokens(n);
+  return out;
 }
 
 /** Look up the context window of a node's resolved model, falling back

@@ -214,6 +214,18 @@ class WorkFlow(BaseModel):
     #: retry rounds are the judge_post outer "fix these subtasks" loop.
     judge_retry_budget: int = 3
 
+    #: Per-call-type model pins, snapshotted from the enclosing ChatFlow
+    #: at WorkFlow creation. The engine stamps every judge_call node's
+    #: ``model_override`` from ``judge_model_override`` (so judges run on
+    #: the chatflow's chosen judge model regardless of the main turn
+    #: model), and tool-call follow-up llm_calls from
+    #: ``tool_call_model_override``. ``None`` means "no per-kind pin —
+    #: fall back to the node's own ``model_override``" (which is itself
+    #: the ChatNode's resolved_model). Sub-WorkFlows inherit these too,
+    #: so the whole nested tree honors the same defaults.
+    judge_model_override: ProviderModelRef | None = None
+    tool_call_model_override: ProviderModelRef | None = None
+
     #: Set by the engine when a judge pass decides the WorkFlow cannot
     #: proceed without user clarification (judge_pre says non-OK, or
     #: judge_post says retry/fail). The ChatFlow layer reads this on

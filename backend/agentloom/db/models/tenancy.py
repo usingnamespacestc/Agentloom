@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, String
+from sqlalchemy import JSON, DateTime, String, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from agentloom.db.base import Base
@@ -23,6 +24,16 @@ class Workspace(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
+    #: Free-form settings bag. Currently holds ``tool_states`` — the
+    #: per-tool default-allow / available / disabled state used by the
+    #: ChatFlow engine and pre-fill logic. Room to grow without schema
+    #: churn.
+    payload: Mapped[dict] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"),
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'"),
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow
     )

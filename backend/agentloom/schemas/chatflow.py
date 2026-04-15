@@ -74,6 +74,13 @@ class PendingTurn(BaseModel):
     #: ``resolved_model``. Travels with the PendingTurn so a queued turn
     #: keeps its model choice even as the tip advances down the chain.
     spawn_model: ProviderModelRef | None = None
+    #: Per-kind composer overrides for this turn. ``None`` falls back
+    #: through chatflow.default_judge_model / default_tool_call_model
+    #: → spawn_model → default_model. Lets the user route a single turn's
+    #: judges/tool-call follow-ups to a different model than the main
+    #: turn without touching ChatFlow defaults.
+    judge_spawn_model: ProviderModelRef | None = None
+    tool_call_spawn_model: ProviderModelRef | None = None
 
 
 class ChatFlowNode(NodeBase):
@@ -109,6 +116,14 @@ class ChatFlow(BaseModel):
     nodes: dict[NodeId, ChatFlowNode] = Field(default_factory=dict)
     root_ids: list[NodeId] = Field(default_factory=list)
     default_model: ProviderModelRef | None = None
+    #: Per-call-type overrides of ``default_model``. When set, judge
+    #: calls (pre/during/post) use ``default_judge_model``; tool-call
+    #: follow-up LLM calls use ``default_tool_call_model``. Falls back
+    #: to ``default_model`` when ``None``. Lets a chatflow run a cheap
+    #: model for verification/tool-routing while keeping a strong model
+    #: for the main LLM step.
+    default_judge_model: ProviderModelRef | None = None
+    default_tool_call_model: ProviderModelRef | None = None
     #: ReAct inner-loop cap shared by every WorkFlow in this ChatFlow.
     #: ``None`` means unlimited. Per-WorkFlow and per-WorkNode overrides
     #: are planned. See §5.4 FR-EX-6.
@@ -127,6 +142,18 @@ class ChatFlow(BaseModel):
     #: (round 1 is the initial judgement). ``-1`` = unlimited. Applied
     #: to every new turn's inner WorkFlow.
     judge_retry_budget: int = 3
+    #: Per-ChatFlow tool denylist. Tool names listed here are hidden
+    #: from every LLM call inside this chatflow's WorkFlows AND refused
+    #: at execute-time if the model hallucinates them. Covers both
+    #: built-in tools (``Bash``, ``Read``, etc.) and MCP tools
+    #: (``mcp__<server>__<tool>``). An empty list means "no extra
+    #: filter" — every globally-registered tool is visible.
+    #:
+    #: New chatflows pre-populate this from the workspace tool settings
+    #: (every tool whose global state is ``available`` lands in here so
+    #: it stays unchecked by default; ``default_allow`` tools are NOT
+    #: pre-listed and remain checked). See M7.5 step 2/3.
+    disabled_tool_names: list[str] = Field(default_factory=list)
     #: Execution mode applied to every new turn's inner WorkFlow. The
     #: ChatFlowEngine derives the four switch defaults (``plan_enabled``,
     #: ``judge_pre_enabled``, ``judge_during_enabled``, ``judge_post_enabled``)

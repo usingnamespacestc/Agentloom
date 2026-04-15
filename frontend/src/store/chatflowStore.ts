@@ -28,6 +28,7 @@ import { create } from "zustand";
 import { findLatestLeafId } from "@/canvas/pathUtils";
 import { api, ApiError } from "@/lib/api";
 import { subscribeEvents, type SSEFactory, type SSESubscription } from "@/lib/sse";
+import type { ComposerModelMap } from "@/store/preferencesStore";
 import type {
   ChatFlow,
   ChatFlowNode,
@@ -136,8 +137,11 @@ export interface ChatFlowStoreState {
     description?: string | null;
     tags?: string[];
     default_model?: ProviderModelRef | null;
+    default_judge_model?: ProviderModelRef | null;
+    default_tool_call_model?: ProviderModelRef | null;
     default_execution_mode?: ExecutionMode;
     judge_retry_budget?: number;
+    disabled_tool_names?: string[];
   }) => Promise<void>;
 
   /** Which edge is currently hovered on the ChatFlow canvas — drives
@@ -195,13 +199,13 @@ export interface ChatFlowStoreState {
   sendTurn: (
     text: string,
     parentId?: string,
-    spawnModel?: ProviderModelRef | null,
+    composerModels?: ComposerModelMap | null,
   ) => Promise<void>;
   /** Enqueue a pending turn on a specific node. */
   enqueueTurn: (
     nodeId: NodeId,
     text: string,
-    spawnModel?: ProviderModelRef | null,
+    composerModels?: ComposerModelMap | null,
   ) => Promise<void>;
   /** Delete a pending queue item. */
   deleteQueueItem: (nodeId: NodeId, itemId: string) => Promise<void>;
@@ -454,11 +458,18 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     if ("description" in patch) updated.description = patch.description ?? null;
     if ("tags" in patch) updated.tags = patch.tags ?? [];
     if ("default_model" in patch) updated.default_model = patch.default_model ?? null;
+    if ("default_judge_model" in patch)
+      updated.default_judge_model = patch.default_judge_model ?? null;
+    if ("default_tool_call_model" in patch)
+      updated.default_tool_call_model = patch.default_tool_call_model ?? null;
     if ("default_execution_mode" in patch && patch.default_execution_mode !== undefined) {
       updated.default_execution_mode = patch.default_execution_mode;
     }
     if ("judge_retry_budget" in patch && patch.judge_retry_budget !== undefined) {
       updated.judge_retry_budget = patch.judge_retry_budget;
+    }
+    if ("disabled_tool_names" in patch && patch.disabled_tool_names !== undefined) {
+      updated.disabled_tool_names = patch.disabled_tool_names;
     }
     set({ chatflow: updated as typeof cf });
     // Refresh sidebar list too (title may have changed).
@@ -635,9 +646,13 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     set({ rightPanelWidth: clamped });
   },
 
-  async sendTurn(text, parentId, spawnModel) {
+  async sendTurn(text, parentId, composerModels) {
     const chat = get().chatflow;
     if (!chat) return;
+
+    const llmModel = composerModels?.llm ?? null;
+    const judgeModel = composerModels?.judge ?? null;
+    const toolCallModel = composerModels?.tool_call ?? null;
 
     // Use the explicit parent (= selected node in the UI). This is
     // how forks work: if the user selected a non-leaf node, the new
@@ -650,9 +665,9 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     if (!targetId) return;
 
     // 1. Optimistic node — appears immediately with "running" status.
-    //    Stamp resolved_model with the composer's pick so the ribbon
-    //    layer colors the optimistic node correctly until the real one
-    //    arrives via SSE.
+    //    Stamp resolved_model with the composer's llm pick so the
+    //    ribbon layer colors the optimistic node correctly until the
+    //    real one arrives via SSE.
     const optimisticId = `_opt_${Date.now()}`;
     const now = new Date().toISOString();
     const optimistic: ChatFlowNode = {
@@ -662,7 +677,7 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
       inputs: null,
       expected_outcome: null,
       status: "running",
-      resolved_model: spawnModel ?? null,
+      resolved_model: llmModel,
       locked: false,
       error: null,
       position_x: null,
@@ -691,10 +706,12 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     //    Don't await the response — it blocks until the LLM finishes.
     //    SSE events will drive all UI updates. We just need the server
     //    to receive the request and create the real node.
-    api.submitTurn(chat.id, text, targetId, spawnModel ?? null).catch(() => {
-      // If the request itself fails (network error, 4xx), clean up.
-      removeOptimistic(get, set, optimisticId);
-    });
+    api
+      .submitTurn(chat.id, text, targetId, llmModel, judgeModel, toolCallModel)
+      .catch(() => {
+        // If the request itself fails (network error, 4xx), clean up.
+        removeOptimistic(get, set, optimisticId);
+      });
 
     // 3. Give the server a moment to create the node, then refresh
     //    to replace the optimistic node with the real one. SSE
@@ -719,10 +736,18 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     }
   },
 
-  async enqueueTurn(nodeId, text, spawnModel) {
+  async enqueueTurn(nodeId, text, composerModels) {
     const chat = get().chatflow;
     if (!chat) return;
-    await api.enqueueTurn(chat.id, nodeId, text, "web", spawnModel ?? null);
+    await api.enqueueTurn(
+      chat.id,
+      nodeId,
+      text,
+      "web",
+      composerModels?.llm ?? null,
+      composerModels?.judge ?? null,
+      composerModels?.tool_call ?? null,
+    );
     await get().refreshChatFlow();
   },
 

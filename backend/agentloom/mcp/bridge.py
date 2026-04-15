@@ -33,6 +33,11 @@ class MCPToolSource:
         self.client = MCPClient(config, read_timeout=read_timeout)
         self._registered_names: list[str] = []
         self._connected = False
+        self.last_error: str | None = None
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
 
     @property
     def registered_names(self) -> list[str]:

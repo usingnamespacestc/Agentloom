@@ -23,7 +23,7 @@ from agentloom.engine.workflow_engine import WorkflowEngine
 from agentloom.schemas import StepKind, WorkFlow, WorkFlowNode
 from agentloom.schemas.common import FrozenNodeError, JudgeVariant
 from agentloom.schemas.workflow import WireMessage
-from agentloom.tools import default_registry
+from agentloom.mcp.runtime import get_shared_registry
 from agentloom.tools.base import ToolContext
 
 log = logging.getLogger(__name__)
@@ -151,7 +151,7 @@ async def execute_workflow(
     engine = WorkflowEngine(
         provider_call,
         get_event_bus(),
-        tool_registry=default_registry(),
+        tool_registry=get_shared_registry(),
         tool_context=ToolContext(workspace_id=DEFAULT_WORKSPACE_ID),
     )
 
@@ -208,7 +208,7 @@ async def _run_judge_in_background(workflow_id: str, new_node_id: str) -> None:
             engine = WorkflowEngine(
                 _provider_call_from_settings(),
                 get_event_bus(),
-                tool_registry=default_registry(),
+                tool_registry=get_shared_registry(),
                 tool_context=ToolContext(workspace_id=DEFAULT_WORKSPACE_ID),
             )
             await engine.execute(wf)

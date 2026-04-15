@@ -140,12 +140,13 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
   const selectNode = useChatFlowStore((s) => s.selectNode);
   const pickBranch = useChatFlowStore((s) => s.pickBranch);
   const sendTurn = useChatFlowStore((s) => s.sendTurn);
+  const enqueueTurn = useChatFlowStore((s) => s.enqueueTurn);
   const deleteNode = useChatFlowStore((s) => s.deleteNode);
   const retryNode = useChatFlowStore((s) => s.retryNode);
   const deleteQueueItem = useChatFlowStore((s) => s.deleteQueueItem);
   const cancelNode = useChatFlowStore((s) => s.cancelNode);
 
-  const composerModel = usePreferencesStore((s) => s.composerModel);
+  const composerModels = usePreferencesStore((s) => s.composerModels);
   const [inputText, setInputText] = useState("");
   const [sending, setSending] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -182,14 +183,35 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
     setSending(true);
     setInputText("");
     try {
-      // Always send relative to the selected node (the path endpoint).
-      // If the selected node is a non-leaf, this creates a fork — a
-      // new branch off that node, not an append to the latest leaf.
-      await sendTurn(text, selectedNodeId ?? undefined, composerModel);
+      // Routing:
+      // - Leaf still running/planned: enqueue on the leaf so it walks
+      //   down when the current turn finishes. The pending queue is
+      //   editable (delete / reorder) from the UI bubble row above the
+      //   composer.
+      // - Leaf terminal (succeeded/failed) OR user selected a non-leaf
+      //   node: fork / append via sendTurn. sendTurn + a non-null parent
+      //   triggers the fork-semantics memory (new branch off selected).
+      const busy =
+        leafNode &&
+        leafNode.id === selectedNodeId &&
+        (leafNode.status === "running" || leafNode.status === "planned");
+      if (busy && leafNode) {
+        await enqueueTurn(leafNode.id, text, composerModels);
+      } else {
+        await sendTurn(text, selectedNodeId ?? undefined, composerModels);
+      }
     } finally {
       setSending(false);
     }
-  }, [inputText, sending, sendTurn, selectedNodeId, composerModel]);
+  }, [
+    inputText,
+    sending,
+    sendTurn,
+    enqueueTurn,
+    selectedNodeId,
+    leafNode,
+    composerModels,
+  ]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -335,19 +357,24 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
 
 // ---------------------------------------------------------------- ComposerModelPicker
 //
-// Per-turn model selector. Sticky: once you pick a model it persists across
-// turns and sessions (lives in `usePreferencesStore.composerModel`) until you
-// change it again. The composer's choice flows down as the PendingTurn's
-// `spawn_model`, which the engine snapshots onto the spawned ChatNode's
-// `resolved_model`. `null` = inherit from the primary parent's resolved_model
-// (or fall back to chatflow.default_model at the root).
+// Per-turn model selector with one row per ModelKind (llm / judge /
+// tool_call). Each kind is independently sticky — picks live in
+// `usePreferencesStore.composerModels` and persist across turns and
+// sessions until the user changes them. Each kind flows down to the
+// engine as the PendingTurn's matching ``*_spawn_model`` field:
 //
-// The picker is keyed by ModelKind so future kinds (judge / tool_call) can
-// add their own sections. Today only `llm` exists, so the popup has one
-// section.
+//   - llm        → ChatNode.resolved_model + main llm_call.model_override
+//   - judge      → WorkFlow.judge_model_override (this turn only)
+//   - tool_call  → WorkFlow.tool_call_model_override (this turn only)
+//
+// ``null`` for any kind = inherit (engine falls back through the
+// chatflow's default for that kind, then to the main turn model).
+// The button label shows the llm pick (or "judge+1" style ellipsis
+// when other kinds are also pinned) so the most-changed knob is
+// always visible.
 
-type ComposerKind = "llm";
-const COMPOSER_KINDS: ComposerKind[] = ["llm"];
+type ComposerKind = "llm" | "judge" | "tool_call";
+const COMPOSER_KINDS: ComposerKind[] = ["llm", "judge", "tool_call"];
 
 function refKey(ref: ProviderModelRef | null): string {
   return ref ? `${ref.provider_id}::${ref.model_id}` : "";
@@ -361,7 +388,7 @@ function parseRefKey(key: string): ProviderModelRef | null {
 
 function ComposerModelPicker() {
   const { t } = useTranslation();
-  const composerModel = usePreferencesStore((s) => s.composerModel);
+  const composerModels = usePreferencesStore((s) => s.composerModels);
   const setComposerModel = usePreferencesStore((s) => s.setComposerModel);
   const [open, setOpen] = useState(false);
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
@@ -415,9 +442,18 @@ function ComposerModelPicker() {
     return out;
   }, [providers]);
 
-  const buttonText = composerModel
-    ? composerModel.model_id
-    : t("composer_model.button_inherit");
+  const llmRef = composerModels.llm;
+  const otherPins = COMPOSER_KINDS.filter(
+    (k) => k !== "llm" && composerModels[k] !== null,
+  ).length;
+  const buttonText = llmRef
+    ? otherPins > 0
+      ? `${llmRef.model_id} +${otherPins}`
+      : llmRef.model_id
+    : otherPins > 0
+      ? `${t("composer_model.button_inherit")} +${otherPins}`
+      : t("composer_model.button_inherit");
+  const anyPinned = llmRef !== null || otherPins > 0;
 
   return (
     <div className="relative inline-block">
@@ -428,7 +464,7 @@ function ComposerModelPicker() {
         onClick={() => setOpen((v) => !v)}
         className={[
           "flex items-center gap-1 rounded border px-2 py-0.5 text-[10px]",
-          composerModel
+          anyPinned
             ? "border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100"
             : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50",
         ].join(" ")}
@@ -455,8 +491,8 @@ function ComposerModelPicker() {
               </div>
               <select
                 data-testid={`composer-model-select-${kind}`}
-                value={refKey(composerModel)}
-                onChange={(e) => setComposerModel(parseRefKey(e.target.value))}
+                value={refKey(composerModels[kind])}
+                onChange={(e) => setComposerModel(kind, parseRefKey(e.target.value))}
                 className="w-full rounded border border-gray-300 px-2 py-1 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
               >
                 <option value="">{t("composer_model.inherit_option")}</option>
@@ -879,6 +915,7 @@ function WorkFlowIOBubble({
 
       {node.step_kind === "llm_call" && (
         <>
+          <NodeInputBlock node={node} t={t} />
           {thinking && (
             <ThinkingBlock text={thinking} label={t("conversation.thinking")} />
           )}
@@ -909,7 +946,10 @@ function WorkFlowIOBubble({
       )}
 
       {node.step_kind === "judge_call" && (
-        <JudgeBubbleBody node={node} t={t} isRunning={isRunning} isFailed={isFailed} />
+        <>
+          <NodeInputBlock node={node} t={t} />
+          <JudgeBubbleBody node={node} t={t} isRunning={isRunning} isFailed={isFailed} />
+        </>
       )}
 
       {node.step_kind === "sub_agent_delegation" && (
@@ -938,11 +978,19 @@ function ToolCallBubbleBody({
   isRunning: boolean;
 }) {
   const result = node.tool_result;
+  const args = node.tool_args;
   return (
     <>
       <div className="mb-1 font-mono text-[12px] text-gray-700">
         {node.tool_name ?? "tool"}
       </div>
+      {args && Object.keys(args).length > 0 && (
+        <CollapsibleJSON
+          label={t("workflow.detail_tool_args")}
+          value={args}
+          defaultOpen={false}
+        />
+      )}
       {result ? (
         <pre
           className={[
@@ -1066,6 +1114,73 @@ function JudgeList({ label, items }: { label: string; items: string[] }) {
   );
 }
 
+/** Collapsible "Input (N msgs)" block rendered above the output in
+ * the upper bubble for llm_call / judge_call. Defaults to collapsed
+ * because prompts are usually large and noisy. */
+function NodeInputBlock({
+  node,
+  t,
+}: {
+  node: WorkFlowNode;
+  t: (k: string) => string;
+}) {
+  const [open, setOpen] = useState(false);
+  const msgs = node.input_messages;
+  if (!msgs || msgs.length === 0) return null;
+  return (
+    <div className="mb-1.5 rounded border border-gray-200 bg-gray-50/60">
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((v) => !v);
+        }}
+        className="flex w-full items-center justify-between gap-2 rounded px-1.5 py-0.5 text-left text-[10px] uppercase tracking-wide text-gray-500 hover:bg-gray-100"
+      >
+        <span>{t("workflow.detail_input_messages")} · {msgs.length}</span>
+        <span>{open ? "▾" : "▸"}</span>
+      </button>
+      {open && (
+        <div className="border-t border-gray-200 px-1.5 py-1">
+          <MessageList messages={msgs} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CollapsibleJSON({
+  label,
+  value,
+  defaultOpen,
+}: {
+  label: string;
+  value: unknown;
+  defaultOpen: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="mb-1.5 rounded border border-gray-200 bg-gray-50/60">
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((v) => !v);
+        }}
+        className="flex w-full items-center justify-between gap-2 rounded px-1.5 py-0.5 text-left text-[10px] uppercase tracking-wide text-gray-500 hover:bg-gray-100"
+      >
+        <span>{label}</span>
+        <span>{open ? "▾" : "▸"}</span>
+      </button>
+      {open && (
+        <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words border-t border-gray-200 px-1.5 py-1 font-mono text-[10px] text-gray-800">
+          {JSON.stringify(value, null, 2)}
+        </pre>
+      )}
+    </div>
+  );
+}
+
 function WorkFlowBranchSelector({
   wfNodes,
   fork,
@@ -1176,55 +1291,9 @@ function NodeDetailPanel({ node }: { node: WorkFlowNode | null }) {
         </DetailRow>
       )}
 
-      {node.step_kind === "tool_call" && (
-        <>
-          <DetailRow label={t("workflow.detail_tool_name")}>
-            <span className="font-mono">{node.tool_name ?? "—"}</span>
-          </DetailRow>
-          {node.tool_args && (
-            <DetailRow label={t("workflow.detail_tool_args")}>
-              <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-white px-1.5 py-1 font-mono text-[10px] text-gray-800">
-                {JSON.stringify(node.tool_args, null, 2)}
-              </pre>
-            </DetailRow>
-          )}
-          {node.tool_result && (
-            <DetailRow
-              label={
-                node.tool_result.is_error
-                  ? t("workflow.tool_error")
-                  : t("workflow.tool_result")
-              }
-            >
-              <pre
-                className={[
-                  "max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-white px-1.5 py-1 font-mono text-[10px]",
-                  node.tool_result.is_error ? "text-red-700" : "text-gray-800",
-                ].join(" ")}
-              >
-                {node.tool_result.content}
-              </pre>
-            </DetailRow>
-          )}
-        </>
-      )}
-
-      {node.step_kind === "judge_call" && node.judge_verdict && (
-        <DetailRow label={t("workflow.detail_judge_verdict")}>
-          <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-white px-1.5 py-1 font-mono text-[10px] text-gray-800">
-            {JSON.stringify(node.judge_verdict, null, 2)}
-          </pre>
-        </DetailRow>
-      )}
-
-      {node.input_messages && node.input_messages.length > 0 && (
-        <DetailRow label={t("workflow.detail_input_messages")}>
-          <MessageList messages={node.input_messages} />
-        </DetailRow>
-      )}
-      {node.output_message && (
-        <DetailRow label={t("workflow.detail_output_message")}>
-          <MessageList messages={[node.output_message]} />
+      {node.step_kind === "tool_call" && node.tool_name && (
+        <DetailRow label={t("workflow.detail_tool_name")}>
+          <span className="font-mono">{node.tool_name}</span>
         </DetailRow>
       )}
 

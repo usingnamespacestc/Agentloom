@@ -73,8 +73,11 @@ export const api = {
       description?: string | null;
       tags?: string[];
       default_model?: ProviderModelRef | null;
+      default_judge_model?: ProviderModelRef | null;
+      default_tool_call_model?: ProviderModelRef | null;
       default_execution_mode?: ExecutionMode;
       judge_retry_budget?: number;
+      disabled_tool_names?: string[];
     },
   ) =>
     request<{ ok: boolean }>(`/api/chatflows/${id}`, {
@@ -96,6 +99,8 @@ export const api = {
     text: string,
     parentId?: string,
     spawnModel?: ProviderModelRef | null,
+    judgeSpawnModel?: ProviderModelRef | null,
+    toolCallSpawnModel?: ProviderModelRef | null,
   ) =>
     request<SubmitTurnResponse>(`/api/chatflows/${id}/turns`, {
       method: "POST",
@@ -103,6 +108,8 @@ export const api = {
         text,
         parent_id: parentId ?? null,
         spawn_model: spawnModel ?? null,
+        judge_spawn_model: judgeSpawnModel ?? null,
+        tool_call_spawn_model: toolCallSpawnModel ?? null,
       }),
     }),
 
@@ -112,10 +119,18 @@ export const api = {
     text: string,
     source: PendingTurnSource = "web",
     spawnModel?: ProviderModelRef | null,
+    judgeSpawnModel?: ProviderModelRef | null,
+    toolCallSpawnModel?: ProviderModelRef | null,
   ) =>
     request<PendingTurn>(`/api/chatflows/${chatflowId}/nodes/${nodeId}/queue`, {
       method: "POST",
-      body: JSON.stringify({ text, source, spawn_model: spawnModel ?? null }),
+      body: JSON.stringify({
+        text,
+        source,
+        spawn_model: spawnModel ?? null,
+        judge_spawn_model: judgeSpawnModel ?? null,
+        tool_call_spawn_model: toolCallSpawnModel ?? null,
+      }),
     }),
 
   patchQueueItem: (chatflowId: string, nodeId: string, itemId: string, text: string) =>
@@ -226,9 +241,101 @@ export const api = {
       method: "POST",
     }),
 
+  // ---- mcp servers ----
+  listMCPServers: () => request<MCPServerState[]>("/api/mcp-servers"),
+
+  createMCPServer: (body: CreateMCPServerBody) =>
+    request<MCPServerState>("/api/mcp-servers", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  patchMCPServer: (id: string, patch: PatchMCPServerBody) =>
+    request<MCPServerState>(`/api/mcp-servers/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+
+  deleteMCPServer: (id: string) =>
+    request<{ ok: boolean }>(`/api/mcp-servers/${id}`, { method: "DELETE" }),
+
+  reconnectMCPServer: (id: string) =>
+    request<MCPServerState>(`/api/mcp-servers/${id}/reconnect`, {
+      method: "POST",
+    }),
+
+  // ---- tools ----
+  listTools: () => request<ToolDTO[]>("/api/tools"),
+
+  // ---- workspace settings ----
+  getWorkspaceSettings: () =>
+    request<WorkspaceSettingsDTO>("/api/workspace/settings"),
+
+  patchWorkspaceSettings: (patch: {
+    tool_states?: Record<string, ToolState>;
+  }) =>
+    request<WorkspaceSettingsDTO>("/api/workspace/settings", {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+
   /** SSE URL for a chatflow — pass to `new EventSource(...)`. */
   eventsUrl: (id: string) => `/api/chatflows/${id}/events`,
 };
+
+// ---- tool + workspace-settings types ----
+
+export interface ToolDTO {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+export type ToolState = "default_allow" | "available" | "disabled";
+
+export interface WorkspaceSettingsDTO {
+  tool_states: Record<string, ToolState>;
+}
+
+// ---- mcp types ----
+
+export type MCPServerKind = "http" | "stdio";
+
+export interface MCPServerState {
+  id: string;
+  server_id: string;
+  friendly_name: string;
+  kind: MCPServerKind;
+  enabled: boolean;
+  url: string | null;
+  command: string | null;
+  is_connected: boolean;
+  tool_count: number;
+  tool_names: string[];
+  last_error: string | null;
+}
+
+export interface CreateMCPServerBody {
+  server_id: string;
+  friendly_name: string;
+  kind: MCPServerKind;
+  url?: string | null;
+  headers?: Record<string, string>;
+  command?: string | null;
+  args?: string[];
+  env?: Record<string, string>;
+  enabled?: boolean;
+}
+
+export interface PatchMCPServerBody {
+  friendly_name?: string;
+  enabled?: boolean;
+  url?: string | null;
+  headers?: Record<string, string>;
+  command?: string | null;
+  args?: string[];
+  env?: Record<string, string>;
+}
 
 // ---- provider types ----
 

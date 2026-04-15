@@ -39,14 +39,21 @@ export function modelRefEquals(
 }
 
 /**
- * Categories of LLM call an edge can carry. Today only `llm` exists
- * end-to-end on the ChatNode snapshot (`resolved_model`). Future kinds
- * (`tool_call`, judge variants) will hang off the same per-edge
- * snapshot once the backend stores them.
+ * Categories of LLM call an edge can carry. ``llm`` is the main turn
+ * model (per-edge from the ChatNode's ``resolved_model``); ``judge`` and
+ * ``tool_call`` are ChatFlow-wide defaults that fall back to ``llm``
+ * when not pinned (mirrors the engine's WorkFlow.judge_model_override /
+ * tool_call_model_override stamping).
+ *
+ * Because judge / tool_call resolve to the *same* model on every edge
+ * (or fall back uniformly), their ribbon families end up covering the
+ * entire graph in one color — that's intentional. The main ``llm``
+ * ribbon is the only one that segments mid-chain when the user picks a
+ * different model in the composer.
  */
-export type ModelKind = "llm";
+export type ModelKind = "llm" | "judge" | "tool_call";
 
-export const MODEL_KINDS: ModelKind[] = ["llm"];
+export const MODEL_KINDS: ModelKind[] = ["llm", "judge", "tool_call"];
 
 /**
  * Palette for the hover ribbons. Color is keyed by the *actual model*
@@ -151,7 +158,7 @@ function shiftHsl(hex: string, dHueDeg: number, dLPct: number): string {
  */
 export function edgeModel(
   chatflow: ChatFlow,
-  _parentId: NodeId,
+  parentId: NodeId,
   childId: NodeId,
   kind: ModelKind,
 ): ProviderModelRef | null {
@@ -160,6 +167,16 @@ export function edgeModel(
   switch (kind) {
     case "llm":
       return child.resolved_model ?? chatflow.default_model;
+    case "judge":
+      return (
+        chatflow.default_judge_model ??
+        edgeModel(chatflow, parentId, childId, "llm")
+      );
+    case "tool_call":
+      return (
+        chatflow.default_tool_call_model ??
+        edgeModel(chatflow, parentId, childId, "llm")
+      );
   }
 }
 

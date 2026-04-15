@@ -130,6 +130,12 @@ class ToolRegistry:
         self._tools[tool.name] = tool
         return tool
 
+    def unregister(self, name: str) -> bool:
+        """Remove a tool by name. Returns True if removed, False if not
+        present. Used by MCP runtime when a server is disconnected so
+        its tools no longer appear in LLM prompts."""
+        return self._tools.pop(name, None) is not None
+
     def get(self, name: str) -> Tool:
         try:
             return self._tools[name]

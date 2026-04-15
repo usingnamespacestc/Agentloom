@@ -8,16 +8,48 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from agentloom import __version__
-from agentloom.api import chatflows, folders, health, providers, workflows
+from agentloom import __version__, tenancy_runtime
+from agentloom.api import (
+    chatflows,
+    folders,
+    health,
+    mcp_servers,
+    providers,
+    tools,
+    workflows,
+    workspace_settings as workspace_settings_api,
+)
 from agentloom.config import get_settings
+from agentloom.db.base import get_session_maker
+from agentloom.db.models.tenancy import DEFAULT_WORKSPACE_ID
+from agentloom.db.repositories.mcp_server import MCPServerRepository
+from agentloom.db.repositories.workspace_settings import WorkspaceSettingsRepository
+from agentloom.mcp import runtime as mcp_runtime
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup and shutdown hooks."""
-    # Future: DB init, Redis connect, MCP servers attach, rate limiter load
-    yield
+    mcp_runtime.init_runtime()
+    try:
+        session_maker = get_session_maker()
+        async with session_maker() as session:
+            settings_repo = WorkspaceSettingsRepository(
+                session, workspace_id=DEFAULT_WORKSPACE_ID
+            )
+            ws_settings = await settings_repo.get()
+            tenancy_runtime.set_settings(DEFAULT_WORKSPACE_ID, ws_settings)
+            repo = MCPServerRepository(session, workspace_id=DEFAULT_WORKSPACE_ID)
+            configs = await repo.list_all()
+        await mcp_runtime.load_and_connect_all(configs)
+    except Exception as exc:  # noqa: BLE001 — never fail-fast on MCP boot
+        import logging
+        logging.getLogger(__name__).exception("mcp: startup load failed")
+        print(f"mcp: startup load failed: {exc!r}", flush=True)
+    try:
+        yield
+    finally:
+        await mcp_runtime.close_all()
 
 
 def create_app() -> FastAPI:
@@ -42,6 +74,9 @@ def create_app() -> FastAPI:
     app.include_router(chatflows.router)
     app.include_router(folders.router)
     app.include_router(providers.router)
+    app.include_router(mcp_servers.router)
+    app.include_router(tools.router)
+    app.include_router(workspace_settings_api.router)
     return app
 
 

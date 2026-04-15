@@ -10,7 +10,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { api } from "@/lib/api";
-import type { ProviderSummary } from "@/lib/api";
+import type { MCPServerState, ProviderSummary, ToolDTO } from "@/lib/api";
 import { useChatFlowStore } from "@/store/chatflowStore";
 import type { ProviderModelRef } from "@/types/schema";
 
@@ -35,8 +35,21 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
   const patchChatFlow = useChatFlowStore((s) => s.patchChatFlow);
 
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
+  const [mcpServers, setMcpServers] = useState<MCPServerState[]>([]);
+  const [allTools, setAllTools] = useState<ToolDTO[]>([]);
   const [modelKey, setModelKey] = useState("");
+  const [judgeModelKey, setJudgeModelKey] = useState("");
+  const [toolCallModelKey, setToolCallModelKey] = useState("");
   const [retryBudgetStr, setRetryBudgetStr] = useState("");
+  // Per-tool visibility: set of built-in tool names the user has
+  // enabled for this chatflow. A tool is "checked" iff its name is
+  // NOT in the stored ``disabled_tool_names`` list.
+  const [enabledBuiltinNames, setEnabledBuiltinNames] = useState<string[]>([]);
+  // Which globally-enabled MCP servers are "checked" (= their tools
+  // are visible to this chatflow). Derived from the stored
+  // ``disabled_tool_names`` list on open: a server is checked iff
+  // none of its registered tool names are in that list.
+  const [enabledMcpIds, setEnabledMcpIds] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
 
   const loadProviders = useCallback(async () => {
@@ -48,13 +61,52 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
     }
   }, []);
 
+  const loadMcpServers = useCallback(async () => {
+    try {
+      const list = await api.listMCPServers();
+      setMcpServers(list);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const loadTools = useCallback(async () => {
+    try {
+      const list = await api.listTools();
+      setAllTools(list);
+    } catch {
+      // ignore
+    }
+  }, []);
+
   useEffect(() => {
     if (open) {
       void loadProviders();
+      void loadMcpServers();
+      void loadTools();
       setModelKey(refKey(chatflow?.default_model ?? null));
+      setJudgeModelKey(refKey(chatflow?.default_judge_model ?? null));
+      setToolCallModelKey(refKey(chatflow?.default_tool_call_model ?? null));
       setRetryBudgetStr(String(chatflow?.judge_retry_budget ?? 3));
     }
-  }, [open, chatflow, loadProviders]);
+  }, [open, chatflow, loadProviders, loadMcpServers, loadTools]);
+
+  // Derive per-tool checkbox state from the stored ``disabled_tool_names``.
+  // A built-in is "checked" iff its name is NOT on the denylist; an MCP
+  // server is checked iff none of its registered tools are.
+  useEffect(() => {
+    if (!open || !chatflow) return;
+    const disabled = new Set(chatflow.disabled_tool_names ?? []);
+    const builtinNames = allTools
+      .filter((tt) => !tt.name.startsWith("mcp__"))
+      .map((tt) => tt.name);
+    setEnabledBuiltinNames(builtinNames.filter((n) => !disabled.has(n)));
+    const enabled = mcpServers
+      .filter((s) => s.enabled)
+      .filter((s) => !s.tool_names.some((name) => disabled.has(name)))
+      .map((s) => s.id);
+    setEnabledMcpIds(enabled);
+  }, [open, chatflow, mcpServers, allTools]);
 
   const modelOptions = useMemo(() => {
     const out: Array<{ key: string; label: string; pinned: boolean }> = [];
@@ -86,9 +138,31 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
         Number.isFinite(parsed) && Number.isInteger(parsed) && parsed >= -1
           ? parsed
           : (chatflow?.judge_retry_budget ?? 3);
+      // Rebuild disabled_tool_names: preserve any stored entries the
+      // UI doesn't know about (e.g. tools from a disconnected MCP
+      // server), then append every built-in the user unchecked plus
+      // every tool name from MCP servers left unchecked.
+      const knownNames = new Set<string>([
+        ...allTools.map((tt) => tt.name),
+        ...mcpServers.flatMap((s) => s.tool_names),
+      ]);
+      const preserved = (chatflow?.disabled_tool_names ?? []).filter(
+        (name) => !knownNames.has(name),
+      );
+      const builtinHidden = allTools
+        .filter((tt) => !tt.name.startsWith("mcp__"))
+        .filter((tt) => !enabledBuiltinNames.includes(tt.name))
+        .map((tt) => tt.name);
+      const mcpHidden = mcpServers
+        .filter((s) => s.enabled && !enabledMcpIds.includes(s.id))
+        .flatMap((s) => s.tool_names);
+      const persistedDisabled = [...preserved, ...builtinHidden, ...mcpHidden];
       await patchChatFlow({
         default_model: parseRefKey(modelKey),
+        default_judge_model: parseRefKey(judgeModelKey),
+        default_tool_call_model: parseRefKey(toolCallModelKey),
         judge_retry_budget: budget,
+        disabled_tool_names: persistedDisabled,
       });
       onClose();
     } finally {
@@ -133,6 +207,24 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
             </p>
           )}
 
+          <ModelPicker
+            label={t("chatflow_settings.default_judge_model")}
+            hint={t("chatflow_settings.default_judge_model_hint")}
+            value={judgeModelKey}
+            options={modelOptions}
+            onChange={setJudgeModelKey}
+            inheritOption={t("chatflow_settings.inherit_main_model")}
+          />
+
+          <ModelPicker
+            label={t("chatflow_settings.default_tool_call_model")}
+            hint={t("chatflow_settings.default_tool_call_model_hint")}
+            value={toolCallModelKey}
+            options={modelOptions}
+            onChange={setToolCallModelKey}
+            inheritOption={t("chatflow_settings.inherit_main_model")}
+          />
+
           <label className="block">
             <span className="text-[11px] font-medium text-gray-500">
               {t("chatflow_settings.judge_retry_budget")}
@@ -150,6 +242,18 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
               {t("chatflow_settings.judge_retry_budget_hint")}
             </p>
           </label>
+
+          <BuiltinToolsSection
+            tools={allTools.filter((tt) => !tt.name.startsWith("mcp__"))}
+            selectedNames={enabledBuiltinNames}
+            onChange={setEnabledBuiltinNames}
+          />
+
+          <MCPEnablementSection
+            servers={mcpServers}
+            selectedIds={enabledMcpIds}
+            onChange={setEnabledMcpIds}
+          />
         </div>
 
         <div className="flex justify-end gap-2 border-t border-gray-100 px-5 py-3">
@@ -180,12 +284,18 @@ function ModelPicker({
   value,
   options,
   onChange,
+  inheritOption,
 }: {
   label: string;
   hint: string;
   value: string;
   options: Array<{ key: string; label: string; pinned: boolean }>;
   onChange: (v: string) => void;
+  /** When provided, render an extra ``""``-keyed option labeled with this
+   * string at the top of the list so the user can clear the pin (the
+   * empty key serializes back to ``null`` in patchChatFlow, meaning
+   * "fall back to default_model"). Used by the per-call-type pickers. */
+  inheritOption?: string;
 }) {
   const valueMissing = value !== "" && !options.some((o) => o.key === value);
   return (
@@ -196,6 +306,9 @@ function ModelPicker({
         onChange={(e) => onChange(e.target.value)}
         className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
       >
+        {inheritOption !== undefined && (
+          <option value="">{inheritOption}</option>
+        )}
         {valueMissing && <option value={value}>{value}</option>}
         {options.map((o) => (
           <option key={o.key} value={o.key}>
@@ -206,5 +319,138 @@ function ModelPicker({
       </select>
       <p className="mt-1 text-[10px] text-gray-400">{hint}</p>
     </label>
+  );
+}
+
+function MCPEnablementSection({
+  servers,
+  selectedIds,
+  onChange,
+}: {
+  servers: MCPServerState[];
+  selectedIds: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const { t } = useTranslation();
+  // Only globally-enabled servers are eligible — a globally-disabled
+  // server's tools aren't registered, so toggling it per-chatflow has
+  // no effect.
+  const eligible = servers.filter((s) => s.enabled);
+
+  if (eligible.length === 0) {
+    return (
+      <div>
+        <span className="text-[11px] font-medium text-gray-500">
+          {t("chatflow_settings.mcp_servers")}
+        </span>
+        <p className="mt-1 rounded border border-dashed border-gray-200 bg-gray-50 px-3 py-2 text-[11px] text-gray-500">
+          {t("chatflow_settings.mcp_no_global")}
+        </p>
+      </div>
+    );
+  }
+
+  const toggle = (id: string) => {
+    if (selectedIds.includes(id)) {
+      onChange(selectedIds.filter((x) => x !== id));
+    } else {
+      onChange([...selectedIds, id]);
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] font-medium text-gray-500">
+          {t("chatflow_settings.mcp_servers")}
+        </span>
+      </div>
+      <div className="mt-1 space-y-1 rounded border border-gray-200 p-2">
+        {eligible.map((s) => {
+          const checked = selectedIds.includes(s.id);
+          return (
+            <label
+              key={s.id}
+              className="flex items-center gap-2 rounded px-1.5 py-1 text-[11px] hover:bg-gray-50"
+            >
+              <input
+                type="checkbox"
+                checked={checked}
+                onChange={() => toggle(s.id)}
+              />
+              <span className="font-medium text-gray-700">{s.friendly_name}</span>
+              <span className="font-mono text-[9px] text-gray-400">{s.server_id}</span>
+              {s.is_connected ? (
+                <span className="ml-auto text-[9px] text-green-600">
+                  {s.tool_count} {t("mcp.tools")}
+                </span>
+              ) : (
+                <span className="ml-auto text-[9px] text-red-500">
+                  {t("mcp.disconnected")}
+                </span>
+              )}
+            </label>
+          );
+        })}
+      </div>
+      <p className="mt-1 text-[10px] text-gray-400">
+        {t("chatflow_settings.mcp_servers_hint")}
+      </p>
+    </div>
+  );
+}
+
+function BuiltinToolsSection({
+  tools,
+  selectedNames,
+  onChange,
+}: {
+  tools: ToolDTO[];
+  selectedNames: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const { t } = useTranslation();
+  if (tools.length === 0) return null;
+
+  const toggle = (name: string) => {
+    if (selectedNames.includes(name)) {
+      onChange(selectedNames.filter((x) => x !== name));
+    } else {
+      onChange([...selectedNames, name]);
+    }
+  };
+
+  return (
+    <div>
+      <span className="text-[11px] font-medium text-gray-500">
+        {t("chatflow_settings.builtin_tools")}
+      </span>
+      <div className="mt-1 space-y-1 rounded border border-gray-200 p-2">
+        {tools.map((tt) => {
+          const checked = selectedNames.includes(tt.name);
+          return (
+            <label
+              key={tt.name}
+              className="flex items-center gap-2 rounded px-1.5 py-1 text-[11px] hover:bg-gray-50"
+            >
+              <input
+                type="checkbox"
+                checked={checked}
+                onChange={() => toggle(tt.name)}
+              />
+              <span className="font-mono text-gray-700">{tt.name}</span>
+              {tt.description && (
+                <span className="ml-2 truncate text-[10px] text-gray-400">
+                  {tt.description}
+                </span>
+              )}
+            </label>
+          );
+        })}
+      </div>
+      <p className="mt-1 text-[10px] text-gray-400">
+        {t("chatflow_settings.builtin_tools_hint")}
+      </p>
+    </div>
   );
 }

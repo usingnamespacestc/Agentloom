@@ -265,9 +265,22 @@ export interface ChatFlow {
   nodes: Record<NodeId, ChatFlowNode>;
   root_ids: NodeId[];
   default_model: ProviderModelRef | null;
+  /** Per-call-type overrides of ``default_model``. Judge calls use
+   * ``default_judge_model`` when set; tool-call follow-up llm_calls use
+   * ``default_tool_call_model``. ``null`` means "fall back to the main
+   * turn model" — same model as the user's primary llm_call. */
+  default_judge_model: ProviderModelRef | null;
+  default_tool_call_model: ProviderModelRef | null;
   default_execution_mode: ExecutionMode;
   /** Hard cap on judge_post retry rounds. ``-1`` means unlimited. */
   judge_retry_budget: number;
+  /**
+   * Per-ChatFlow tool denylist — tool names hidden from every LLM call
+   * and refused at execute-time. Covers both built-ins (``Bash``,
+   * ``Read``, ...) and MCP tools (``mcp__<server>__<tool>``). Empty =
+   * no per-chatflow filter on top of the workspace defaults.
+   */
+  disabled_tool_names: string[];
   created_at: string;
 }
 

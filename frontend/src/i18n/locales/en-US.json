@@ -111,7 +111,9 @@
     "blockers": "Blockers",
     "missing_inputs": "Missing inputs",
     "critiques": "Critiques",
-    "issues": "Issues"
+    "issues": "Issues",
+    "blackboard": "Blackboard",
+    "blackboard_empty": "(no entries yet)"
   },
   "common": {
     "copied": "Copied"
@@ -132,11 +134,25 @@
   },
   "settings": {
     "title": "Global settings",
-    "tab_canvas": "Canvas"
+    "tab_canvas": "Canvas",
+    "tab_mcp": "MCP",
+    "tab_tools": "Tools"
+  },
+  "tools_panel": {
+    "title": "Tool visibility",
+    "description": "Three-way control per tool. Default-allow tools are visible to every new chatflow automatically. Available tools are registered but hidden by default — each chatflow must opt in. Disabled tools are blocked everywhere in this workspace.",
+    "builtin_heading": "Built-in tools",
+    "mcp_heading": "MCP tools",
+    "state_default_allow": "Default allow",
+    "state_available": "Available",
+    "state_disabled": "Disabled",
+    "legend": "Changes apply immediately to new LLM calls; in-flight requests already running are unaffected."
   },
   "composer_model": {
     "title": "Model for this turn",
-    "kind_llm": "LLM call",
+    "kind_llm": "LLM",
+    "kind_judge": "judge",
+    "kind_tool_call": "tool call",
     "inherit_option": "(inherit from previous node)",
     "button_label": "Model",
     "button_inherit": "Inherit",
@@ -146,6 +162,11 @@
     "title": "ChatFlow settings",
     "default_model": "Default model",
     "default_model_hint": "Used for every LLM call in this chatflow unless a node overrides it.",
+    "default_judge_model": "Judge model",
+    "default_judge_model_hint": "Routes pre/during/post judge calls to a separate model — useful for running a cheap verifier on top of an expensive main model. Inherit = same as default model.",
+    "default_tool_call_model": "Tool-call follow-up model",
+    "default_tool_call_model_hint": "Model used for the llm_call that runs after tool results come back. Letting a small model handle tool-routing keeps the main turn cheap.",
+    "inherit_main_model": "(inherit default model)",
     "no_models_hint": "No models configured yet. Add a provider and pin at least one model first.",
     "execution_mode": "Execution mode",
     "execution_mode_direct_short": "Direct",
@@ -158,7 +179,12 @@
     "execution_mode_semi_auto_hint": "Plan first, with pre/post judges to catch obvious issues. A failing judge bounces back to ask you.",
     "execution_mode_auto_hint": "Adds the during judge on top of semi-auto. Halts and asks you when revise exceeds budget.",
     "judge_retry_budget": "Judge retry budget",
-    "judge_retry_budget_hint": "How many times judge_post can ask the engine to redo failing subtasks before halting. Default 3. Use -1 for unlimited (the judge itself decides when to stop retrying)."
+    "judge_retry_budget_hint": "How many times judge_post can ask the engine to redo failing subtasks before halting. Default 3. Use -1 for unlimited (the judge itself decides when to stop retrying).",
+    "builtin_tools": "Built-in tools",
+    "builtin_tools_hint": "Untick to hide a tool from this chatflow's LLM calls. New chatflows inherit the workspace defaults (see Settings → Tools).",
+    "mcp_servers": "MCP servers enabled in this chatflow",
+    "mcp_servers_hint": "Untick a server to hide all of its tools from this chatflow's LLM calls.",
+    "mcp_no_global": "No MCP servers are globally enabled. Add one in Settings → MCP first."
   },
   "canvas_prefs": {
     "show_node_id": "Show node ID",
@@ -206,5 +232,40 @@
     "preset_openai": "OpenAI",
     "preset_anthropic": "Anthropic",
     "local_provider_hint": "For local servers (Ollama, LM Studio, vLLM, etc.): pick \"Custom\", set Type to \"OpenAI Compatible\", use their /v1 URL (e.g. http://localhost:11434/v1 for Ollama, http://localhost:1234/v1 for LM Studio), and choose \"No key\"."
+  },
+  "mcp": {
+    "title": "MCP Servers",
+    "add": "Add MCP server",
+    "edit": "Edit",
+    "delete": "Delete",
+    "delete_confirm": "Delete this MCP server? Its tools will disappear from active chatflows.",
+    "save": "Save",
+    "cancel": "Cancel",
+    "no_servers": "No MCP servers configured",
+    "server_id": "Server ID",
+    "server_id_hint": "Short identifier (lowercase, underscores) — appears in tool names as mcp__<id>__*.",
+    "friendly_name": "Friendly name",
+    "kind": "Connection",
+    "kind_http": "HTTP (remote)",
+    "kind_stdio": "Stdio (subprocess)",
+    "url": "URL",
+    "headers": "Headers (JSON)",
+    "command": "Command",
+    "args": "Args (one per line)",
+    "env": "Env (KEY=value, one per line)",
+    "enabled": "Enabled",
+    "enabled_hint": "Disabled servers stay registered but don't connect or expose tools.",
+    "connected": "connected",
+    "disconnected": "disconnected",
+    "tools": "tools",
+    "reconnect": "Reconnect",
+    "preset": "Preset",
+    "preset_custom": "Custom",
+    "preset_tavily": "Tavily Search",
+    "preset_deepwiki": "DeepWiki",
+    "preset_cloudflare_docs": "Cloudflare Docs",
+    "preset_context7": "Context7",
+    "preset_github": "GitHub",
+    "preset_exa": "Exa Search"
   }
 }

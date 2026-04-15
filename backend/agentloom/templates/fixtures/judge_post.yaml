@@ -39,6 +39,18 @@ params_schema:
     description: >
       Newline-separated ``id: description`` pairs so the judge can
       cite a location when flagging an issue.
+  layer_notes:
+    type: string
+    required: false
+    description: >
+      Layer-local blackboard. One block per sibling WorkNode that
+      finished in this WorkFlow (planner / worker / inner judges /
+      sub_agent_delegations / tool_calls), each with author node id,
+      role, and a one-line summary. Only judge_post receives this —
+      it gives the exit gate a sibling trail to evaluate the run as
+      a whole and to point ``redo_targets`` at specific node ids.
+      Empty when there are no notes (e.g. judge_pre halt before any
+      worker ran).
 plan:
   description:
     text: "judge_post universal exit gate"
@@ -80,6 +92,40 @@ plan:
                         ``redo_targets`` with the node ids you want re-
                         run (each with a short ``critique``); the engine
                         uses those hints to re-spawn just those nodes.
+
+                        HARD RULES for retry — violating these wastes
+                        compute and produces a worse final answer:
+
+                          (a) ``retry`` is ONLY for failures the
+                              re-spawned node can fix on its own given
+                              your critique. If your honest critique
+                              would be "the user must adjust X / loosen
+                              Y / provide Z" — that is NOT fixable by
+                              retry. Choose ``fail`` instead and put
+                              the same content into ``user_message``.
+                              Re-spawning a node with a critique that
+                              says "needs user input" just makes the
+                              new node refuse for the same reason, and
+                              you'll be back here next round.
+
+                          (b) Do NOT list a node in ``redo_targets``
+                              just because it was downstream-blocked
+                              by another failure (e.g. a merge/
+                              aggregation step that had nothing to
+                              merge because an upstream subtask
+                              failed). Only list nodes whose own
+                              behavior you want changed. Downstream
+                              consumers re-run automatically when their
+                              upstream is re-spawned and produces a
+                              new output.
+
+                          (c) If the same subtask failed in a previous
+                              retry round with the same kind of
+                              critique (e.g. "constraints conflict",
+                              "infeasible as specified"), do NOT retry
+                              it again — that's a loop. Choose
+                              ``fail`` and surface the issue to the
+                              user.
               - fail:   the WorkFlow cannot succeed as built (or a halt
                         condition fired before completion). Write a
                         ``user_message`` explaining the situation and
@@ -128,9 +174,20 @@ plan:
                     ``retry`` with ``redo_targets`` naming the failed
                     subtasks' ids with specific critiques, OR
                     ``accept`` with a caveat in ``merged_response``
-                    noting what couldn't be delivered. Prefer retry
-                    if the failure looks fixable (infeasibility was a
-                    planner mistake, worker error was transient).
+                    noting what couldn't be delivered, OR ``fail``
+                    if neither a re-run nor a caveat is right. Pick
+                    by applying the retry HARD RULES above:
+                      - The failure is a planner mistake the new
+                        spawn can sidestep (wrong inputs, missing
+                        step) → ``retry``.
+                      - The failure was a transient worker error
+                        (network, parse) → ``retry``.
+                      - The failure is genuine infeasibility surfaced
+                        by the worker after an honest attempt
+                        (constraints conflict, requires user
+                        adjustment) → ``fail``. Do not retry.
+                      - The failure is non-load-bearing in hindsight
+                        → ``accept`` with a caveat.
                   * ALL subtasks failed, or every successful one is
                     off-topic: ``fail`` with a ``user_message``
                     restating what couldn't be done and asking how
@@ -212,4 +269,10 @@ plan:
             Upstream summary
             ----------------
             {{ upstream_summary }}
+            {% if layer_notes %}
+
+            Layer notes (sibling WorkNode trail; cite ids in redo_targets)
+            --------------------------------------------------------------
+            {{ layer_notes }}
+            {% endif %}
   root_ids: ["judge_post_root"]

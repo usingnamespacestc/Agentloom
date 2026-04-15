@@ -52,8 +52,11 @@ function twoBranchFlow(): ChatFlow {
     description: null,
     tags: [],
     default_model: null,
+    default_judge_model: null,
+    default_tool_call_model: null,
     default_execution_mode: 'direct',
     judge_retry_budget: 3,
+      disabled_tool_names: [],
     root_ids: ["a"],
     nodes: {
       a: node("a", [], "hello", "hi there", 0),

@@ -114,8 +114,11 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         description: str | None = ...,  # type: ignore[assignment]
         tags: list[str] | None = ...,  # type: ignore[assignment]
         default_model: ProviderModelRef | None = ...,  # type: ignore[assignment]
+        default_judge_model: ProviderModelRef | None = ...,  # type: ignore[assignment]
+        default_tool_call_model: ProviderModelRef | None = ...,  # type: ignore[assignment]
         default_execution_mode: ExecutionMode | None = ...,  # type: ignore[assignment]
         judge_retry_budget: int | None = ...,  # type: ignore[assignment]
+        disabled_tool_names: list[str] | None = ...,  # type: ignore[assignment]
     ) -> None:
         """Update metadata fields. Pass ``...`` (default) to skip a field.
 
@@ -149,12 +152,27 @@ class ChatFlowRepository(WorkspaceScopedRepository):
             payload["default_model"] = (
                 default_model.model_dump(mode="json") if default_model else None
             )
+        if default_judge_model is not ...:
+            payload["default_judge_model"] = (
+                default_judge_model.model_dump(mode="json")
+                if default_judge_model
+                else None
+            )
+        if default_tool_call_model is not ...:
+            payload["default_tool_call_model"] = (
+                default_tool_call_model.model_dump(mode="json")
+                if default_tool_call_model
+                else None
+            )
         if default_execution_mode is not ...:
             if default_execution_mode is not None:
                 payload["default_execution_mode"] = default_execution_mode.value
         if judge_retry_budget is not ...:
             if judge_retry_budget is not None:
                 payload["judge_retry_budget"] = judge_retry_budget
+        if disabled_tool_names is not ...:
+            if disabled_tool_names is not None:
+                payload["disabled_tool_names"] = list(disabled_tool_names)
         row.payload = payload
         await self.session.flush()
 
