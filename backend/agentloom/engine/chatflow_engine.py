@@ -1983,18 +1983,19 @@ class ChatFlowEngine:
         marks the ChatNode FAILED, surfacing the crash to the user
         instead of silently falling through to the planner's raw plan
         JSON via ``_terminal_llm_call``.
+
+        ``parent_ids`` is empty for pre_judge (workflow-root entry) and
+        for sub-WorkFlow seed judges; group those under a sentinel key
+        so the crash budget still applies.
         """
-        if not failed_judge.parent_ids:
-            return
-        parent_id = failed_judge.parent_ids[0]
+        parent_key = failed_judge.parent_ids[0] if failed_judge.parent_ids else ""
         crashes = sum(
             1
             for n in workflow.nodes.values()
             if n.step_kind == StepKind.JUDGE_CALL
             and n.judge_variant == failed_judge.judge_variant
             and n.status == NodeStatus.FAILED
-            and n.parent_ids
-            and n.parent_ids[0] == parent_id
+            and (n.parent_ids[0] if n.parent_ids else "") == parent_key
         )
         if crashes > _JUDGE_CRASH_RETRY_BUDGET:
             return
@@ -2944,9 +2945,13 @@ def _judge_crash_unrecoverable(workflow: WorkFlow) -> str | None:
     ]
     by_group: dict[tuple[str, str], list[WorkFlowNode]] = {}
     for j in judges:
-        if not j.parent_ids or j.judge_variant is None:
+        if j.judge_variant is None:
             continue
-        key = (j.parent_ids[0], j.judge_variant.value)
+        # pre_judge (and sub-WorkFlow seed judges) have empty
+        # parent_ids; bucket those under a sentinel so they still
+        # participate in the unrecoverable-group check.
+        parent_key = j.parent_ids[0] if j.parent_ids else ""
+        key = (parent_key, j.judge_variant.value)
         by_group.setdefault(key, []).append(j)
     last_failure: WorkFlowNode | None = None
     for siblings in by_group.values():
