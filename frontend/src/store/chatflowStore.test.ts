@@ -313,6 +313,52 @@ describe("chatflowStore", () => {
     expect(s.chatflow?.nodes.n1.workflow.nodes.w1.status).toBe("succeeded");
   });
 
+  it("applyEvent appends chat.workflow.node.token deltas to per-node buffer without refetching", () => {
+    useChatFlowStore.getState().setChatFlow(seedChatFlow());
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const ev = (delta: string): WorkFlowEvent => ({
+      kind: "chat.workflow.node.token",
+      workflow_id: "chat-1",
+      node_id: "w1",
+      data: { delta },
+      at: "2026-04-15T00:00:00Z",
+    });
+
+    useChatFlowStore.getState().applyEvent(ev("Hel"));
+    useChatFlowStore.getState().applyEvent(ev("lo "));
+    useChatFlowStore.getState().applyEvent(ev("world"));
+
+    expect(useChatFlowStore.getState().streamingDeltas.w1).toBe("Hello world");
+    // Token events MUST NOT trigger a refresh — they fire per provider
+    // chunk and a long generation can produce 100+ events.
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("applyEvent clears streamingDeltas[node_id] on terminal worknode events", () => {
+    useChatFlowStore.getState().setChatFlow(seedChatFlow());
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", { status: 200 })));
+
+    useChatFlowStore.getState().applyEvent({
+      kind: "chat.workflow.node.token",
+      workflow_id: "chat-1",
+      node_id: "w1",
+      data: { delta: "partial" },
+      at: "2026-04-15T00:00:00Z",
+    });
+    expect(useChatFlowStore.getState().streamingDeltas.w1).toBe("partial");
+
+    useChatFlowStore.getState().applyEvent({
+      kind: "chat.workflow.node.succeeded",
+      workflow_id: "chat-1",
+      node_id: "w1",
+      data: {},
+      at: "2026-04-15T00:00:01Z",
+    });
+    expect(useChatFlowStore.getState().streamingDeltas.w1).toBeUndefined();
+  });
+
   it("applyEvent ignores unknown node ids for status events", () => {
     useChatFlowStore.getState().setChatFlow(seedChatFlow());
     const before = useChatFlowStore.getState().chatflow;

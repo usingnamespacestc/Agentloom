@@ -127,6 +127,7 @@ class OpenAICompatAdapter(ProviderAdapter):
         reasoning_content = (
             msg.get("reasoning_content")
             or msg.get("thinking_content")
+            or msg.get("reasoning")
             or ""
         )
         if reasoning_content:
@@ -204,10 +205,10 @@ class OpenAICompatAdapter(ProviderAdapter):
             payload["max_tokens"] = max_tokens
         if on_token is not None:
             payload["stream"] = True
-            # OpenAI requires this opt-in to ship usage with stream;
-            # most compatible servers (Ollama, vLLM, OpenRouter)
-            # tolerate it as a no-op when unsupported.
-            payload["stream_options"] = {"include_usage": True}
+            # We previously sent ``stream_options.include_usage`` here,
+            # but Ollama's older ``/v1`` shim ignored it and we don't
+            # need usage mid-stream — the final chunk's ``usage`` is
+            # delivered without the opt-in on every backend we target.
         if extra:
             payload.update(extra)
 
@@ -331,6 +332,7 @@ class OpenAICompatAdapter(ProviderAdapter):
             rc = (
                 delta.get("reasoning_content")
                 or delta.get("thinking_content")
+                or delta.get("reasoning")
                 or ""
             )
             if rc:
