@@ -322,7 +322,9 @@ class AnthropicNativeAdapter(ProviderAdapter):
                 data = resp.json()
                 return self._parse_response(data, fallback_model=model)
             except httpx.RequestError as e:
-                last_error = ProviderError(f"network error: {e}")
+                last_error = ProviderError(
+                    f"network error: {type(e).__name__}: {e}".rstrip(": ")
+                )
                 await asyncio.sleep(2**attempt)
         assert last_error is not None
         raise last_error

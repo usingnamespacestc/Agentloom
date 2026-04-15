@@ -227,7 +227,13 @@ class OpenAICompatAdapter(ProviderAdapter):
                 data = resp.json()
                 return self._parse_response(data, fallback_model=model)
             except httpx.RequestError as e:
-                last_error = ProviderError(f"network error: {e}")
+                # ``str(e)`` is empty for many httpx exceptions
+                # (ReadTimeout, ConnectTimeout, ...), which strips the
+                # only signal you have for diagnosing a "network error: "
+                # in the UI. Keep the exception class name.
+                last_error = ProviderError(
+                    f"network error: {type(e).__name__}: {e}".rstrip(": ")
+                )
                 await asyncio.sleep(2**attempt)
         assert last_error is not None
         raise last_error
