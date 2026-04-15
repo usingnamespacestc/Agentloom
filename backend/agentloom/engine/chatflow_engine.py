@@ -92,13 +92,15 @@ log = logging.getLogger(__name__)
 _STOCK_INPUTS = "(prior conversation context — see messages below)"
 _STOCK_EXPECTED_OUTCOME = "Helpful, accurate response to the user's request"
 
-#: How many times we re-spawn a crashed post_judge (provider error,
+#: How many times we re-spawn a crashed judge_call (provider error,
 #: malformed transport, etc.) before giving up and bubbling the
-#: failure up to the ChatNode. Distinct from ``judge_retry_budget``
-#: which counts judge-issued ``retry`` verdicts; a network blip
-#: shouldn't eat into the legit redo budget. 2 retries = 3 attempts
-#: total; tuned for transient provider errors, not persistent bugs.
-_POST_JUDGE_CRASH_RETRY_BUDGET = 2
+#: failure up to the ChatNode. Applies to every judge variant
+#: (pre / planner_judge / worker_judge / post). Distinct from
+#: ``judge_retry_budget`` which counts judge-issued ``retry``
+#: verdicts; a network blip shouldn't eat into the legit redo
+#: budget. 2 retries = 3 attempts total; tuned for transient
+#: provider errors, not persistent bugs.
+_JUDGE_CRASH_RETRY_BUDGET = 2
 
 
 def _chat_inherited_model(
@@ -1200,16 +1202,14 @@ class ChatFlowEngine:
             user_message_text, context_wire = _context_for(workflow)
             switches = derive_switches_from_mode(workflow.execution_mode)
 
-            # FAILED nodes only get special handling for post_judge
-            # crashes (auto-retry). Every other handler reads
-            # judge_verdict / output_message and would no-op or do the
-            # wrong thing on a FAILED node, so short-circuit early.
+            # FAILED nodes only get special handling for judge_call
+            # crashes (auto-retry, applies to every variant). Every
+            # other handler reads judge_verdict / output_message and
+            # would no-op or do the wrong thing on a FAILED node, so
+            # short-circuit early.
             if node.status == NodeStatus.FAILED:
-                if (
-                    node.step_kind == StepKind.JUDGE_CALL
-                    and node.judge_variant == JudgeVariant.POST
-                ):
-                    self._after_judge_post_failed(workflow, node)
+                if node.step_kind == StepKind.JUDGE_CALL:
+                    self._after_judge_failed(workflow, node)
                 return
 
             if node.step_kind == StepKind.JUDGE_CALL:
@@ -1970,45 +1970,45 @@ class ChatFlowEngine:
         )
         aggregator.parent_ids = [m.id for m in members]
 
-    def _after_judge_post_failed(
+    def _after_judge_failed(
         self,
         workflow: WorkFlow,
-        failed_post: WorkFlowNode,
+        failed_judge: WorkFlowNode,
     ) -> None:
-        """A post_judge raised an exception (network blip, malformed
-        transport response). Re-spawn a fresh sibling under the same
-        parent so the engine picks it up next pass. After
-        ``_POST_JUDGE_CRASH_RETRY_BUDGET`` crashes for the same parent
-        we stop respawning; the outer ``_execute_node`` then sees no
-        successful post_judge and marks the ChatNode FAILED, surfacing
-        the crash to the user instead of silently falling through to
-        the planner's raw decompose JSON via ``_terminal_llm_call``.
+        """A judge_call (any variant) raised an exception. Re-spawn a
+        fresh sibling under the same parent so the engine picks it up
+        next pass. After ``_JUDGE_CRASH_RETRY_BUDGET`` crashes for the
+        same parent + variant we stop respawning; the outer
+        ``_execute_node`` then sees an unrecoverable judge crash and
+        marks the ChatNode FAILED, surfacing the crash to the user
+        instead of silently falling through to the planner's raw plan
+        JSON via ``_terminal_llm_call``.
         """
-        if not failed_post.parent_ids:
+        if not failed_judge.parent_ids:
             return
-        parent_id = failed_post.parent_ids[0]
+        parent_id = failed_judge.parent_ids[0]
         crashes = sum(
             1
             for n in workflow.nodes.values()
             if n.step_kind == StepKind.JUDGE_CALL
-            and n.judge_variant == JudgeVariant.POST
+            and n.judge_variant == failed_judge.judge_variant
             and n.status == NodeStatus.FAILED
             and n.parent_ids
             and n.parent_ids[0] == parent_id
         )
-        if crashes > _POST_JUDGE_CRASH_RETRY_BUDGET:
+        if crashes > _JUDGE_CRASH_RETRY_BUDGET:
             return
         clone = WorkFlowNode(
             step_kind=StepKind.JUDGE_CALL,
-            judge_variant=JudgeVariant.POST,
-            role=failed_post.role,
-            parent_ids=list(failed_post.parent_ids),
-            judge_target_id=failed_post.judge_target_id,
-            input_messages=list(failed_post.input_messages or []),
-            model_override=failed_post.model_override,
-            description=failed_post.description,
-            inputs=failed_post.inputs,
-            expected_outcome=failed_post.expected_outcome,
+            judge_variant=failed_judge.judge_variant,
+            role=failed_judge.role,
+            parent_ids=list(failed_judge.parent_ids),
+            judge_target_id=failed_judge.judge_target_id,
+            input_messages=list(failed_judge.input_messages or []),
+            model_override=failed_judge.model_override,
+            description=failed_judge.description,
+            inputs=failed_judge.inputs,
+            expected_outcome=failed_judge.expected_outcome,
         )
         workflow.add_node(clone)
 
@@ -2176,18 +2176,18 @@ class ChatFlowEngine:
                 # raw draft can't shadow the post-judge's verdict.
                 chat_node.agent_response = EditableText.by_agent(judge_post_text)
                 chat_node.status = NodeStatus.SUCCEEDED
-            elif (post_crash_error := _post_judge_crash_unrecoverable(
+            elif (judge_crash_error := _judge_crash_unrecoverable(
                 chat_node.workflow
             )) is not None:
-                # post_judge crashed (e.g. ProviderError) and exhausted
-                # its retry budget. Without this branch we'd fall
-                # through to _terminal_llm_call, which in decompose
-                # mode returns the planner's raw plan JSON — that
-                # silently degrades a failed turn to a SUCCEEDED ChatNode
-                # whose agent_response is a JSON dump. Surface the
-                # crash instead.
+                # A judge_call (any variant) crashed (e.g. ProviderError)
+                # and exhausted its retry budget. Without this branch
+                # we'd fall through to _terminal_llm_call, which in
+                # decompose mode returns the planner's raw plan JSON —
+                # that silently degrades a failed turn to a SUCCEEDED
+                # ChatNode whose agent_response is a JSON dump. Surface
+                # the crash instead.
                 chat_node.status = NodeStatus.FAILED
-                chat_node.error = post_crash_error
+                chat_node.error = judge_crash_error
             elif terminal is None:
                 chat_node.status = NodeStatus.FAILED
                 chat_node.error = "inner workflow had no terminal llm_call"
@@ -2920,32 +2920,55 @@ def _redo_clone_classification(m: WorkFlowNode) -> tuple[str, str]:
     return ("empty", "(clone produced no output)")
 
 
-def _post_judge_crash_unrecoverable(workflow: WorkFlow) -> str | None:
-    """Returns the most recent post_judge's error string iff at least one
-    post_judge exists and the most recently created one is FAILED. Used
-    by ``_execute_node`` to mark the ChatNode FAILED instead of falling
-    through to ``_terminal_llm_call`` (which in decompose mode returns
-    the planner's raw plan JSON — see _after_judge_post_failed).
+def _judge_crash_unrecoverable(workflow: WorkFlow) -> str | None:
+    """Returns an error string iff a judge_call (any variant) crashed
+    and its retry budget is exhausted, with no successful post_judge
+    output to compensate. Used by ``_execute_node`` to mark the
+    ChatNode FAILED instead of falling through to ``_terminal_llm_call``
+    (which in decompose mode returns the planner's raw plan JSON —
+    see ``_after_judge_failed``).
 
     Caller must check ``_judge_post_response_text`` first; if any
-    post_judge produced ``merged_response`` we already have a usable
-    reply and shouldn't fail the turn just because a sibling crashed.
+    post_judge produced ``merged_response`` we have a usable reply
+    and shouldn't fail the turn just because a sibling crashed.
+
+    For each (parent_id, variant) group with a FAILED judge, check
+    whether a SUCCEEDED sibling exists — that means a retry succeeded
+    and the chain moved forward. Only groups where every sibling is
+    FAILED count as unrecoverable.
     """
-    posts = sorted(
-        (
-            n
-            for n in workflow.nodes.values()
-            if n.step_kind == StepKind.JUDGE_CALL
-            and n.judge_variant == JudgeVariant.POST
-        ),
-        key=lambda n: n.created_at,
+    judges = [
+        n
+        for n in workflow.nodes.values()
+        if n.step_kind == StepKind.JUDGE_CALL
+    ]
+    by_group: dict[tuple[str, str], list[WorkFlowNode]] = {}
+    for j in judges:
+        if not j.parent_ids or j.judge_variant is None:
+            continue
+        key = (j.parent_ids[0], j.judge_variant.value)
+        by_group.setdefault(key, []).append(j)
+    last_failure: WorkFlowNode | None = None
+    for siblings in by_group.values():
+        if any(s.status == NodeStatus.SUCCEEDED for s in siblings):
+            continue
+        failed = [s for s in siblings if s.status == NodeStatus.FAILED]
+        if not failed:
+            continue
+        newest = max(failed, key=lambda n: n.created_at)
+        if last_failure is None or newest.created_at > last_failure.created_at:
+            last_failure = newest
+    if last_failure is None:
+        return None
+    variant = (
+        last_failure.judge_variant.value
+        if last_failure.judge_variant is not None
+        else "judge"
     )
-    if not posts:
-        return None
-    last = posts[-1]
-    if last.status != NodeStatus.FAILED:
-        return None
-    return f"post_judge crashed after retries: {last.error or 'unknown error'}"
+    return (
+        f"{variant} judge crashed after retries: "
+        f"{last_failure.error or 'unknown error'}"
+    )
 
 
 def _judge_post_response_text(workflow: WorkFlow) -> str | None:
@@ -3183,10 +3206,16 @@ def _terminal_llm_call(workflow: WorkFlow) -> WorkFlowNode | None:
     """
     if not workflow.nodes:
         return None
+    # Exclude planners — their output is plan JSON for the inner
+    # pipeline, never a user-facing reply. If the chain crashed before
+    # reaching a worker / terminal llm_call, the caller's
+    # ``_judge_crash_unrecoverable`` branch should mark FAILED rather
+    # than hand the user the planner's brainstorming output.
     llm_calls = [
         n
         for n in workflow.nodes.values()
         if n.step_kind == StepKind.LLM_CALL
+        and n.role != WorkNodeRole.PLANNER
     ]
     if not llm_calls:
         return None
