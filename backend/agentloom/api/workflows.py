@@ -417,9 +417,14 @@ def _provider_call_from_settings():
                 (m for m in config.available_models if m.id == model_id),
                 None,
             )
-            max_tokens: int | None = None
+            _FALLBACK_MAX_TOKENS = 8192
+            max_tokens: int = _FALLBACK_MAX_TOKENS
             if model_info is not None:
-                max_tokens = model_info.max_output_tokens or model_info.context_window
+                max_tokens = (
+                    model_info.max_output_tokens
+                    or model_info.context_window
+                    or _FALLBACK_MAX_TOKENS
+                )
 
             return await adapter.chat(
                 messages=messages,
