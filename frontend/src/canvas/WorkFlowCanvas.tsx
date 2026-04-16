@@ -30,15 +30,17 @@ import "@xyflow/react/dist/style.css";
 import { useTranslation } from "react-i18next";
 
 import { layoutDag } from "./layout";
+import { CanvasContextMenu } from "./CanvasContextMenu";
 import { contextWindowMap } from "./ChatFlowCanvas";
 import { WorkFlowBlackboard } from "./WorkFlowBlackboard";
+import { StickyNoteNode, type StickyNoteData } from "./nodes/StickyNoteNode";
 import { WorkFlowNodeCard, type WorkFlowNodeData } from "./nodes/WorkFlowNodeCard";
 import { api } from "@/lib/api";
 import type { ProviderSummary } from "@/lib/api";
 import { useChatFlowStore } from "@/store/chatflowStore";
 import type { NodeId, WorkFlow, WorkFlowNode } from "@/types/schema";
 
-const NODE_TYPES = { workflow: WorkFlowNodeCard };
+const NODE_TYPES = { workflow: WorkFlowNodeCard, stickyNote: StickyNoteNode };
 
 export interface WorkFlowCanvasProps {
   workflow: WorkFlow | null;
@@ -66,6 +68,45 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, nested }: WorkFlowCanv
   const selectWorkflowNode = useChatFlowStore((s) => s.selectWorkflowNode);
   const reactFlow = useReactFlow();
 
+  // Sticky notes
+  const [stickyNotes, setStickyNotes] = useState<Map<string, { x: number; y: number; text: string }>>(new Map());
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; flowX: number; flowY: number } | null>(null);
+  const noteCounter = useRef(0);
+
+  const onNoteTextChange = useCallback((id: string, text: string) => {
+    setStickyNotes((prev) => {
+      const next = new Map(prev);
+      const existing = next.get(id);
+      if (existing) next.set(id, { ...existing, text });
+      return next;
+    });
+  }, []);
+
+  const onNoteDelete = useCallback((id: string) => {
+    setStickyNotes((prev) => {
+      const next = new Map(prev);
+      next.delete(id);
+      return next;
+    });
+  }, []);
+
+  const handlePaneContextMenu = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const flowPos = reactFlow.screenToFlowPosition({ x: event.clientX - bounds.left, y: event.clientY - bounds.top });
+    setCtxMenu({ x: event.clientX, y: event.clientY, flowX: flowPos.x, flowY: flowPos.y });
+  }, [reactFlow]);
+
+  const handleInsertNote = useCallback(() => {
+    if (!ctxMenu) return;
+    const id = `_sticky_${++noteCounter.current}`;
+    setStickyNotes((prev) => {
+      const next = new Map(prev);
+      next.set(id, { x: ctxMenu.flowX, y: ctxMenu.flowY, text: "" });
+      return next;
+    });
+  }, [ctxMenu]);
+
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
   useEffect(() => {
     let cancelled = false;
@@ -76,7 +117,8 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, nested }: WorkFlowCanv
   }, []);
   const ctxWindowByModel = useMemo(() => contextWindowMap(providers), [providers]);
 
-  const [nodes, setNodes] = useState<Node<WorkFlowNodeData>[]>([]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [nodes, setNodes] = useState<Node<any>[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const dragPositions = useRef<Record<string, { x: number; y: number }>>({});
   const dirtyPositions = useRef<Set<string>>(new Set());
@@ -108,9 +150,17 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, nested }: WorkFlowCanv
       ...n,
       position: dragPositions.current[n.id] ?? n.position,
     }));
-    setNodes(merged);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stickyNodes: Node<any>[] = [...stickyNotes.entries()].map(([id, note]) => ({
+      id,
+      type: "stickyNote",
+      position: dragPositions.current[id] ?? { x: note.x, y: note.y },
+      data: { text: note.text, onTextChange: onNoteTextChange, onDelete: onNoteDelete } satisfies StickyNoteData,
+      selectable: false,
+    }));
+    setNodes([...merged, ...stickyNodes]);
     setEdges(laid.edges);
-  }, [workflow, workflowSelectedNodeId, ctxWindowByModel]);
+  }, [workflow, workflowSelectedNodeId, ctxWindowByModel, stickyNotes, onNoteTextChange, onNoteDelete]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     const filtered = changes.filter((c) => c.type !== "select");
@@ -121,7 +171,8 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, nested }: WorkFlowCanv
         dirtyPositions.current.add(c.id);
       }
     }
-    setNodes((ns) => applyNodeChanges(filtered, ns) as Node<WorkFlowNodeData>[]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    setNodes((ns) => applyNodeChanges(filtered, ns) as Node<any>[]);
 
     if (dirtyPositions.current.size > 0) {
       if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -170,13 +221,15 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, nested }: WorkFlowCanv
   }
 
   return (
-    <div data-testid="workflow-canvas" className="relative h-full w-full">
+    <div data-testid="workflow-canvas" className="relative h-full w-full" onClick={() => setCtxMenu(null)}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
         nodeTypes={NODE_TYPES}
         onNodeClick={handleNodeClick}
         onNodesChange={onNodesChange}
+        onPaneContextMenu={handlePaneContextMenu}
+        onPaneClick={() => setCtxMenu(null)}
         nodesDraggable
         nodesConnectable={false}
         edgesFocusable={false}
@@ -188,6 +241,14 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, nested }: WorkFlowCanv
         <Background />
         <Controls showInteractive={false} />
       </ReactFlow>
+      {ctxMenu && (
+        <CanvasContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          onInsertNote={handleInsertNote}
+          onClose={() => setCtxMenu(null)}
+        />
+      )}
       <WorkFlowBlackboard
         notes={workflow.shared_notes}
         selectedNodeId={workflowSelectedNodeId}

@@ -115,6 +115,9 @@
     "blackboard": "Blackboard",
     "blackboard_empty": "(no entries yet)"
   },
+  "canvas": {
+    "insert_note": "Insert note"
+  },
   "common": {
     "copied": "Copied",
     "copy": "Copy"

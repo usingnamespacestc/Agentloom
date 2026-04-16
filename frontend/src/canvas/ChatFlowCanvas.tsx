@@ -38,9 +38,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ReactFlow,
+  ReactFlowProvider,
   Background,
   Controls,
   applyNodeChanges,
+  useReactFlow,
   type Edge,
   type Node,
   type NodeChange,
@@ -50,9 +52,11 @@ import "@xyflow/react/dist/style.css";
 import { useTranslation } from "react-i18next";
 
 import { layoutDag } from "./layout";
+import { CanvasContextMenu } from "./CanvasContextMenu";
 import { ModelRibbonLayer } from "./ModelRibbonLayer";
 import { MODEL_KINDS, colorForModel, edgeModel } from "./effectiveModel";
 import { ChatFlowNodeCard, type ChatFlowNodeData } from "./nodes/ChatFlowNodeCard";
+import { StickyNoteNode, type StickyNoteData } from "./nodes/StickyNoteNode";
 import { api, type ProviderSummary } from "@/lib/api";
 import { useChatFlowStore } from "@/store/chatflowStore";
 import type { ChatFlow, ChatFlowNode, NodeId, ProviderModelRef } from "@/types/schema";
@@ -63,13 +67,21 @@ interface ContextMenuState {
   y: number;
 }
 
-const NODE_TYPES = { chatflow: ChatFlowNodeCard };
+const NODE_TYPES = { chatflow: ChatFlowNodeCard, stickyNote: StickyNoteNode };
 
 export interface ChatFlowCanvasProps {
   chatflow: ChatFlow | null;
 }
 
-export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
+export function ChatFlowCanvas(props: ChatFlowCanvasProps) {
+  return (
+    <ReactFlowProvider>
+      <ChatFlowCanvasInner {...props} />
+    </ReactFlowProvider>
+  );
+}
+
+function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
   const { t } = useTranslation();
   const selectedNodeId = useChatFlowStore((s) => s.selectedNodeId);
   const selectNode = useChatFlowStore((s) => s.selectNode);
@@ -97,6 +109,46 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
 
   // Context menu state
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const reactFlow = useReactFlow();
+
+  // Sticky notes (pane right-click)
+  const [stickyNotes, setStickyNotes] = useState<Map<string, { x: number; y: number; text: string }>>(new Map());
+  const [paneMenu, setPaneMenu] = useState<{ x: number; y: number; flowX: number; flowY: number } | null>(null);
+  const noteCounter = useRef(0);
+
+  const onNoteTextChange = useCallback((id: string, text: string) => {
+    setStickyNotes((prev) => {
+      const next = new Map(prev);
+      const existing = next.get(id);
+      if (existing) next.set(id, { ...existing, text });
+      return next;
+    });
+  }, []);
+
+  const onNoteDelete = useCallback((id: string) => {
+    setStickyNotes((prev) => {
+      const next = new Map(prev);
+      next.delete(id);
+      return next;
+    });
+  }, []);
+
+  const handlePaneContextMenu = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const flowPos = reactFlow.screenToFlowPosition({ x: event.clientX - bounds.left, y: event.clientY - bounds.top });
+    setPaneMenu({ x: event.clientX, y: event.clientY, flowX: flowPos.x, flowY: flowPos.y });
+  }, [reactFlow]);
+
+  const handleInsertNote = useCallback(() => {
+    if (!paneMenu) return;
+    const id = `_sticky_${++noteCounter.current}`;
+    setStickyNotes((prev) => {
+      const next = new Map(prev);
+      next.set(id, { x: paneMenu.flowX, y: paneMenu.flowY, text: "" });
+      return next;
+    });
+  }, [paneMenu]);
 
   // Listen for drill-down requests from the node card's ⤢ button. We
   // use a window CustomEvent rather than passing a callback through
@@ -155,7 +207,8 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
     [providers],
   );
 
-  const [nodes, setNodes] = useState<Node<ChatFlowNodeData>[]>([]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [nodes, setNodes] = useState<Node<any>[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   // User-dragged positions survive graph reconciliation (SSE patches,
   // selection changes). They're cleared when a brand-new chatflow is
@@ -191,9 +244,17 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
       ...n,
       position: dragPositions.current[n.id] ?? n.position,
     }));
-    setNodes(merged);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stickyNodes: Node<any>[] = [...stickyNotes.entries()].map(([id, note]) => ({
+      id,
+      type: "stickyNote",
+      position: dragPositions.current[id] ?? { x: note.x, y: note.y },
+      data: { text: note.text, onTextChange: onNoteTextChange, onDelete: onNoteDelete } satisfies StickyNoteData,
+      selectable: false,
+    }));
+    setNodes([...merged, ...stickyNodes]);
     setEdges(laid.edges);
-  }, [chatflow, selectedNodeId, contextWindowByModel]);
+  }, [chatflow, selectedNodeId, contextWindowByModel, stickyNotes, onNoteTextChange, onNoteDelete]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     // Drop React Flow's own select events — the store is the single
@@ -206,7 +267,8 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
         dirtyPositions.current.add(c.id);
       }
     }
-    setNodes((ns) => applyNodeChanges(filtered, ns) as Node<ChatFlowNodeData>[]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    setNodes((ns) => applyNodeChanges(filtered, ns) as Node<any>[]);
 
     // Debounce: save 500ms after last drag movement.
     if (dirtyPositions.current.size > 0) {
@@ -228,6 +290,7 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
 
   const handlePaneClick = useCallback(() => {
     setContextMenu(null);
+    setPaneMenu(null);
   }, []);
 
   if (!chatflow) {
@@ -260,6 +323,7 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
         nodeTypes={NODE_TYPES}
         onNodeClick={handleNodeClick}
         onNodeContextMenu={handleContextMenu}
+        onPaneContextMenu={handlePaneContextMenu}
         onPaneClick={handlePaneClick}
         onNodesChange={onNodesChange}
         onEdgeMouseEnter={(_, edge) =>
@@ -327,6 +391,15 @@ export function ChatFlowCanvas({ chatflow }: ChatFlowCanvasProps) {
           />
         );
       })()}
+
+      {paneMenu && (
+        <CanvasContextMenu
+          x={paneMenu.x}
+          y={paneMenu.y}
+          onInsertNote={handleInsertNote}
+          onClose={() => setPaneMenu(null)}
+        />
+      )}
 
       {pendingDeleteId && (
         <ConfirmDialog
