@@ -367,7 +367,7 @@ function ComposerFooter({
         <div className="h-0.5 w-8 rounded-full bg-gray-300 group-hover:bg-blue-400" />
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-gray-50 px-4 py-2">
+      <div className="flex min-h-0 flex-1 flex-col overflow-visible bg-gray-50 px-4 py-2">
         {/* Cancel control for a running leaf node. */}
         {leafNode?.status === "running" && (
           <div data-testid="running-controls" className="mb-2 flex items-center gap-2">
