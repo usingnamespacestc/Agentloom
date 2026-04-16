@@ -112,9 +112,18 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
   const reactFlow = useReactFlow();
 
   // Sticky notes (pane right-click)
-  const [stickyNotes, setStickyNotes] = useState<Map<string, { x: number; y: number; text: string }>>(new Map());
+  const [stickyNotes, setStickyNotes] = useState<Map<string, { x: number; y: number; title: string; text: string }>>(new Map());
   const [paneMenu, setPaneMenu] = useState<{ x: number; y: number; flowX: number; flowY: number } | null>(null);
   const noteCounter = useRef(0);
+
+  const onNoteTitleChange = useCallback((id: string, title: string) => {
+    setStickyNotes((prev) => {
+      const next = new Map(prev);
+      const existing = next.get(id);
+      if (existing) next.set(id, { ...existing, title });
+      return next;
+    });
+  }, []);
 
   const onNoteTextChange = useCallback((id: string, text: string) => {
     setStickyNotes((prev) => {
@@ -145,7 +154,7 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
     const id = `_sticky_${++noteCounter.current}`;
     setStickyNotes((prev) => {
       const next = new Map(prev);
-      next.set(id, { x: paneMenu.flowX, y: paneMenu.flowY, text: "" });
+      next.set(id, { x: paneMenu.flowX, y: paneMenu.flowY, title: "Note", text: "" });
       return next;
     });
   }, [paneMenu]);
@@ -249,17 +258,17 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
       id,
       type: "stickyNote",
       position: dragPositions.current[id] ?? { x: note.x, y: note.y },
-      data: { text: note.text, onTextChange: onNoteTextChange, onDelete: onNoteDelete } satisfies StickyNoteData,
-      selectable: false,
+      data: { title: note.title, text: note.text, onTitleChange: onNoteTitleChange, onTextChange: onNoteTextChange, onDelete: onNoteDelete } satisfies StickyNoteData,
+      style: { width: 200, height: 120 },
     }));
     setNodes([...merged, ...stickyNodes]);
     setEdges(laid.edges);
-  }, [chatflow, selectedNodeId, contextWindowByModel, stickyNotes, onNoteTextChange, onNoteDelete]);
+  }, [chatflow, selectedNodeId, contextWindowByModel, stickyNotes, onNoteTitleChange, onNoteTextChange, onNoteDelete]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     // Drop React Flow's own select events — the store is the single
     // source of truth for selection, so we never let RF track it.
-    const filtered = changes.filter((c) => c.type !== "select");
+    const filtered = changes.filter((c) => c.type !== "select" || ("id" in c && String(c.id).startsWith("_sticky_")));
     if (filtered.length === 0) return;
     for (const c of filtered) {
       if (c.type === "position" && c.position) {
