@@ -10,15 +10,59 @@ export interface StickyNoteData extends Record<string, unknown> {
   onDelete: (id: string) => void;
 }
 
+const LONG_PRESS_MS = 300;
+
 export function StickyNoteNode({ id, data, selected }: NodeProps) {
   const { title, text, onTitleChange, onTextChange, onDelete } = data as StickyNoteData;
   const { t } = useTranslation();
   const textRef = useRef<HTMLTextAreaElement>(null);
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
+  const titleRef = useRef<HTMLInputElement>(null);
+
+  // --- editing vs display mode ---
+  const [editing, setEditing] = useState(false);
+
+  // Exit editing when deselected
+  useEffect(() => {
+    if (!selected) setEditing(false);
+  }, [selected]);
 
   useEffect(() => {
-    textRef.current?.focus();
+    if (editing) textRef.current?.focus();
+  }, [editing]);
+
+  const handleDoubleClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setEditing(true);
   }, []);
+
+  // --- long-press drag ---
+  const [dragReady, setDragReady] = useState(false);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const onPointerDown = useCallback((e: React.PointerEvent) => {
+    if (editing) return;
+    longPressTimer.current = setTimeout(() => {
+      setDragReady(true);
+    }, LONG_PRESS_MS);
+  }, [editing]);
+
+  const onPointerUp = useCallback(() => {
+    if (longPressTimer.current) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+    if (dragReady) setDragReady(false);
+  }, [dragReady]);
+
+  useEffect(() => {
+    if (!dragReady) return;
+    const up = () => setDragReady(false);
+    window.addEventListener("pointerup", up);
+    return () => window.removeEventListener("pointerup", up);
+  }, [dragReady]);
+
+  // --- context menu ---
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     if (!ctxMenu) return;
@@ -28,16 +72,12 @@ export function StickyNoteNode({ id, data, selected }: NodeProps) {
   }, [ctxMenu]);
 
   const handleTitleChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      onTitleChange(id, e.target.value);
-    },
+    (e: React.ChangeEvent<HTMLInputElement>) => onTitleChange(id, e.target.value),
     [id, onTitleChange],
   );
 
   const handleTextChange = useCallback(
-    (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-      onTextChange(id, e.target.value);
-    },
+    (e: React.ChangeEvent<HTMLTextAreaElement>) => onTextChange(id, e.target.value),
     [id, onTextChange],
   );
 
@@ -57,8 +97,17 @@ export function StickyNoteNode({ id, data, selected }: NodeProps) {
 
   return (
     <div
-      className="group flex h-full w-full flex-col rounded border border-yellow-300 bg-yellow-50 shadow-sm"
+      className={`group flex h-full w-full flex-col rounded border shadow-sm ${
+        dragReady
+          ? "border-yellow-500 bg-yellow-100 cursor-grabbing"
+          : selected
+            ? "border-yellow-400 bg-yellow-50"
+            : "border-yellow-300 bg-yellow-50"
+      } ${dragReady ? "sticky-drag-active" : "nodrag"}`}
       onContextMenu={handleContextMenu}
+      onPointerDown={onPointerDown}
+      onPointerUp={onPointerUp}
+      onDoubleClick={handleDoubleClick}
     >
       <NodeResizer
         isVisible={selected}
@@ -68,28 +117,41 @@ export function StickyNoteNode({ id, data, selected }: NodeProps) {
         handleClassName="!h-2 !w-2 !rounded-sm !border-yellow-400 !bg-yellow-200"
       />
       <div className="flex items-center justify-between border-b border-yellow-200 px-2 py-0.5">
-        <input
-          type="text"
-          value={title}
-          onChange={handleTitleChange}
-          className="min-w-0 flex-1 bg-transparent text-[10px] font-medium text-yellow-700 placeholder:text-yellow-400 focus:outline-none"
-          placeholder="Note"
-        />
+        {editing ? (
+          <input
+            ref={titleRef}
+            type="text"
+            value={title}
+            onChange={handleTitleChange}
+            className="nodrag min-w-0 flex-1 bg-transparent text-[10px] font-medium text-yellow-700 placeholder:text-yellow-400 focus:outline-none"
+            placeholder="Note"
+          />
+        ) : (
+          <span className="min-w-0 flex-1 truncate text-[10px] font-medium text-yellow-700">
+            {title || "Note"}
+          </span>
+        )}
         <button
           type="button"
           onClick={handleDelete}
-          className="ml-1 flex-shrink-0 text-[10px] text-yellow-500 opacity-0 hover:text-red-500 group-hover:opacity-100"
+          className="nodrag ml-1 flex-shrink-0 text-[10px] text-yellow-500 opacity-0 hover:text-red-500 group-hover:opacity-100"
         >
           ✕
         </button>
       </div>
-      <textarea
-        ref={textRef}
-        value={text}
-        onChange={handleTextChange}
-        className="min-h-0 flex-1 resize-none bg-transparent px-2 py-1 text-[12px] text-gray-700 placeholder:text-yellow-400 focus:outline-none"
-        placeholder="Type a note…"
-      />
+      {editing ? (
+        <textarea
+          ref={textRef}
+          value={text}
+          onChange={handleTextChange}
+          className="nodrag min-h-0 flex-1 resize-none bg-transparent px-2 py-1 text-[12px] text-gray-700 placeholder:text-yellow-400 focus:outline-none"
+          placeholder="Type a note…"
+        />
+      ) : (
+        <div className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap px-2 py-1 text-[12px] text-gray-700">
+          {text || <span className="text-yellow-400">Type a note…</span>}
+        </div>
+      )}
       {ctxMenu && (
         <div
           className="fixed z-50 min-w-[120px] rounded border border-gray-200 bg-white py-1 shadow-lg"

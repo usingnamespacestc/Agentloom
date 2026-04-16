@@ -182,6 +182,7 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
     const stickyNodes: Node<any>[] = Object.values(stickyNotes).map((note) => ({
       id: note.id,
       type: "stickyNote",
+      dragHandle: ".sticky-drag-active",
       position: dragPositions.current[note.id] ?? { x: note.x, y: note.y },
       data: { title: note.title, text: note.text, onTitleChange: onNoteTitleChange, onTextChange: onNoteTextChange, onDelete: onNoteDelete } satisfies StickyNoteData,
       style: { width: note.width, height: note.height },
