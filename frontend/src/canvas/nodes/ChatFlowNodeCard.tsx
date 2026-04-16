@@ -21,7 +21,8 @@ import { useTranslation } from "react-i18next";
 import { StatusBadge } from "./StatusBadge";
 import { NodeIdLine } from "./NodeIdLine";
 import { formatTokensKM } from "@/lib/tokenFormat";
-import type { ChatFlowNode } from "@/types/schema";
+import { useChatFlowStore } from "@/store/chatflowStore";
+import type { ChatFlowNode, WorkFlowNode } from "@/types/schema";
 
 /** Fallback denominator when the node's resolved model has no
  * configured ``context_window`` (e.g. a provider seeded before the
@@ -53,6 +54,21 @@ function truncate(text: string, n = TRUNCATE): string {
   return `${text.slice(0, n - 1)}…`;
 }
 
+/** Walk the inner WorkFlow (recursing into sub_workflows) and collect
+ * IDs of every WorkNode currently in ``running`` state. The ChatFlow
+ * card uses the longest streaming delta among these to show live
+ * activity without forcing the user to drill into the WorkFlow view. */
+function collectRunningWorkNodeIds(nodes: Record<string, WorkFlowNode>): string[] {
+  const out: string[] = [];
+  for (const wn of Object.values(nodes)) {
+    if (wn.status === "running") out.push(wn.id);
+    if (wn.sub_workflow) {
+      out.push(...collectRunningWorkNodeIds(wn.sub_workflow.nodes));
+    }
+  }
+  return out;
+}
+
 export function ChatFlowNodeCard({ data }: NodeProps) {
   const { t } = useTranslation();
   const {
@@ -69,6 +85,21 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
   const hasWorkflow = Object.keys(node.workflow.nodes).length > 0;
   const isDashed = node.status === "planned" || node.status === "running";
   const isAwaitingUser = !!node.workflow.pending_user_prompt;
+
+  // Live preview: pick the longest streaming delta among any running
+  // WorkNode under this ChatNode (handles parallel siblings + nested
+  // sub-workflows). When no delta has arrived yet we fall back to the
+  // ``thinking…`` placeholder below.
+  const livePreview = useChatFlowStore((s) => {
+    if (node.status !== "running") return "";
+    const ids = collectRunningWorkNodeIds(node.workflow.nodes);
+    let best = "";
+    for (const id of ids) {
+      const d = s.streamingDeltas[id];
+      if (d && d.length > best.length) best = d;
+    }
+    return best;
+  });
 
   const onEnter = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -174,10 +205,17 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
             <div className="text-[10px] text-gray-500 mb-0.5">{t("chatflow.agent")}</div>
             <div className="prose prose-sm max-w-none text-xs text-gray-900 break-words leading-snug">
               {node.status === "running" ? (
-                <span className="inline-flex items-center gap-1 text-yellow-600">
-                  <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-yellow-400" />
-                  thinking…
-                </span>
+                livePreview ? (
+                  <div data-testid="chatflow-streaming-preview" className="text-gray-700">
+                    <Markdown>{truncate(livePreview)}</Markdown>
+                    <span className="inline-block w-1 h-3 align-middle bg-yellow-400 animate-pulse ml-0.5" />
+                  </div>
+                ) : (
+                  <span className="inline-flex items-center gap-1 text-yellow-600">
+                    <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-yellow-400" />
+                    thinking…
+                  </span>
+                )
               ) : node.agent_response.text ? (
                 <Markdown>{truncate(node.agent_response.text)}</Markdown>
               ) : (

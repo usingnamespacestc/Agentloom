@@ -26,6 +26,7 @@ export interface WorkFlowNodeData extends Record<string, unknown> {
   isSelected: boolean;
   isRoot: boolean;
   isLeaf: boolean;
+  maxContextTokens: number | null;
 }
 
 const KIND_ACCENT: Record<string, string> = {
@@ -42,7 +43,7 @@ function truncate(text: string, n = 140): string {
 
 export function WorkFlowNodeCard({ data }: NodeProps) {
   const { t } = useTranslation();
-  const { node, isSelected, isRoot, isLeaf } = data as WorkFlowNodeData;
+  const { node, isSelected, isRoot, isLeaf, maxContextTokens } = data as WorkFlowNodeData;
   // Role-based styling takes precedence over step_kind — see roleStyles.ts.
   // Legacy (direct-mode) nodes have role === null and fall back to the
   // original step_kind accent so the MVP look is preserved.
@@ -83,13 +84,13 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
       </div>
 
       {node.step_kind === "llm_call" && (
-        <LlmCallBody node={node} />
+        <LlmCallBody node={node} maxCtx={maxContextTokens} />
       )}
       {node.step_kind === "tool_call" && (
         <ToolCallBody node={node} />
       )}
       {node.step_kind === "judge_call" && (
-        <JudgeCallBody node={node} />
+        <JudgeCallBody node={node} maxCtx={maxContextTokens} />
       )}
       {node.step_kind === "sub_agent_delegation" && (
         <SubAgentDelegationBody node={node} />
@@ -102,7 +103,7 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
   );
 }
 
-function LlmCallBody({ node }: { node: WorkFlowNode }) {
+function LlmCallBody({ node, maxCtx }: { node: WorkFlowNode; maxCtx: number | null }) {
   const { t } = useTranslation();
   // While the node is RUNNING, show the live streaming buffer (one
   // SSE event per provider chunk). Once it terminates, the
@@ -129,17 +130,19 @@ function LlmCallBody({ node }: { node: WorkFlowNode }) {
       )}
       <div className="prose prose-sm max-w-none text-[11px] text-gray-800 break-words">
         {live ? (
-          <span data-testid="streaming-preview">
+          <div data-testid="streaming-preview">
             <Markdown>{truncate(streamingDelta)}</Markdown>
             <span className="inline-block w-1 h-3 align-middle bg-sky-400 animate-pulse ml-0.5" />
-          </span>
+          </div>
         ) : output ? (
           <Markdown>{truncate(output)}</Markdown>
         ) : (
           <span className="italic text-gray-400">—</span>
         )}
       </div>
-      {usage && usage.prompt_tokens > 0 && <TokenBar tokens={usage.prompt_tokens} />}
+      {usage && usage.total_tokens > 0 && (
+        <TokenBar tokens={usage.total_tokens} maxTokens={maxCtx} />
+      )}
     </div>
   );
 }
@@ -167,7 +170,7 @@ function ThinkingToggle({ text, label }: { text: string; label: string }) {
   );
 }
 
-function JudgeCallBody({ node }: { node: WorkFlowNode }) {
+function JudgeCallBody({ node, maxCtx }: { node: WorkFlowNode; maxCtx: number | null }) {
   const { t } = useTranslation();
   const variant = node.judge_variant;
   const verdict = node.judge_verdict;
@@ -225,11 +228,12 @@ function JudgeCallBody({ node }: { node: WorkFlowNode }) {
         />
       )}
       {live && (
-        <div className="prose prose-sm max-w-none text-[11px] text-gray-500 italic break-words">
-          <span data-testid="streaming-preview">
-            <Markdown>{truncate(streamingDelta, 80)}</Markdown>
-            <span className="inline-block w-1 h-3 align-middle bg-amber-500 animate-pulse ml-0.5" />
-          </span>
+        <div
+          data-testid="streaming-preview"
+          className="prose prose-sm max-w-none text-[11px] text-gray-500 italic break-words"
+        >
+          <Markdown>{truncate(streamingDelta, 80)}</Markdown>
+          <span className="inline-block w-1 h-3 align-middle bg-amber-500 animate-pulse ml-0.5" />
         </div>
       )}
       {!live && node.output_message?.content && !verdict && (
@@ -237,8 +241,8 @@ function JudgeCallBody({ node }: { node: WorkFlowNode }) {
           <Markdown>{truncate(node.output_message.content, 80)}</Markdown>
         </div>
       )}
-      {node.usage && node.usage.prompt_tokens > 0 && (
-        <TokenBar tokens={node.usage.prompt_tokens} />
+      {node.usage && node.usage.total_tokens > 0 && (
+        <TokenBar tokens={node.usage.total_tokens} maxTokens={maxCtx} />
       )}
     </div>
   );

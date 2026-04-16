@@ -361,7 +361,7 @@ def _provider_call_from_settings():
     from agentloom.db.repositories.provider import ProviderRepository
     from agentloom.providers.registry import build_adapter
 
-    async def call(messages, tools, model, on_token=None):  # type: ignore[no-untyped-def]
+    async def call(messages, tools, model, on_token=None, extra=None):  # type: ignore[no-untyped-def]
         async with get_session_maker()() as session:
             repo = ProviderRepository(session, workspace_id=DEFAULT_WORKSPACE_ID)
             providers = await repo.list_all()
@@ -388,10 +388,12 @@ def _provider_call_from_settings():
             config = await repo.get(chosen["id"])
             api_key = repo.resolve_api_key(config)
 
-            extra: dict = {}
+            call_extra: dict = {}
             # Volcengine needs explicit thinking enable.
             if "volces.com" in config.base_url or "volcengine" in config.friendly_name.lower():
-                extra = {"thinking": {"type": "enabled"}}
+                call_extra = {"thinking": {"type": "enabled"}}
+            if extra:
+                call_extra.update(extra)
 
             adapter = build_adapter(
                 kind=config.provider_kind.value,
@@ -407,11 +409,24 @@ def _provider_call_from_settings():
                 )
                 model_id = fallback.id if fallback else None
 
+            # Look up model metadata to enforce output length limits.
+            # max_output_tokens is the precise cap; context_window is
+            # the total budget (prompt + completion) and serves as a
+            # generous fallback when the per-model output cap isn't set.
+            model_info = next(
+                (m for m in config.available_models if m.id == model_id),
+                None,
+            )
+            max_tokens: int | None = None
+            if model_info is not None:
+                max_tokens = model_info.max_output_tokens or model_info.context_window
+
             return await adapter.chat(
                 messages=messages,
                 tools=tools,
                 model=model_id,
-                extra=extra or None,
+                max_tokens=max_tokens,
+                extra=call_extra or None,
                 on_token=on_token,
             )
 

@@ -189,6 +189,12 @@ class ReorderQueueRequest(BaseModel):
     item_ids: list[str]
 
 
+class RetryRequest(BaseModel):
+    spawn_model: ProviderModelRef | None = None
+    judge_spawn_model: ProviderModelRef | None = None
+    tool_call_spawn_model: ProviderModelRef | None = None
+
+
 class RetryResponse(BaseModel):
     node_id: str
 
@@ -594,7 +600,8 @@ async def delete_node(
 async def retry_failed_node(
     chatflow_id: str,
     node_id: str,
-    request: Request,
+    body: RetryRequest | None = None,
+    request: Request = None,  # type: ignore[assignment]
     session: AsyncSession = Depends(get_session),
 ) -> RetryResponse:
     engine = _get_engine(request)
@@ -602,8 +609,15 @@ async def retry_failed_node(
     chat = await _attached_chatflow(engine, repo, chatflow_id)
     if node_id not in chat.nodes:
         raise HTTPException(404, f"node {node_id} not in chatflow {chatflow_id}")
+    body = body or RetryRequest()
     try:
-        sibling = await engine.retry_failed_node(chat.id, node_id)
+        sibling = await engine.retry_failed_node(
+            chat.id,
+            node_id,
+            spawn_model=body.spawn_model,
+            judge_spawn_model=body.judge_spawn_model,
+            tool_call_spawn_model=body.tool_call_spawn_model,
+        )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     await repo.save(chat)

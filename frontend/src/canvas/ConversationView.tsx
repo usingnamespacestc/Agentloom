@@ -310,7 +310,7 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
             <button
               type="button"
               data-testid="retry-button"
-              onClick={() => void retryNode(leafNode.id)}
+              onClick={() => void retryNode(leafNode.id, composerModels)}
               className="rounded border border-orange-300 bg-orange-50 px-2 py-0.5 text-[10px] text-orange-700 hover:bg-orange-100"
             >
               {t("conversation.retry")}
@@ -883,6 +883,9 @@ function WorkFlowIOBubble({
   const showNodeId = usePreferencesStore((s) => s.showNodeId);
   const isRunning = node.status === "running";
   const isFailed = node.status === "failed";
+  const streamingDelta = useChatFlowStore(
+    (s) => (isRunning ? s.streamingDeltas[node.id] ?? "" : ""),
+  );
   const kindColor =
     node.step_kind === "llm_call"
       ? "text-sky-600"
@@ -929,10 +932,17 @@ function WorkFlowIOBubble({
               <Markdown>{node.output_message.content}</Markdown>
             </div>
           ) : isRunning ? (
-            <div className="flex items-center gap-1.5 text-[12px] text-yellow-600">
-              <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-yellow-400" />
-              thinking…
-            </div>
+            streamingDelta ? (
+              <div className="max-w-none text-[13px] leading-relaxed break-words text-gray-800 whitespace-pre-wrap">
+                {streamingDelta}
+                <span className="inline-block w-1.5 h-3 align-middle bg-sky-400 animate-pulse ml-0.5" />
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5 text-[12px] text-yellow-600">
+                <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-yellow-400" />
+                thinking…
+              </div>
+            )
           ) : isFailed ? (
             <div className="text-[12px] text-red-500">{node.error || "failed"}</div>
           ) : (
@@ -1023,6 +1033,9 @@ function JudgeBubbleBody({
   isRunning: boolean;
   isFailed: boolean;
 }) {
+  const streamingDelta = useChatFlowStore(
+    (s) => (isRunning ? s.streamingDeltas[node.id] ?? "" : ""),
+  );
   const variant = node.judge_variant;
   const verdict = node.judge_verdict;
   const headline = verdict
@@ -1081,11 +1094,24 @@ function JudgeBubbleBody({
         />
       )}
 
-      {!verdict && isRunning && (
-        <div className="flex items-center gap-1.5 text-[12px] text-yellow-600">
-          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-yellow-400" />
-          {t("node.status.running")}
+      {node.output_message?.content && (
+        <div className="prose prose-sm max-w-none text-[13px] leading-relaxed break-words text-gray-700">
+          <Markdown>{node.output_message.content}</Markdown>
         </div>
+      )}
+
+      {!verdict && isRunning && (
+        streamingDelta ? (
+          <div className="max-w-none text-[13px] leading-relaxed break-words text-gray-500 italic whitespace-pre-wrap">
+            {streamingDelta}
+            <span className="inline-block w-1.5 h-3 align-middle bg-amber-500 animate-pulse ml-0.5" />
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5 text-[12px] text-yellow-600">
+            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-yellow-400" />
+            {t("node.status.running")}
+          </div>
+        )
       )}
       {!verdict && isFailed && (
         <div className="text-[12px] text-red-500">{node.error || "failed"}</div>

@@ -219,7 +219,7 @@ export interface ChatFlowStoreState {
   /** Delete a FAILED node. */
   deleteNode: (nodeId: NodeId) => Promise<void>;
   /** Retry a FAILED node. */
-  retryNode: (nodeId: NodeId) => Promise<void>;
+  retryNode: (nodeId: NodeId, composerModels?: ComposerModelMap | null) => Promise<void>;
   /** Cancel a RUNNING node. */
   cancelNode: (nodeId: NodeId) => Promise<void>;
   /** Re-fetch the current chatflow from the server. */
@@ -785,10 +785,16 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     await get().refreshChatFlow();
   },
 
-  async retryNode(nodeId) {
+  async retryNode(nodeId, composerModels) {
     const chat = get().chatflow;
     if (!chat) return;
-    await api.retryNode(chat.id, nodeId);
+    await api.retryNode(
+      chat.id,
+      nodeId,
+      composerModels?.llm ?? null,
+      composerModels?.judge ?? null,
+      composerModels?.tool_call ?? null,
+    );
     await get().refreshChatFlow();
   },
 

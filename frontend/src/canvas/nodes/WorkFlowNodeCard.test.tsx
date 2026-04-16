@@ -51,6 +51,7 @@ function renderCard(node: WorkFlowNode) {
     isSelected: false,
     isRoot: true,
     isLeaf: true,
+    maxContextTokens: null,
   };
   // WorkFlowNodeCard uses @xyflow/react's <Handle>, which needs a
   // ReactFlowProvider somewhere in the tree to avoid a store error.

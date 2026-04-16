@@ -545,7 +545,13 @@ class ChatFlowEngine:
         await self._save(runtime)
 
     async def retry_failed_node(
-        self, chatflow_id: str, node_id: str
+        self,
+        chatflow_id: str,
+        node_id: str,
+        *,
+        spawn_model: ProviderModelRef | None = None,
+        judge_spawn_model: ProviderModelRef | None = None,
+        tool_call_spawn_model: ProviderModelRef | None = None,
     ) -> ChatFlowNode:
         """Create a sibling of a FAILED node and transfer its queue.
 
@@ -553,6 +559,10 @@ class ChatFlowEngine:
         sibling inherits the same parent and user_message, plus the
         failed node's ``pending_queue`` which will walk down the new
         branch as it runs.
+
+        When caller-supplied ``*_spawn_model`` overrides are given they
+        take precedence over the failed node's original models — this
+        lets the UI retry with a different model selection.
         """
         runtime = self._require_runtime(chatflow_id)
         async with runtime.lock:
@@ -569,25 +579,23 @@ class ChatFlowEngine:
 
             inherited_queue = list(failed.pending_queue)
             failed.pending_queue = []
-            # Retry = "re-run this turn with the same parameters".
-            # Preserve the failed node's resolved model so a composer
-            # override (e.g. the user picked Qwen for the original
-            # turn) survives the retry instead of silently falling back
-            # to parent inheritance. Per-kind judge/tool_call overrides
-            # live on the failed node's inner WorkFlow — preserve those
-            # too. We pass them as *_spawn_model overrides; the
-            # *_or_default fallback in _spawn_turn_node would otherwise
-            # paper over differences from the chatflow defaults.
-            failed_judge = failed.workflow.judge_model_override
-            failed_tool_call = failed.workflow.tool_call_model_override
+            effective_model = spawn_model or failed.resolved_model
+            effective_judge = (
+                judge_spawn_model
+                or failed.workflow.judge_model_override
+            )
+            effective_tool_call = (
+                tool_call_spawn_model
+                or failed.workflow.tool_call_model_override
+            )
             sibling = self._spawn_turn_node(
                 runtime,
                 parent_ids=list(failed.parent_ids),
                 user_message_text=failed.user_message.text,
                 pending_queue=inherited_queue,
-                spawn_model=failed.resolved_model,
-                judge_spawn_model=failed_judge,
-                tool_call_spawn_model=failed_tool_call,
+                spawn_model=effective_model,
+                judge_spawn_model=effective_judge,
+                tool_call_spawn_model=effective_tool_call,
             )
             await self._publish_node_created(runtime, sibling.id)
             await self._publish_queue_updated(runtime, node_id)
@@ -616,6 +624,7 @@ class ChatFlowEngine:
             except (asyncio.CancelledError, Exception):
                 pass
 
+        cascaded: list[str] = []
         async with runtime.lock:
             if node_id not in runtime.chatflow.nodes:
                 return
@@ -625,6 +634,12 @@ class ChatFlowEngine:
             node.status = NodeStatus.FAILED
             node.error = "Cancelled by user"
             node.finished_at = utcnow()
+            # task.cancel() interrupts WorkflowEngine mid-loop and the
+            # in-flight WorkNode never reaches its own finalize block,
+            # so its status stays RUNNING in the DB forever. Walk the
+            # tree and force-fail every still-running WorkNode so the
+            # UI doesn't show ghost spinners.
+            cascaded = _cascade_fail_workflow(node.workflow)
             # Discard pending queue items.
             discarded = [
                 p for p in node.pending_queue
@@ -651,6 +666,19 @@ class ChatFlowEngine:
                 data={"status": NodeStatus.FAILED.value},
             )
         )
+        for wn_id in cascaded:
+            await self._bus.publish(
+                WorkflowEvent(
+                    workflow_id=runtime.chatflow.id,
+                    kind="chat.workflow.node.failed",
+                    node_id=wn_id,
+                    data={
+                        "status": NodeStatus.FAILED.value,
+                        "chat_node_id": node_id,
+                        "error": "Cancelled by user",
+                    },
+                )
+            )
         await self._save(runtime)
 
     # ------------------------------------------------------------------ internals
@@ -2364,6 +2392,28 @@ class ChatFlowEngine:
             log.exception(
                 "chatflow save callback failed for %s", runtime.chatflow.id
             )
+
+
+def _cascade_fail_workflow(workflow: WorkFlow) -> list[str]:
+    """Force-fail every still-RUNNING WorkNode under ``workflow``,
+    recursing into sub_workflows. Returns the ids that were actually
+    transitioned (so callers can publish events for each).
+
+    Used by ``cancel_running_node`` because ``task.cancel()`` on the
+    outer ChatNode task interrupts WorkflowEngine mid-loop and the
+    in-flight WorkNode never reaches its own finalize block.
+    """
+    now = utcnow()
+    cascaded: list[str] = []
+    for wn in workflow.nodes.values():
+        if wn.status == NodeStatus.RUNNING:
+            wn.status = NodeStatus.FAILED
+            wn.error = "Cancelled by user"
+            wn.finished_at = now
+            cascaded.append(wn.id)
+        if wn.sub_workflow is not None:
+            cascaded.extend(_cascade_fail_workflow(wn.sub_workflow))
+    return cascaded
 
 
 def _judge_pre_should_halt(verdict: JudgeVerdict) -> bool:

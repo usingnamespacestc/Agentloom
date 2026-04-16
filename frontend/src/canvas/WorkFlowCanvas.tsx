@@ -13,7 +13,7 @@
  * positions live in memory until a backend endpoint exists for them.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -30,9 +30,11 @@ import "@xyflow/react/dist/style.css";
 import { useTranslation } from "react-i18next";
 
 import { layoutDag } from "./layout";
+import { contextWindowMap } from "./ChatFlowCanvas";
 import { WorkFlowBlackboard } from "./WorkFlowBlackboard";
 import { WorkFlowNodeCard, type WorkFlowNodeData } from "./nodes/WorkFlowNodeCard";
 import { api } from "@/lib/api";
+import type { ProviderSummary } from "@/lib/api";
 import { useChatFlowStore } from "@/store/chatflowStore";
 import type { NodeId, WorkFlow, WorkFlowNode } from "@/types/schema";
 
@@ -64,6 +66,16 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, nested }: WorkFlowCanv
   const selectWorkflowNode = useChatFlowStore((s) => s.selectWorkflowNode);
   const reactFlow = useReactFlow();
 
+  const [providers, setProviders] = useState<ProviderSummary[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    api.listProviders().then((list) => {
+      if (!cancelled) setProviders(list);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  const ctxWindowByModel = useMemo(() => contextWindowMap(providers), [providers]);
+
   const [nodes, setNodes] = useState<Node<WorkFlowNodeData>[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const dragPositions = useRef<Record<string, { x: number; y: number }>>({});
@@ -91,14 +103,14 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, nested }: WorkFlowCanv
       dirtyPositions.current.clear();
       lastWorkflowId.current = workflow?.id ?? null;
     }
-    const laid = buildWorkflowGraph(workflow, workflowSelectedNodeId);
+    const laid = buildWorkflowGraph(workflow, workflowSelectedNodeId, ctxWindowByModel);
     const merged = laid.nodes.map((n) => ({
       ...n,
       position: dragPositions.current[n.id] ?? n.position,
     }));
     setNodes(merged);
     setEdges(laid.edges);
-  }, [workflow, workflowSelectedNodeId]);
+  }, [workflow, workflowSelectedNodeId, ctxWindowByModel]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     const filtered = changes.filter((c) => c.type !== "select");
@@ -189,6 +201,7 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, nested }: WorkFlowCanv
 export function buildWorkflowGraph(
   workflow: WorkFlow | null,
   selectedNodeId: string | null = null,
+  contextWindowByModel: Record<string, number> = {},
 ): { nodes: Node<WorkFlowNodeData>[]; edges: Edge[] } {
   if (!workflow) return { nodes: [], edges: [] };
   const wf = workflow;
@@ -206,6 +219,8 @@ export function buildWorkflowGraph(
       node.position_x != null && node.position_y != null
         ? { x: node.position_x, y: node.position_y }
         : position;
+    const ref = node.model_override;
+    const ctxKey = ref ? `${ref.provider_id}:${ref.model_id}` : "";
     return {
       id: node.id,
       type: "workflow",
@@ -215,6 +230,7 @@ export function buildWorkflowGraph(
         isSelected: node.id === selectedNodeId,
         isRoot: rootSet.has(node.id),
         isLeaf: !hasChild.has(node.id),
+        maxContextTokens: contextWindowByModel[ctxKey] ?? null,
       },
       selectable: false,
     };

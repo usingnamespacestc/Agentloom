@@ -24,7 +24,12 @@ from agentloom.engine.judge_formatter import (
     format_revise_budget_halt_prompt,
     judge_post_needs_user_input,
 )
-from agentloom.engine.judge_parser import JudgeParseError, parse_judge_verdict
+from agentloom.engine.judge_parser import (
+    JudgeParseError,
+    judge_verdict_tool_def,
+    parse_judge_from_tool_args,
+    parse_judge_verdict,
+)
 from agentloom.engine.model_resolution import effective_model_for
 from agentloom.engine.recursive_planner_parser import (
     PlannerParseError,
@@ -322,6 +327,8 @@ class WorkflowEngine:
         node: WorkFlowNode,
         *,
         expose_tools: bool,
+        override_tools: list[ToolDefinition] | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         """Shared provider-call path for ``llm_call`` and ``judge_call``.
 
@@ -355,7 +362,9 @@ class WorkflowEngine:
         # backward-compatible with M3 callers that don't configure a
         # registry. Judges never see tools even if a registry exists.
         tool_defs: list[ToolDefinition] = []
-        if expose_tools and self._tools is not None:
+        if override_tools is not None:
+            tool_defs = override_tools
+        elif expose_tools and self._tools is not None:
             tool_defs = [
                 ToolDefinition(**d)
                 for d in self._tools.definitions_for_constraints(node.tool_constraints)
@@ -367,6 +376,7 @@ class WorkflowEngine:
             tool_defs,
             model,
             on_token=self._token_callback(workflow, node),
+            extra=extra,
         )
 
         # Freeze the result on the node.
@@ -505,22 +515,29 @@ class WorkflowEngine:
         if node.judge_variant is None:
             raise ValueError(f"judge_call node {node.id} missing judge_variant")
 
-        # Same context/provider path as llm_call, but never exposes
-        # tools to the judge — judges must respond with structured
-        # JSON, not by asking to call a tool.
-        await self._invoke_and_freeze(workflow, node, expose_tools=False)
+        tool_def = judge_verdict_tool_def(node.judge_variant)
+        await self._invoke_and_freeze(
+            workflow,
+            node,
+            expose_tools=False,
+            override_tools=[tool_def],
+        )
         assert node.output_message is not None
+
+        # Prefer tool_use arguments (structured); fall back to content parsing.
+        tool_uses = node.output_message.tool_uses or []
+        judge_tool = next((tu for tu in tool_uses if tu.name == "judge_verdict"), None)
+
         try:
-            node.judge_verdict = parse_judge_verdict(
-                node.output_message.content,
-                node.judge_variant,
-            )
+            if judge_tool is not None:
+                node.judge_verdict = parse_judge_from_tool_args(
+                    dict(judge_tool.arguments), node.judge_variant,
+                )
+            else:
+                node.judge_verdict = parse_judge_verdict(
+                    node.output_message.content, node.judge_variant,
+                )
         except JudgeParseError as first_exc:
-            # One-shot corrective retry — weaker local models sometimes
-            # emit JSON with unquoted strings or a stray trailing newline.
-            # Re-invoke with the bad output + a JSON-discipline reminder;
-            # if that also fails, raise with both errors so debugging is
-            # possible from the node's final output_message.
             try:
                 await self._retry_judge_parse(workflow, node, first_exc)
             except JudgeParseError as retry_exc:
@@ -599,9 +616,10 @@ class WorkflowEngine:
             f"{ref.provider_id}:{ref.model_id}" if ref and ref.provider_id
             else (ref.model_id if ref else None)
         )
+        tool_def = judge_verdict_tool_def(node.judge_variant)
         response = await self._provider_call(
             retry_messages,
-            [],
+            [tool_def],
             model,
             on_token=self._token_callback(workflow, node),
         )
@@ -630,9 +648,16 @@ class WorkflowEngine:
                     reasoning_tokens=node.usage.reasoning_tokens + retry_usage.reasoning_tokens,
                 )
 
-        node.judge_verdict = parse_judge_verdict(
-            node.output_message.content, node.judge_variant
-        )
+        retry_tool_uses = node.output_message.tool_uses or []
+        retry_judge_tool = next((tu for tu in retry_tool_uses if tu.name == "judge_verdict"), None)
+        if retry_judge_tool is not None:
+            node.judge_verdict = parse_judge_from_tool_args(
+                dict(retry_judge_tool.arguments), node.judge_variant,
+            )
+        else:
+            node.judge_verdict = parse_judge_verdict(
+                node.output_message.content, node.judge_variant,
+            )
 
 
 #: Cap on a single SharedNote's summary length. Picked at "fits in a

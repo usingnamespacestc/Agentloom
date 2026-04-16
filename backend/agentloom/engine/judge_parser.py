@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Any
 
 from pydantic import ValidationError
 
+from agentloom.providers.types import ToolDefinition
 from agentloom.schemas.common import JudgeVariant, JudgeVerdict
 
 _CODE_FENCE_RE = re.compile(
@@ -112,5 +114,140 @@ def parse_judge_verdict(raw: str, variant: JudgeVariant) -> JudgeVerdict:
             if verdict.post_verdict is None:
                 raise JudgeParseError(
                     "judge_post output missing required 'post_verdict'"
+                )
+    return verdict
+
+
+# ------------------------------------------------------------------ tool_use
+
+_VARIANT_SCHEMAS: dict[JudgeVariant, dict[str, Any]] = {
+    JudgeVariant.PRE: {
+        "type": "object",
+        "properties": {
+            "feasibility": {
+                "type": "string",
+                "enum": ["ok", "risky", "infeasible"],
+            },
+            "blockers": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "missing_inputs": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+        },
+        "required": ["feasibility"],
+    },
+    JudgeVariant.DURING: {
+        "type": "object",
+        "properties": {
+            "during_verdict": {
+                "type": "string",
+                "enum": ["continue", "revise", "halt"],
+            },
+            "critiques": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "issue": {"type": "string"},
+                        "severity": {
+                            "type": "string",
+                            "enum": ["blocker", "concern", "nit"],
+                        },
+                        "evidence": {"type": "string"},
+                    },
+                    "required": ["issue"],
+                },
+            },
+        },
+        "required": ["during_verdict"],
+    },
+    JudgeVariant.POST: {
+        "type": "object",
+        "properties": {
+            "post_verdict": {
+                "type": "string",
+                "enum": ["accept", "retry", "fail"],
+            },
+            "user_message": {"type": "string"},
+            "merged_response": {"type": "string"},
+            "issues": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string"},
+                        "expected": {"type": "string"},
+                        "actual": {"type": "string"},
+                    },
+                    "required": ["location", "expected", "actual"],
+                },
+            },
+            "redo_targets": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "node_id": {"type": "string"},
+                        "critique": {"type": "string"},
+                    },
+                    "required": ["node_id", "critique"],
+                },
+            },
+        },
+        "required": ["post_verdict"],
+    },
+}
+
+_VARIANT_DESCRIPTIONS: dict[JudgeVariant, str] = {
+    JudgeVariant.PRE: "Submit the pre-judge feasibility verdict.",
+    JudgeVariant.DURING: "Submit the during-judge monitoring verdict.",
+    JudgeVariant.POST: "Submit the post-judge acceptance verdict.",
+}
+
+
+def judge_verdict_tool_def(variant: JudgeVariant) -> ToolDefinition:
+    """Return a ``ToolDefinition`` that forces the model to produce a
+    structured judge verdict via tool_use instead of free-text JSON."""
+    return ToolDefinition(
+        name="judge_verdict",
+        description=_VARIANT_DESCRIPTIONS[variant],
+        parameters=_VARIANT_SCHEMAS[variant],
+    )
+
+
+def parse_judge_from_tool_args(
+    args: dict[str, Any], variant: JudgeVariant
+) -> JudgeVerdict:
+    """Parse tool_use arguments into a :class:`JudgeVerdict`.
+
+    Same validation as :func:`parse_judge_verdict` but skips the JSON
+    extraction step since the arguments are already a parsed dict.
+    """
+    for key in _LIST_FIELDS:
+        if args.get(key) is None and key in args:
+            args[key] = []
+    try:
+        verdict = JudgeVerdict.model_validate(args)
+    except ValidationError as exc:
+        raise JudgeParseError(f"judge tool_use args failed validation: {exc}") from exc
+
+    match variant:
+        case JudgeVariant.PRE:
+            if verdict.feasibility is None:
+                raise JudgeParseError(
+                    "judge_pre tool_use missing required 'feasibility'"
+                )
+        case JudgeVariant.DURING:
+            if verdict.during_verdict is None:
+                raise JudgeParseError(
+                    "judge_during tool_use missing required 'during_verdict'"
+                )
+        case JudgeVariant.POST:
+            if verdict.post_verdict is None:
+                raise JudgeParseError(
+                    "judge_post tool_use missing required 'post_verdict'"
                 )
     return verdict

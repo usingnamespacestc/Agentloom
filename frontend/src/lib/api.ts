@@ -155,9 +155,21 @@ export const api = {
       method: "DELETE",
     }),
 
-  retryNode: (chatflowId: string, nodeId: string) =>
+  retryNode: (
+    chatflowId: string,
+    nodeId: string,
+    spawnModel?: ProviderModelRef | null,
+    judgeSpawnModel?: ProviderModelRef | null,
+    toolCallSpawnModel?: ProviderModelRef | null,
+  ) =>
     request<{ node_id: string }>(`/api/chatflows/${chatflowId}/nodes/${nodeId}/retry`, {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        spawn_model: spawnModel ?? null,
+        judge_spawn_model: judgeSpawnModel ?? null,
+        tool_call_spawn_model: toolCallSpawnModel ?? null,
+      }),
     }),
 
   cancelNode: (chatflowId: string, nodeId: string) =>
