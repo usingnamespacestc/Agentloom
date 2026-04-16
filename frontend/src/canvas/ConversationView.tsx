@@ -25,7 +25,7 @@
  * store (RIGHT_PANEL_MIN..RIGHT_PANEL_MAX).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent } from "react";
 import Markdown from "react-markdown";
 import { useTranslation } from "react-i18next";
 
@@ -36,7 +36,7 @@ import {
   resolveDrilledWorkflow,
   useChatFlowStore,
 } from "@/store/chatflowStore";
-import { usePreferencesStore } from "@/store/preferencesStore";
+import { usePreferencesStore, type ComposerModelMap } from "@/store/preferencesStore";
 import { api } from "@/lib/api";
 import type { ProviderSummary } from "@/lib/api";
 import type {
@@ -283,7 +283,91 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
         )}
       </div>
 
-      <footer className="border-t border-gray-100 bg-gray-50 px-4 py-2">
+      <ComposerFooter
+        leafNode={leafNode}
+        inputText={inputText}
+        setInputText={setInputText}
+        sending={sending}
+        handleSend={handleSend}
+        handleKeyDown={handleKeyDown}
+        cancelNode={cancelNode}
+        retryNode={retryNode}
+        deleteNode={deleteNode}
+        composerModels={composerModels}
+        t={t}
+      />
+    </>
+  );
+}
+
+// ---------------------------------------------------------------- ComposerFooter
+
+const FOOTER_MIN = 80;
+const FOOTER_MAX = 400;
+const FOOTER_DEFAULT = 120;
+
+function ComposerFooter({
+  leafNode,
+  inputText,
+  setInputText,
+  sending,
+  handleSend,
+  handleKeyDown,
+  cancelNode,
+  retryNode,
+  deleteNode,
+  composerModels,
+  t,
+}: {
+  leafNode: ChatFlowNode | undefined;
+  inputText: string;
+  setInputText: (v: string) => void;
+  sending: boolean;
+  handleSend: () => void;
+  handleKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
+  cancelNode: (id: string) => Promise<void>;
+  retryNode: (id: string, models?: ComposerModelMap | null) => Promise<void>;
+  deleteNode: (id: string) => Promise<void>;
+  composerModels: ComposerModelMap;
+  t: (k: string) => string;
+}) {
+  const [footerHeight, setFooterHeight] = useState(FOOTER_DEFAULT);
+  const dragging = useRef(false);
+  const startY = useRef(0);
+  const startH = useRef(0);
+
+  const onPointerDown = useCallback((e: RPointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    dragging.current = true;
+    startY.current = e.clientY;
+    startH.current = footerHeight;
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  }, [footerHeight]);
+
+  const onPointerMove = useCallback((e: RPointerEvent<HTMLDivElement>) => {
+    if (!dragging.current) return;
+    const delta = startY.current - e.clientY;
+    setFooterHeight(Math.max(FOOTER_MIN, Math.min(FOOTER_MAX, startH.current + delta)));
+  }, []);
+
+  const onPointerUp = useCallback(() => {
+    dragging.current = false;
+  }, []);
+
+  return (
+    <div className="flex flex-col" style={{ height: footerHeight, minHeight: FOOTER_MIN }}>
+      {/* Drag handle */}
+      <div
+        data-testid="composer-resize-handle"
+        className="group flex h-1.5 cursor-row-resize items-center justify-center border-t border-gray-100 hover:bg-blue-50"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+      >
+        <div className="h-0.5 w-8 rounded-full bg-gray-300 group-hover:bg-blue-400" />
+      </div>
+
+      <div className="flex-1 overflow-auto bg-gray-50 px-4 py-2">
         {/* Cancel control for a running leaf node. */}
         {leafNode?.status === "running" && (
           <div data-testid="running-controls" className="mb-2 flex items-center gap-2">
@@ -330,15 +414,15 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
           <ComposerModelPicker />
         </div>
 
-        <div className="flex gap-2">
+        <div className="flex flex-1 gap-2">
           <textarea
-            rows={2}
             data-testid="conversation-input"
             className="flex-1 resize-none rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-700 placeholder:text-gray-400 focus:border-blue-300 focus:outline-none"
             placeholder={t("conversation.input_placeholder_active")}
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
             onKeyDown={handleKeyDown}
+            style={{ minHeight: 32 }}
           />
           <button
             type="button"
@@ -350,8 +434,8 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
             {sending ? "…" : t("conversation.send")}
           </button>
         </div>
-      </footer>
-    </>
+      </div>
+    </div>
   );
 }
 
