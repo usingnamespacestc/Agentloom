@@ -116,6 +116,8 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
   const stickyNotesRef = useRef(stickyNotes);
   useEffect(() => { stickyNotesRef.current = stickyNotes; }, [stickyNotes]);
   const isSticky = useCallback((id: string) => id in stickyNotesRef.current, []);
+  const [editingStickyId, setEditingStickyId] = useState<string | null>(null);
+  const [selectedStickyId, setSelectedStickyId] = useState<string | null>(null);
   const [paneMenu, setPaneMenu] = useState<{ x: number; y: number; flowX: number; flowY: number } | null>(null);
   const stickyDirty = useRef(false);
   const stickyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -284,15 +286,24 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
       id: note.id,
       type: "stickyNote",
       position: dragPositions.current[note.id] ?? { x: note.x, y: note.y },
-      data: { title: note.title, text: note.text, onTitleChange: onNoteTitleChange, onTextChange: onNoteTextChange, onDelete: onNoteDelete } satisfies StickyNoteData,
+      selected: selectedStickyId === note.id,
+      data: {
+        title: note.title,
+        text: note.text,
+        editing: editingStickyId === note.id,
+        onTitleChange: onNoteTitleChange,
+        onTextChange: onNoteTextChange,
+        onDelete: onNoteDelete,
+        onExitEdit: () => setEditingStickyId(null),
+      } satisfies StickyNoteData,
       style: { width: note.width, height: note.height },
     }));
     setNodes([...merged, ...stickyNodes]);
     setEdges(laid.edges);
-  }, [chatflow, selectedNodeId, contextWindowByModel, stickyNotes, onNoteTitleChange, onNoteTextChange, onNoteDelete]);
+  }, [chatflow, selectedNodeId, contextWindowByModel, stickyNotes, editingStickyId, selectedStickyId, onNoteTitleChange, onNoteTextChange, onNoteDelete]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
-    const filtered = changes.filter((c) => c.type !== "select" || ("id" in c && isSticky(String(c.id))));
+    const filtered = changes.filter((c) => c.type !== "select");
     if (filtered.length === 0) return;
     for (const c of filtered) {
       if (c.type === "position" && c.position) {
@@ -317,9 +328,30 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
   }, [flushPositions, updateStickyNote, isSticky]);
 
   const handleNodeClick: NodeMouseHandler = (_event, node) => {
-    selectNode(node.id);
+    if (isSticky(String(node.id))) {
+      setSelectedStickyId(node.id);
+    } else {
+      selectNode(node.id);
+      setSelectedStickyId(null);
+      setEditingStickyId(null);
+    }
     setContextMenu(null);
   };
+
+  const handleNodeDoubleClick: NodeMouseHandler = (_event, node) => {
+    if (isSticky(String(node.id))) {
+      setSelectedStickyId(node.id);
+      setEditingStickyId(node.id);
+    }
+  };
+
+  const handlePaneClickFull = useCallback(() => {
+    setContextMenu(null);
+    setPaneMenu(null);
+    setStickyCtxMenu(null);
+    setSelectedStickyId(null);
+    setEditingStickyId(null);
+  }, []);
 
   const handleContextMenu: NodeMouseHandler = (event, node) => {
     event.preventDefault();
@@ -331,11 +363,7 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
     }
   };
 
-  const handlePaneClick = useCallback(() => {
-    setContextMenu(null);
-    setPaneMenu(null);
-    setStickyCtxMenu(null);
-  }, []);
+  const handlePaneClick = handlePaneClickFull;
 
   if (!chatflow) {
     return (
@@ -366,6 +394,7 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
         edges={edges}
         nodeTypes={NODE_TYPES}
         onNodeClick={handleNodeClick}
+        onNodeDoubleClick={handleNodeDoubleClick}
         onNodeContextMenu={handleContextMenu}
         onPaneContextMenu={handlePaneContextMenu}
         onPaneClick={handlePaneClick}

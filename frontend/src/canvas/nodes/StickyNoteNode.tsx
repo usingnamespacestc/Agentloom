@@ -1,33 +1,23 @@
-import { useCallback, useRef, useEffect, useState } from "react";
+import { useCallback, useRef, useEffect } from "react";
 import { NodeResizer, type NodeProps } from "@xyflow/react";
 
 export interface StickyNoteData extends Record<string, unknown> {
   title: string;
   text: string;
+  editing: boolean;
   onTitleChange: (id: string, title: string) => void;
   onTextChange: (id: string, text: string) => void;
   onDelete: (id: string) => void;
+  onExitEdit: (id: string) => void;
 }
 
 export function StickyNoteNode({ id, data, selected }: NodeProps) {
-  const { title, text, onTitleChange, onTextChange, onDelete } = data as StickyNoteData;
+  const { title, text, editing, onTitleChange, onTextChange, onDelete, onExitEdit } = data as StickyNoteData;
   const textRef = useRef<HTMLTextAreaElement>(null);
-
-  const [editing, setEditing] = useState(false);
-
-  useEffect(() => {
-    if (!selected) setEditing(false);
-  }, [selected]);
 
   useEffect(() => {
     if (editing) textRef.current?.focus();
   }, [editing]);
-
-  const handleDoubleClick = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setEditing(true);
-  }, []);
 
   const handleTitleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => onTitleChange(id, e.target.value),
@@ -39,12 +29,21 @@ export function StickyNoteNode({ id, data, selected }: NodeProps) {
     [id, onTextChange],
   );
 
+  const handleEditKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onExitEdit(id);
+      }
+    },
+    [id, onExitEdit],
+  );
+
   return (
     <div
       className={`group flex h-full w-full flex-col rounded border-2 bg-yellow-50 shadow-sm transition-all ${
         selected ? "border-yellow-500 ring-2 ring-yellow-300" : "border-yellow-300"
       }`}
-      onDoubleClick={handleDoubleClick}
     >
       <NodeResizer
         isVisible={selected}
@@ -59,9 +58,9 @@ export function StickyNoteNode({ id, data, selected }: NodeProps) {
             type="text"
             value={title}
             onChange={handleTitleChange}
+            onKeyDown={handleEditKeyDown}
             className="nodrag nowheel min-w-0 flex-1 bg-transparent text-[10px] font-medium text-yellow-700 placeholder:text-yellow-400 focus:outline-none"
             placeholder="Note"
-            onDoubleClick={(e) => e.stopPropagation()}
           />
         ) : (
           <span className="min-w-0 flex-1 select-none truncate text-[10px] font-medium text-yellow-700">
@@ -81,9 +80,9 @@ export function StickyNoteNode({ id, data, selected }: NodeProps) {
           ref={textRef}
           value={text}
           onChange={handleTextChange}
+          onKeyDown={handleEditKeyDown}
           className="nodrag nowheel min-h-0 flex-1 resize-none bg-transparent px-2 py-1 text-[12px] text-gray-700 placeholder:text-yellow-400 focus:outline-none"
           placeholder="Type a note…"
-          onDoubleClick={(e) => e.stopPropagation()}
         />
       ) : (
         <div className="min-h-0 flex-1 select-none overflow-auto whitespace-pre-wrap px-2 py-1 text-[12px] text-gray-700">

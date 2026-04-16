@@ -73,6 +73,8 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
   const stickyNotesRef = useRef(stickyNotes);
   useEffect(() => { stickyNotesRef.current = stickyNotes; }, [stickyNotes]);
   const isSticky = useCallback((id: string) => id in stickyNotesRef.current, []);
+  const [editingStickyId, setEditingStickyId] = useState<string | null>(null);
+  const [selectedStickyId, setSelectedStickyId] = useState<string | null>(null);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; flowX: number; flowY: number } | null>(null);
   const stickyDirty = useRef(false);
   const stickyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -194,15 +196,24 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
       id: note.id,
       type: "stickyNote",
       position: dragPositions.current[note.id] ?? { x: note.x, y: note.y },
-      data: { title: note.title, text: note.text, onTitleChange: onNoteTitleChange, onTextChange: onNoteTextChange, onDelete: onNoteDelete } satisfies StickyNoteData,
+      selected: selectedStickyId === note.id,
+      data: {
+        title: note.title,
+        text: note.text,
+        editing: editingStickyId === note.id,
+        onTitleChange: onNoteTitleChange,
+        onTextChange: onNoteTextChange,
+        onDelete: onNoteDelete,
+        onExitEdit: () => setEditingStickyId(null),
+      } satisfies StickyNoteData,
       style: { width: note.width, height: note.height },
     }));
     setNodes([...merged, ...stickyNodes]);
     setEdges(laid.edges);
-  }, [workflow, workflowSelectedNodeId, ctxWindowByModel, stickyNotes, onNoteTitleChange, onNoteTextChange, onNoteDelete]);
+  }, [workflow, workflowSelectedNodeId, ctxWindowByModel, stickyNotes, editingStickyId, selectedStickyId, onNoteTitleChange, onNoteTextChange, onNoteDelete]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
-    const filtered = changes.filter((c) => c.type !== "select" || ("id" in c && isSticky(String(c.id))));
+    const filtered = changes.filter((c) => c.type !== "select");
     if (filtered.length === 0) return;
     for (const c of filtered) {
       if (c.type === "position" && c.position) {
@@ -227,7 +238,20 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
   }, [flushPositions, updateStickyNote, isSticky]);
 
   const handleNodeClick: NodeMouseHandler = (_event, node) => {
-    selectWorkflowNode(node.id);
+    if (isSticky(String(node.id))) {
+      setSelectedStickyId(node.id);
+    } else {
+      selectWorkflowNode(node.id);
+      setSelectedStickyId(null);
+      setEditingStickyId(null);
+    }
+  };
+
+  const handleNodeDoubleClick: NodeMouseHandler = (_event, node) => {
+    if (isSticky(String(node.id))) {
+      setSelectedStickyId(node.id);
+      setEditingStickyId(node.id);
+    }
   };
 
   const handleSelectNote = useCallback(
@@ -273,10 +297,11 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
         edges={edges}
         nodeTypes={NODE_TYPES}
         onNodeClick={handleNodeClick}
+        onNodeDoubleClick={handleNodeDoubleClick}
         onNodeContextMenu={handleNodeContextMenu}
         onNodesChange={onNodesChange}
         onPaneContextMenu={handlePaneContextMenu}
-        onPaneClick={() => { setCtxMenu(null); setStickyCtxMenu(null); }}
+        onPaneClick={() => { setCtxMenu(null); setStickyCtxMenu(null); setSelectedStickyId(null); setEditingStickyId(null); }}
         nodesDraggable
         nodesConnectable={false}
         edgesFocusable={false}
