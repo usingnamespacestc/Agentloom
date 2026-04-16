@@ -116,7 +116,8 @@
     "blackboard_empty": "（暂无记录）"
   },
   "canvas": {
-    "insert_note": "插入文本框"
+    "insert_note": "插入文本框",
+    "delete_note": "删除文本框"
   },
   "common": {
     "copied": "已复制",

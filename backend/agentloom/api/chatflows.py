@@ -439,6 +439,22 @@ async def patch_workflow_positions(
 
 class PatchStickyNotesRequest(BaseModel):
     notes: dict[str, StickyNote]
+    sub_path: list[str] = []
+
+
+def _resolve_workflow(chat: "ChatFlow", chat_node_id: str, sub_path: list[str]):
+    """Walk chat_node → workflow, then optionally into nested sub-workflows via sub_path."""
+    from agentloom.schemas.workflow import WorkFlow
+    chat_node = chat.nodes.get(chat_node_id)
+    if chat_node is None:
+        raise HTTPException(404, f"chat node {chat_node_id} not found")
+    wf: WorkFlow = chat_node.workflow
+    for work_node_id in sub_path:
+        wn = wf.nodes.get(work_node_id)
+        if wn is None or wn.sub_workflow is None:
+            raise HTTPException(404, f"work node {work_node_id} has no sub_workflow")
+        wf = wn.sub_workflow
+    return wf
 
 
 @router.put("/{chatflow_id}/sticky-notes")
@@ -468,10 +484,8 @@ async def put_workflow_sticky_notes(
     engine = _get_engine(request)
     repo = _repo(session)
     chat = await _attached_chatflow(engine, repo, chatflow_id)
-    chat_node = chat.nodes.get(chat_node_id)
-    if chat_node is None:
-        raise HTTPException(404, f"chat node {chat_node_id} not found")
-    chat_node.workflow.sticky_notes = body.notes
+    wf = _resolve_workflow(chat, chat_node_id, body.sub_path)
+    wf.sticky_notes = body.notes
     await repo.save(chat)
     await session.commit()
     return {"ok": True}

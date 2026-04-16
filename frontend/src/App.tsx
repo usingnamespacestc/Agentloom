@@ -49,7 +49,10 @@ export default function App() {
   );
   const outerChatNodeId =
     drillStack.length > 0 && drillStack[0].kind === "chatnode" ? drillStack[0].chatNodeId : null;
-  const isNested = drillStack.length > 1;
+  const subPath = useMemo(
+    () => drillStack.slice(1).map((f) => (f.kind === "subworkflow" ? f.parentWorkNodeId : "")).filter(Boolean),
+    [drillStack],
+  );
 
   return (
     <div className="flex h-full flex-col">
@@ -83,7 +86,7 @@ export default function App() {
             <WorkFlowCanvas
               workflow={drilledWorkflow}
               outerChatNodeId={outerChatNodeId}
-              nested={isNested}
+              subPath={subPath}
             />
           )}
 

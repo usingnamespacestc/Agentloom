@@ -206,10 +206,11 @@ export const api = {
     chatflowId: string,
     chatNodeId: string,
     notes: Record<string, StickyNote>,
+    subPath: string[] = [],
   ) =>
     request<{ ok: boolean }>(
       `/api/chatflows/${chatflowId}/nodes/${chatNodeId}/workflow/sticky-notes`,
-      { method: "PUT", body: JSON.stringify({ notes }) },
+      { method: "PUT", body: JSON.stringify({ notes, sub_path: subPath }) },
     ),
 
   // ---- folders ----

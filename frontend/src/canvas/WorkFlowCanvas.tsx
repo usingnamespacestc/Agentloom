@@ -48,9 +48,9 @@ export interface WorkFlowCanvasProps {
    * key for outer-workflow drag positions. ``null`` while the stack is
    * empty. */
   outerChatNodeId: NodeId | null;
-  /** True when ``workflow`` is a nested sub_workflow rather than the
-   * outer one — disables position-saving (no backend endpoint yet). */
-  nested: boolean;
+  /** Sub-path of WorkNode IDs for nested sub-workflows (frames after the
+   * first chatnode frame in the drill stack). Empty for the outer workflow. */
+  subPath: string[];
 }
 
 export function WorkFlowCanvas(props: WorkFlowCanvasProps) {
@@ -61,7 +61,7 @@ export function WorkFlowCanvas(props: WorkFlowCanvasProps) {
   );
 }
 
-function WorkFlowCanvasInner({ workflow, outerChatNodeId, nested }: WorkFlowCanvasProps) {
+function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCanvasProps) {
   const { t } = useTranslation();
   const chatflowId = useChatFlowStore((s) => s.chatflow?.id ?? null);
   const workflowSelectedNodeId = useChatFlowStore((s) => s.workflowSelectedNodeId);
@@ -83,9 +83,9 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, nested }: WorkFlowCanv
   }, [workflow]);
 
   const flushStickyNotes = useCallback((notes: Record<string, StickyNote>) => {
-    if (nested || !chatflowId || !outerChatNodeId) return;
-    void api.putWorkflowStickyNotes(chatflowId, outerChatNodeId, notes);
-  }, [chatflowId, outerChatNodeId, nested]);
+    if (!chatflowId || !outerChatNodeId) return;
+    void api.putWorkflowStickyNotes(chatflowId, outerChatNodeId, notes, subPath);
+  }, [chatflowId, outerChatNodeId, subPath]);
 
   const scheduleStickyFlush = useCallback((notes: Record<string, StickyNote>) => {
     stickyDirty.current = true;
@@ -154,7 +154,7 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, nested }: WorkFlowCanv
   const lastWorkflowId = useRef<string | null>(null);
 
   const flushPositions = useCallback(() => {
-    if (nested || !chatflowId || !outerChatNodeId || dirtyPositions.current.size === 0) return;
+    if (subPath.length > 0 || !chatflowId || !outerChatNodeId || dirtyPositions.current.size === 0) return;
     const positions = [...dirtyPositions.current]
       .map((id) => {
         const pos = dragPositions.current[id];
@@ -165,7 +165,7 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, nested }: WorkFlowCanv
     if (positions.length > 0) {
       void api.patchWorkflowPositions(chatflowId, outerChatNodeId, positions);
     }
-  }, [chatflowId, outerChatNodeId, nested]);
+  }, [chatflowId, outerChatNodeId, subPath]);
 
   useEffect(() => {
     if (workflow?.id !== lastWorkflowId.current) {
