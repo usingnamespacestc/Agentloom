@@ -1094,6 +1094,26 @@ function JudgeBubbleBody({
         />
       )}
 
+      {verdict?.redo_targets && verdict.redo_targets.length > 0 && (
+        <JudgeList
+          label={t("workflow.redo_targets")}
+          items={verdict.redo_targets.map(
+            (r) => `${r.node_id}: ${r.critique}`,
+          )}
+        />
+      )}
+
+      {verdict?.merged_response && (
+        <div className="mt-1 rounded border border-gray-200 bg-gray-50/60 p-1.5">
+          <div className="mb-0.5 text-[10px] font-medium uppercase tracking-wide text-gray-500">
+            merged response
+          </div>
+          <div className="prose prose-sm max-w-none text-[13px] leading-relaxed break-words text-gray-700">
+            <Markdown>{verdict.merged_response}</Markdown>
+          </div>
+        </div>
+      )}
+
       {node.output_message?.content && (
         <div className="prose prose-sm max-w-none text-[13px] leading-relaxed break-words text-gray-700">
           <Markdown>{node.output_message.content}</Markdown>

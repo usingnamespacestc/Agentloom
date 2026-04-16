@@ -2417,19 +2417,13 @@ def _cascade_fail_workflow(workflow: WorkFlow) -> list[str]:
 
 
 def _judge_pre_should_halt(verdict: JudgeVerdict) -> bool:
-    """Mirror of :func:`judge_pre_needs_user_input` — re-implemented here
-    to keep ``chatflow_engine`` independent of the formatter module.
+    """Only ``infeasible`` halts the run outright.
 
-    Only ``infeasible`` or explicit ``missing_inputs`` halt the run;
-    ``risky`` is defined (judge_pre.yaml) as "proceed is possible but
-    specific assumptions must hold" — those assumptions are surfaced
-    to the planner via ``handoff_notes`` rather than blocking the user.
+    ``risky`` — even with ``missing_inputs`` — proceeds: the worker
+    answers with what it has, and the post_judge surfaces caveats /
+    asks the user for clarification alongside the answer.
     """
-    if verdict.feasibility == "infeasible":
-        return True
-    if verdict.missing_inputs:
-        return True
-    return False
+    return verdict.feasibility == "infeasible"
 
 
 def _render_judge_pre_risky_assumptions(verdict: JudgeVerdict) -> str:
