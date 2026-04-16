@@ -631,6 +631,29 @@ function ThinkingBlock({ text, label }: { text: string; label: string }) {
   );
 }
 
+function CopyTextButton({ text }: { text: string }) {
+  const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+  const onClick = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch { /* ignore */ }
+  };
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="shrink-0 rounded px-1 py-0.5 text-[10px] text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+      title={t("common.copy")}
+    >
+      {copied ? t("common.copied") : t("common.copy")}
+    </button>
+  );
+}
+
 function ChatMessageBubble({
   node,
   isSelected,
@@ -660,7 +683,8 @@ function ChatMessageBubble({
       ].join(" ")}
     >
       {userText && (
-        <div className="mb-2 flex justify-end">
+        <div className="mb-2 flex items-end justify-end gap-1">
+          <CopyTextButton text={userText} />
           <div className="prose prose-sm prose-invert max-w-[85%] rounded-2xl bg-blue-500 px-3 py-2 text-[13px] text-white break-words">
             <Markdown>{userText}</Markdown>
           </div>
@@ -694,6 +718,7 @@ function ChatMessageBubble({
         usage={aggregateWorkflowUsage(node)}
         startedAt={node.started_at}
         finishedAt={node.finished_at}
+        copyText={agentText || null}
       />
     </div>
   );
@@ -742,11 +767,13 @@ function MetaFooter({
   usage,
   startedAt,
   finishedAt,
+  copyText,
 }: {
   nodeId: string | null;
   usage: TokenUsage | null;
   startedAt: string | null;
   finishedAt: string | null;
+  copyText?: string | null;
 }) {
   const { t } = useTranslation();
   const showTokens = usePreferencesStore((s) => s.showTokens);
@@ -792,6 +819,7 @@ function MetaFooter({
           {copied ? t("common.copied") : nodeId}
         </span>
       )}
+      {copyText && <CopyTextButton text={copyText} />}
     </div>
   );
 }

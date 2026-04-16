@@ -116,7 +116,8 @@
     "blackboard_empty": "(no entries yet)"
   },
   "common": {
-    "copied": "Copied"
+    "copied": "Copied",
+    "copy": "Copy"
   },
   "conversation": {
     "panel_title": "Conversation",
