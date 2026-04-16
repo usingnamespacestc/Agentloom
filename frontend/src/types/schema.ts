@@ -200,6 +200,16 @@ export interface WorkFlowNode extends NodeBaseFields {
   judge_verdict?: JudgeVerdict | null;
 }
 
+export interface StickyNote {
+  id: string;
+  title: string;
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface WorkFlow {
   id: NodeId;
   nodes: Record<NodeId, WorkFlowNode>;
@@ -216,6 +226,7 @@ export interface WorkFlow {
   /** Layer-local blackboard. Engine appends a one-line summary on
    * every WorkNode success. Not shared across nested WorkFlows. */
   shared_notes?: SharedNote[];
+  sticky_notes?: Record<string, StickyNote>;
 }
 
 export type PendingTurnSource = "web" | "discord" | "feishu" | "api" | "test";
@@ -281,6 +292,7 @@ export interface ChatFlow {
    * no per-chatflow filter on top of the workspace defaults.
    */
   disabled_tool_names: string[];
+  sticky_notes?: Record<string, StickyNote>;
   created_at: string;
 }
 

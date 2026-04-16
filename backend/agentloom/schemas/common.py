@@ -366,3 +366,15 @@ class SharedNote(BaseModel):
     kind: Literal["node_succeeded", "judge_verdict"] = "node_succeeded"
     summary: str
     at: datetime = Field(default_factory=utcnow)
+
+
+class StickyNote(BaseModel):
+    """User-created canvas sticky note, persisted with the ChatFlow."""
+
+    id: NodeId = Field(default_factory=generate_node_id)
+    title: str = "Note"
+    text: str = ""
+    x: float = 0.0
+    y: float = 0.0
+    width: float = 200.0
+    height: float = 120.0

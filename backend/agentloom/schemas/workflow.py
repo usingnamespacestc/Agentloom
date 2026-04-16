@@ -22,6 +22,7 @@ from agentloom.schemas.common import (
     ProviderModelRef,
     SharedNote,
     StepKind,
+    StickyNote,
     TokenUsage,
     ToolConstraints,
     ToolResult,
@@ -241,6 +242,7 @@ class WorkFlow(BaseModel):
     #: pull explicitly via prompt params. NOT shared across nested
     #: WorkFlows — each layer has its own (§3.4.6).
     shared_notes: list[SharedNote] = Field(default_factory=list)
+    sticky_notes: dict[str, StickyNote] = Field(default_factory=dict)
 
     @property
     def root_id(self) -> NodeId | None:

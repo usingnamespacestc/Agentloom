@@ -7,7 +7,7 @@
  * HTTP failures apart from network failures.
  */
 
-import type { ChatFlow, ChatFlowSummary, ExecutionMode, Folder, PendingTurn, PendingTurnSource, ProviderModelRef } from "@/types/schema";
+import type { ChatFlow, ChatFlowSummary, ExecutionMode, Folder, PendingTurn, PendingTurnSource, ProviderModelRef, StickyNote } from "@/types/schema";
 
 export class ApiError extends Error {
   constructor(
@@ -194,6 +194,22 @@ export const api = {
         method: "PATCH",
         body: JSON.stringify({ positions }),
       },
+    ),
+
+  putStickyNotes: (chatflowId: string, notes: Record<string, StickyNote>) =>
+    request<{ ok: boolean }>(`/api/chatflows/${chatflowId}/sticky-notes`, {
+      method: "PUT",
+      body: JSON.stringify({ notes }),
+    }),
+
+  putWorkflowStickyNotes: (
+    chatflowId: string,
+    chatNodeId: string,
+    notes: Record<string, StickyNote>,
+  ) =>
+    request<{ ok: boolean }>(
+      `/api/chatflows/${chatflowId}/nodes/${chatNodeId}/workflow/sticky-notes`,
+      { method: "PUT", body: JSON.stringify({ notes }) },
     ),
 
   // ---- folders ----

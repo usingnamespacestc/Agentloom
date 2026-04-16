@@ -59,7 +59,7 @@ import { ChatFlowNodeCard, type ChatFlowNodeData } from "./nodes/ChatFlowNodeCar
 import { StickyNoteNode, type StickyNoteData } from "./nodes/StickyNoteNode";
 import { api, type ProviderSummary } from "@/lib/api";
 import { useChatFlowStore } from "@/store/chatflowStore";
-import type { ChatFlow, ChatFlowNode, NodeId, ProviderModelRef } from "@/types/schema";
+import type { ChatFlow, ChatFlowNode, NodeId, ProviderModelRef, StickyNote } from "@/types/schema";
 
 interface ContextMenuState {
   nodeId: string;
@@ -111,36 +111,55 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const reactFlow = useReactFlow();
 
-  // Sticky notes (pane right-click)
-  const [stickyNotes, setStickyNotes] = useState<Map<string, { x: number; y: number; title: string; text: string }>>(new Map());
+  // Sticky notes — persisted via chatflow.sticky_notes
+  const [stickyNotes, setStickyNotes] = useState<Record<string, StickyNote>>({});
   const [paneMenu, setPaneMenu] = useState<{ x: number; y: number; flowX: number; flowY: number } | null>(null);
-  const noteCounter = useRef(0);
+  const stickyDirty = useRef(false);
+  const stickyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const onNoteTitleChange = useCallback((id: string, title: string) => {
+  // Sync from backend data on chatflow change
+  const lastStickySourceId = useRef<string | null>(null);
+  useEffect(() => {
+    if (chatflow?.id !== lastStickySourceId.current) {
+      lastStickySourceId.current = chatflow?.id ?? null;
+      setStickyNotes(chatflow?.sticky_notes ?? {});
+    }
+  }, [chatflow]);
+
+  const flushStickyNotes = useCallback((notes: Record<string, StickyNote>) => {
+    if (!chatflow) return;
+    void api.putStickyNotes(chatflow.id, notes);
+  }, [chatflow]);
+
+  const scheduleStickyFlush = useCallback((notes: Record<string, StickyNote>) => {
+    stickyDirty.current = true;
+    if (stickyTimer.current) clearTimeout(stickyTimer.current);
+    stickyTimer.current = setTimeout(() => {
+      stickyDirty.current = false;
+      flushStickyNotes(notes);
+    }, 800);
+  }, [flushStickyNotes]);
+
+  const updateStickyNote = useCallback((id: string, patch: Partial<StickyNote>) => {
     setStickyNotes((prev) => {
-      const next = new Map(prev);
-      const existing = next.get(id);
-      if (existing) next.set(id, { ...existing, title });
+      const existing = prev[id];
+      if (!existing) return prev;
+      const next = { ...prev, [id]: { ...existing, ...patch } };
+      scheduleStickyFlush(next);
       return next;
     });
-  }, []);
+  }, [scheduleStickyFlush]);
 
-  const onNoteTextChange = useCallback((id: string, text: string) => {
-    setStickyNotes((prev) => {
-      const next = new Map(prev);
-      const existing = next.get(id);
-      if (existing) next.set(id, { ...existing, text });
-      return next;
-    });
-  }, []);
+  const onNoteTitleChange = useCallback((id: string, title: string) => updateStickyNote(id, { title }), [updateStickyNote]);
+  const onNoteTextChange = useCallback((id: string, text: string) => updateStickyNote(id, { text }), [updateStickyNote]);
 
   const onNoteDelete = useCallback((id: string) => {
     setStickyNotes((prev) => {
-      const next = new Map(prev);
-      next.delete(id);
-      return next;
+      const { [id]: _, ...rest } = prev;
+      scheduleStickyFlush(rest);
+      return rest;
     });
-  }, []);
+  }, [scheduleStickyFlush]);
 
   const handlePaneContextMenu = useCallback((event: React.MouseEvent) => {
     event.preventDefault();
@@ -151,13 +170,14 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
 
   const handleInsertNote = useCallback(() => {
     if (!paneMenu) return;
-    const id = `_sticky_${++noteCounter.current}`;
+    const id = `_sticky_${crypto.randomUUID()}`;
     setStickyNotes((prev) => {
-      const next = new Map(prev);
-      next.set(id, { x: paneMenu.flowX, y: paneMenu.flowY, title: "Note", text: "" });
+      const note: StickyNote = { id, title: "Note", text: "", x: paneMenu.flowX, y: paneMenu.flowY, width: 200, height: 120 };
+      const next = { ...prev, [id]: note };
+      scheduleStickyFlush(next);
       return next;
     });
-  }, [paneMenu]);
+  }, [paneMenu, scheduleStickyFlush]);
 
   // Listen for drill-down requests from the node card's ⤢ button. We
   // use a window CustomEvent rather than passing a callback through
@@ -254,37 +274,41 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
       position: dragPositions.current[n.id] ?? n.position,
     }));
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const stickyNodes: Node<any>[] = [...stickyNotes.entries()].map(([id, note]) => ({
-      id,
+    const stickyNodes: Node<any>[] = Object.values(stickyNotes).map((note) => ({
+      id: note.id,
       type: "stickyNote",
-      position: dragPositions.current[id] ?? { x: note.x, y: note.y },
+      position: dragPositions.current[note.id] ?? { x: note.x, y: note.y },
       data: { title: note.title, text: note.text, onTitleChange: onNoteTitleChange, onTextChange: onNoteTextChange, onDelete: onNoteDelete } satisfies StickyNoteData,
-      style: { width: 200, height: 120 },
+      style: { width: note.width, height: note.height },
     }));
     setNodes([...merged, ...stickyNodes]);
     setEdges(laid.edges);
   }, [chatflow, selectedNodeId, contextWindowByModel, stickyNotes, onNoteTitleChange, onNoteTextChange, onNoteDelete]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
-    // Drop React Flow's own select events — the store is the single
-    // source of truth for selection, so we never let RF track it.
     const filtered = changes.filter((c) => c.type !== "select" || ("id" in c && String(c.id).startsWith("_sticky_")));
     if (filtered.length === 0) return;
     for (const c of filtered) {
       if (c.type === "position" && c.position) {
         dragPositions.current[c.id] = c.position;
-        dirtyPositions.current.add(c.id);
+        if (String(c.id).startsWith("_sticky_")) {
+          updateStickyNote(c.id, { x: c.position.x, y: c.position.y });
+        } else {
+          dirtyPositions.current.add(c.id);
+        }
+      }
+      if (c.type === "dimensions" && c.dimensions && String(c.id).startsWith("_sticky_")) {
+        updateStickyNote(c.id, { width: c.dimensions.width, height: c.dimensions.height });
       }
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     setNodes((ns) => applyNodeChanges(filtered, ns) as Node<any>[]);
 
-    // Debounce: save 500ms after last drag movement.
     if (dirtyPositions.current.size > 0) {
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(flushPositions, 500);
     }
-  }, [flushPositions]);
+  }, [flushPositions, updateStickyNote]);
 
   const handleNodeClick: NodeMouseHandler = (_event, node) => {
     selectNode(node.id);

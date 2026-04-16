@@ -38,7 +38,7 @@ import { WorkFlowNodeCard, type WorkFlowNodeData } from "./nodes/WorkFlowNodeCar
 import { api } from "@/lib/api";
 import type { ProviderSummary } from "@/lib/api";
 import { useChatFlowStore } from "@/store/chatflowStore";
-import type { NodeId, WorkFlow, WorkFlowNode } from "@/types/schema";
+import type { NodeId, StickyNote, WorkFlow, WorkFlowNode } from "@/types/schema";
 
 const NODE_TYPES = { workflow: WorkFlowNodeCard, stickyNote: StickyNoteNode };
 
@@ -68,36 +68,54 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, nested }: WorkFlowCanv
   const selectWorkflowNode = useChatFlowStore((s) => s.selectWorkflowNode);
   const reactFlow = useReactFlow();
 
-  // Sticky notes
-  const [stickyNotes, setStickyNotes] = useState<Map<string, { x: number; y: number; title: string; text: string }>>(new Map());
+  // Sticky notes — persisted via workflow.sticky_notes
+  const [stickyNotes, setStickyNotes] = useState<Record<string, StickyNote>>({});
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; flowX: number; flowY: number } | null>(null);
-  const noteCounter = useRef(0);
+  const stickyDirty = useRef(false);
+  const stickyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const onNoteTitleChange = useCallback((id: string, title: string) => {
+  const lastStickySourceId = useRef<string | null>(null);
+  useEffect(() => {
+    if (workflow?.id !== lastStickySourceId.current) {
+      lastStickySourceId.current = workflow?.id ?? null;
+      setStickyNotes(workflow?.sticky_notes ?? {});
+    }
+  }, [workflow]);
+
+  const flushStickyNotes = useCallback((notes: Record<string, StickyNote>) => {
+    if (nested || !chatflowId || !outerChatNodeId) return;
+    void api.putWorkflowStickyNotes(chatflowId, outerChatNodeId, notes);
+  }, [chatflowId, outerChatNodeId, nested]);
+
+  const scheduleStickyFlush = useCallback((notes: Record<string, StickyNote>) => {
+    stickyDirty.current = true;
+    if (stickyTimer.current) clearTimeout(stickyTimer.current);
+    stickyTimer.current = setTimeout(() => {
+      stickyDirty.current = false;
+      flushStickyNotes(notes);
+    }, 800);
+  }, [flushStickyNotes]);
+
+  const updateStickyNote = useCallback((id: string, patch: Partial<StickyNote>) => {
     setStickyNotes((prev) => {
-      const next = new Map(prev);
-      const existing = next.get(id);
-      if (existing) next.set(id, { ...existing, title });
+      const existing = prev[id];
+      if (!existing) return prev;
+      const next = { ...prev, [id]: { ...existing, ...patch } };
+      scheduleStickyFlush(next);
       return next;
     });
-  }, []);
+  }, [scheduleStickyFlush]);
 
-  const onNoteTextChange = useCallback((id: string, text: string) => {
-    setStickyNotes((prev) => {
-      const next = new Map(prev);
-      const existing = next.get(id);
-      if (existing) next.set(id, { ...existing, text });
-      return next;
-    });
-  }, []);
+  const onNoteTitleChange = useCallback((id: string, title: string) => updateStickyNote(id, { title }), [updateStickyNote]);
+  const onNoteTextChange = useCallback((id: string, text: string) => updateStickyNote(id, { text }), [updateStickyNote]);
 
   const onNoteDelete = useCallback((id: string) => {
     setStickyNotes((prev) => {
-      const next = new Map(prev);
-      next.delete(id);
-      return next;
+      const { [id]: _, ...rest } = prev;
+      scheduleStickyFlush(rest);
+      return rest;
     });
-  }, []);
+  }, [scheduleStickyFlush]);
 
   const handlePaneContextMenu = useCallback((event: React.MouseEvent) => {
     event.preventDefault();
@@ -108,13 +126,14 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, nested }: WorkFlowCanv
 
   const handleInsertNote = useCallback(() => {
     if (!ctxMenu) return;
-    const id = `_sticky_${++noteCounter.current}`;
+    const id = `_sticky_${crypto.randomUUID()}`;
     setStickyNotes((prev) => {
-      const next = new Map(prev);
-      next.set(id, { x: ctxMenu.flowX, y: ctxMenu.flowY, title: "Note", text: "" });
+      const note: StickyNote = { id, title: "Note", text: "", x: ctxMenu.flowX, y: ctxMenu.flowY, width: 200, height: 120 };
+      const next = { ...prev, [id]: note };
+      scheduleStickyFlush(next);
       return next;
     });
-  }, [ctxMenu]);
+  }, [ctxMenu, scheduleStickyFlush]);
 
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
   useEffect(() => {
@@ -160,12 +179,12 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, nested }: WorkFlowCanv
       position: dragPositions.current[n.id] ?? n.position,
     }));
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const stickyNodes: Node<any>[] = [...stickyNotes.entries()].map(([id, note]) => ({
-      id,
+    const stickyNodes: Node<any>[] = Object.values(stickyNotes).map((note) => ({
+      id: note.id,
       type: "stickyNote",
-      position: dragPositions.current[id] ?? { x: note.x, y: note.y },
+      position: dragPositions.current[note.id] ?? { x: note.x, y: note.y },
       data: { title: note.title, text: note.text, onTitleChange: onNoteTitleChange, onTextChange: onNoteTextChange, onDelete: onNoteDelete } satisfies StickyNoteData,
-      style: { width: 200, height: 120 },
+      style: { width: note.width, height: note.height },
     }));
     setNodes([...merged, ...stickyNodes]);
     setEdges(laid.edges);
@@ -177,7 +196,14 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, nested }: WorkFlowCanv
     for (const c of filtered) {
       if (c.type === "position" && c.position) {
         dragPositions.current[c.id] = c.position;
-        dirtyPositions.current.add(c.id);
+        if (String(c.id).startsWith("_sticky_")) {
+          updateStickyNote(c.id, { x: c.position.x, y: c.position.y });
+        } else {
+          dirtyPositions.current.add(c.id);
+        }
+      }
+      if (c.type === "dimensions" && c.dimensions && String(c.id).startsWith("_sticky_")) {
+        updateStickyNote(c.id, { width: c.dimensions.width, height: c.dimensions.height });
       }
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -187,7 +213,7 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, nested }: WorkFlowCanv
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(flushPositions, 500);
     }
-  }, [flushPositions]);
+  }, [flushPositions, updateStickyNote]);
 
   const handleNodeClick: NodeMouseHandler = (_event, node) => {
     selectWorkflowNode(node.id);

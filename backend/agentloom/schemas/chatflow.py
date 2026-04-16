@@ -15,6 +15,7 @@ from agentloom.schemas.common import (
     NodeId,
     NodeStatus,
     ProviderModelRef,
+    StickyNote,
     generate_node_id,
     utcnow,
 )
@@ -159,6 +160,7 @@ class ChatFlow(BaseModel):
     #: ``judge_pre_enabled``, ``judge_during_enabled``, ``judge_post_enabled``)
     #: from this per §3.4.1 — see :func:`derive_switches_from_mode`.
     default_execution_mode: ExecutionMode = ExecutionMode.DIRECT
+    sticky_notes: dict[str, StickyNote] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utcnow)
 
     @property

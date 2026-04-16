@@ -47,7 +47,7 @@ from agentloom.engine.chatflow_engine import (
 from agentloom.engine.events import get_event_bus
 from agentloom.schemas import ChatFlow, PendingTurn, make_chatflow
 from agentloom.schemas.chatflow import PendingTurnSource
-from agentloom.schemas.common import ExecutionMode, FrozenNodeError, ProviderModelRef
+from agentloom.schemas.common import ExecutionMode, FrozenNodeError, ProviderModelRef, StickyNote
 from agentloom.mcp.runtime import get_shared_registry
 from agentloom.tools.base import ToolContext
 
@@ -432,6 +432,46 @@ async def patch_workflow_positions(
         if node is not None:
             node.position_x = pos.x
             node.position_y = pos.y
+    await repo.save(chat)
+    await session.commit()
+    return {"ok": True}
+
+
+class PatchStickyNotesRequest(BaseModel):
+    notes: dict[str, StickyNote]
+
+
+@router.put("/{chatflow_id}/sticky-notes")
+async def put_sticky_notes(
+    chatflow_id: str,
+    body: PatchStickyNotesRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    engine = _get_engine(request)
+    repo = _repo(session)
+    chat = await _attached_chatflow(engine, repo, chatflow_id)
+    chat.sticky_notes = body.notes
+    await repo.save(chat)
+    await session.commit()
+    return {"ok": True}
+
+
+@router.put("/{chatflow_id}/nodes/{chat_node_id}/workflow/sticky-notes")
+async def put_workflow_sticky_notes(
+    chatflow_id: str,
+    chat_node_id: str,
+    body: PatchStickyNotesRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    engine = _get_engine(request)
+    repo = _repo(session)
+    chat = await _attached_chatflow(engine, repo, chatflow_id)
+    chat_node = chat.nodes.get(chat_node_id)
+    if chat_node is None:
+        raise HTTPException(404, f"chat node {chat_node_id} not found")
+    chat_node.workflow.sticky_notes = body.notes
     await repo.save(chat)
     await session.commit()
     return {"ok": True}
