@@ -113,6 +113,9 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
 
   // Sticky notes — persisted via chatflow.sticky_notes
   const [stickyNotes, setStickyNotes] = useState<Record<string, StickyNote>>({});
+  const stickyNotesRef = useRef(stickyNotes);
+  useEffect(() => { stickyNotesRef.current = stickyNotes; }, [stickyNotes]);
+  const isSticky = useCallback((id: string) => id in stickyNotesRef.current, []);
   const [paneMenu, setPaneMenu] = useState<{ x: number; y: number; flowX: number; flowY: number } | null>(null);
   const stickyDirty = useRef(false);
   const stickyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -161,7 +164,7 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
     });
   }, [scheduleStickyFlush]);
 
-  const handlePaneContextMenu = useCallback((event: React.MouseEvent) => {
+  const handlePaneContextMenu = useCallback((event: MouseEvent | React.MouseEvent) => {
     event.preventDefault();
     const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
     const flowPos = reactFlow.screenToFlowPosition({ x: event.clientX - bounds.left, y: event.clientY - bounds.top });
@@ -289,18 +292,18 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
   }, [chatflow, selectedNodeId, contextWindowByModel, stickyNotes, onNoteTitleChange, onNoteTextChange, onNoteDelete]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
-    const filtered = changes.filter((c) => c.type !== "select" || ("id" in c && String(c.id).startsWith("_sticky_")));
+    const filtered = changes.filter((c) => c.type !== "select" || ("id" in c && isSticky(String(c.id))));
     if (filtered.length === 0) return;
     for (const c of filtered) {
       if (c.type === "position" && c.position) {
         dragPositions.current[c.id] = c.position;
-        if (String(c.id).startsWith("_sticky_")) {
+        if (isSticky(String(c.id))) {
           updateStickyNote(c.id, { x: c.position.x, y: c.position.y });
         } else {
           dirtyPositions.current.add(c.id);
         }
       }
-      if (c.type === "dimensions" && c.dimensions && String(c.id).startsWith("_sticky_")) {
+      if (c.type === "dimensions" && c.dimensions && isSticky(String(c.id))) {
         updateStickyNote(c.id, { width: c.dimensions.width, height: c.dimensions.height });
       }
     }
@@ -311,7 +314,7 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(flushPositions, 500);
     }
-  }, [flushPositions, updateStickyNote]);
+  }, [flushPositions, updateStickyNote, isSticky]);
 
   const handleNodeClick: NodeMouseHandler = (_event, node) => {
     selectNode(node.id);
@@ -320,7 +323,7 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
 
   const handleContextMenu: NodeMouseHandler = (event, node) => {
     event.preventDefault();
-    if (String(node.id).startsWith("_sticky_")) {
+    if (isSticky(String(node.id))) {
       setStickyCtxMenu({ x: event.clientX, y: event.clientY, noteId: node.id });
     } else {
       setContextMenu({ nodeId: node.id, x: event.clientX, y: event.clientY });
@@ -376,6 +379,7 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
         edgesFocusable={false}
         multiSelectionKeyCode={null}
         selectNodesOnDrag={false}
+        zoomOnDoubleClick={false}
         fitView
         proOptions={{ hideAttribution: true }}
       >

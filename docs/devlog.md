@@ -830,6 +830,37 @@ M10 定的三模式中 `semi_auto` 实装太重（要画布关键帧 UI），先
 - `8ed495f`：judge_pre `risky` verdict 改"带 assumptions 当 handoff notes 继续"，只有 `infeasible` 才真 halt
 - `efc3e9d` / `ac68379`：judge 输出 JSON 解析失败时给一次自我修正机会；list 字段 null 容错
 
+---
+
+## 2026-04-16 — 画布 Sticky Notes + Planner 容错 + 多项 UI 改进
+
+本轮大量修补前端体验和后端容错逻辑。
+
+### Planner corrective retry
+
+模型（尤其 Ollama 小模型）有时返回的 JSON plan 缺少引号导致解析失败。改 `_after_planner_judge`：`PlannerParseError` 时如果 planner 数 < 2，重新 spawn planner 并把上一次坏输出 + 解析错误作为 correction context 带入，给模型一次自我修正机会。超过 2 次仍失败则正常 halt。
+
+### 画布 Sticky Notes（完整端到端）
+
+支持在 ChatFlow 画布和 WorkFlow 画布上右键 → 「插入文本框」：
+
+- **StickyNoteNode**：黄色便签，可编辑标题（原为固定 "Note"）和正文，可拖拽和调整大小（NodeResizer），支持右键 → 「删除文本框」
+- **后端持久化**：`StickyNote` 模型存入 ChatFlow / WorkFlow 的 JSONB payload，`PUT /sticky-notes` 端点接受 `sub_path` 参数支持嵌套子工作流
+- **Frozen-node 豁免**：`_strip_frozen_exempt` 递归剥离 `sticky_notes`，保证在已完成 ChatNode 的内部工作流上编辑便签不触发 frozen guard
+- **前端**：debounced 800ms 自动保存位置/尺寸/内容变更；刷新后恢复
+- **交互修复**：原本用 `startsWith("_sticky_")` 识别便签节点，但后端持久化后重新加载的便签 id 是 UUIDv7 不带前缀，导致选中/拖拽/右键/双击对已保存便签全失效。改用 `stickyNotesRef` 运行时查表识别；同时 `zoomOnDoubleClick={false}` 避免双击进入编辑态时误触 d3-zoom 页面放大
+
+### 其他改动（本轮，来自上一压缩周期尾部）
+
+- **Retry 使用新模型**：5 文件全栈改动 — `RetryRequest` 接受 `ProviderModelRef`，engine 优先 caller-supplied 模型，前端传 `composerModels`
+- **pre_judge `risky` 不再 halt**：`_judge_pre_should_halt` 只看 `infeasible`，`risky` + `missing_inputs` 继续执行
+- **judge merged_response / redo_targets 显示**：右侧面板 JudgeBubbleBody 渲染这两个字段
+- **fallback max_tokens = 8192**：模型无 `max_output_tokens` / `context_window` 配置时保底
+- **可拖动 composer 区域**：拖拽手柄调整输入区高度，textarea 随区域伸缩
+- **模型选择器不被遮挡**：composer 容器 `overflow-visible`
+- **一键复制消息**：用户 / 助手消息各有复制原始文本按钮
+- **Judge tool_use structured output**：judge 调用通过 `judge_verdict_tool_def` 生成工具定义，不强制 `tool_choice`（Ollama 忽略该参数）
+
 ## 故意没动的（next-step 候选清单）
 
 - 半自动模式 UI（关键帧画布、locked/unlocked 操作）
@@ -837,4 +868,5 @@ M10 定的三模式中 `semi_auto` 实装太重（要画布关键帧 UI），先
 - Skill 模块 / 记忆模块（全新模块，未设计）
 - redo_aggregation 路径仍 flat-format（Phase 3 surface 出来的次级 gap）
 - 通知外部通道（webhook / desktop / 邮件）
+- **Conversation compaction**（三层压缩：ChatFlow / WorkFlow / UI）— 报告见 `docs/research-conversation-compaction.md`，待讨论
 
