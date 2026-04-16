@@ -212,8 +212,33 @@ _FROZEN_EXEMPT_FIELDS = frozenset({"pending_queue", "position_x", "position_y"})
 
 
 def _strip_frozen_exempt(dump: dict) -> dict:
-    """Return a copy of ``dump`` with exempt fields removed."""
-    return {k: v for k, v in dump.items() if k not in _FROZEN_EXEMPT_FIELDS}
+    """Return a copy of ``dump`` with exempt fields removed.
+
+    Recursively strips ``sticky_notes`` from embedded workflow dicts so
+    that adding/editing canvas notes never trips the frozen-node guard.
+    """
+    out = {}
+    for k, v in dump.items():
+        if k in _FROZEN_EXEMPT_FIELDS:
+            continue
+        if k == "workflow" and isinstance(v, dict):
+            out[k] = _strip_workflow_sticky(v)
+        else:
+            out[k] = v
+    return out
+
+
+def _strip_workflow_sticky(wf: dict) -> dict:
+    """Strip sticky_notes from a workflow dict and its nested sub-workflows."""
+    out = {k: v for k, v in wf.items() if k != "sticky_notes"}
+    if "nodes" in out and isinstance(out["nodes"], dict):
+        cleaned_nodes = {}
+        for nid, node in out["nodes"].items():
+            if isinstance(node, dict) and "sub_workflow" in node and isinstance(node["sub_workflow"], dict):
+                node = {**node, "sub_workflow": _strip_workflow_sticky(node["sub_workflow"])}
+            cleaned_nodes[nid] = node
+        out["nodes"] = cleaned_nodes
+    return out
 
 
 def _assert_frozen_chatflow_nodes_unchanged(prior: ChatFlow, new: ChatFlow) -> None:
