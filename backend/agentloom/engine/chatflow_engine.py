@@ -1453,11 +1453,28 @@ class ChatFlowEngine:
         try:
             plan = parse_recursive_planner_output(planner_node.output_message.content)
         except PlannerParseError as exc:
+            planner_count = sum(
+                1 for n in workflow.nodes.values()
+                if n.role == WorkNodeRole.PLANNER
+            )
+            if planner_count < 2:
+                self._spawn_planner(
+                    workflow,
+                    planner_judge_node,
+                    resolved_model=resolved_model,
+                    prior_plan=planner_node.output_message.content,
+                    critique=(
+                        f"Your previous plan output failed JSON parse: {exc}. "
+                        "Reply with ONLY valid JSON matching the required "
+                        "schema — all string values must be properly quoted."
+                    ),
+                )
+                return
             self._halt_to_post_judge(
                 workflow,
                 parent_node=planner_judge_node,
                 upstream_kind="planner_parse_error",
-                upstream_summary=f"planner output failed to parse: {exc}",
+                upstream_summary=f"planner output failed to parse after retry: {exc}",
                 user_message_text=user_message_text,
                 context_wire=context_wire,
             )
