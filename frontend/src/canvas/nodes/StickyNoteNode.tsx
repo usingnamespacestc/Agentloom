@@ -41,8 +41,8 @@ export function StickyNoteNode({ id, data, selected }: NodeProps) {
 
   return (
     <div
-      className={`group flex h-full w-full flex-col rounded border shadow-sm ${
-        selected ? "border-yellow-400 bg-yellow-50" : "border-yellow-300 bg-yellow-50"
+      className={`group flex h-full w-full flex-col rounded border-2 bg-yellow-50 shadow-sm transition-all ${
+        selected ? "border-yellow-500 ring-2 ring-yellow-300" : "border-yellow-300"
       }`}
       onDoubleClick={handleDoubleClick}
     >
