@@ -367,7 +367,7 @@ function ComposerFooter({
         <div className="h-0.5 w-8 rounded-full bg-gray-300 group-hover:bg-blue-400" />
       </div>
 
-      <div className="flex-1 overflow-auto bg-gray-50 px-4 py-2">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-gray-50 px-4 py-2">
         {/* Cancel control for a running leaf node. */}
         {leafNode?.status === "running" && (
           <div data-testid="running-controls" className="mb-2 flex items-center gap-2">
@@ -414,15 +414,14 @@ function ComposerFooter({
           <ComposerModelPicker />
         </div>
 
-        <div className="flex flex-1 gap-2">
+        <div className="flex min-h-0 flex-1 gap-2">
           <textarea
             data-testid="conversation-input"
-            className="flex-1 resize-none rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-700 placeholder:text-gray-400 focus:border-blue-300 focus:outline-none"
+            className="min-h-0 flex-1 resize-none rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-700 placeholder:text-gray-400 focus:border-blue-300 focus:outline-none"
             placeholder={t("conversation.input_placeholder_active")}
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
             onKeyDown={handleKeyDown}
-            style={{ minHeight: 32 }}
           />
           <button
             type="button"
