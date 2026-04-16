@@ -30,7 +30,7 @@ import "@xyflow/react/dist/style.css";
 import { useTranslation } from "react-i18next";
 
 import { layoutDag } from "./layout";
-import { CanvasContextMenu } from "./CanvasContextMenu";
+import { CanvasContextMenu, StickyNoteContextMenu } from "./CanvasContextMenu";
 import { contextWindowMap } from "./ChatFlowCanvas";
 import { WorkFlowBlackboard } from "./WorkFlowBlackboard";
 import { StickyNoteNode, type StickyNoteData } from "./nodes/StickyNoteNode";
@@ -135,6 +135,14 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
     });
   }, [ctxMenu, scheduleStickyFlush]);
 
+  // Right-click menu for sticky notes (rendered at canvas level, not inside the node)
+  const [stickyCtxMenu, setStickyCtxMenu] = useState<{ x: number; y: number; noteId: string } | null>(null);
+  const handleNodeContextMenu: NodeMouseHandler = useCallback((event, node) => {
+    if (!String(node.id).startsWith("_sticky_")) return;
+    event.preventDefault();
+    setStickyCtxMenu({ x: event.clientX, y: event.clientY, noteId: node.id });
+  }, []);
+
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
   useEffect(() => {
     let cancelled = false;
@@ -182,7 +190,6 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
     const stickyNodes: Node<any>[] = Object.values(stickyNotes).map((note) => ({
       id: note.id,
       type: "stickyNote",
-      dragHandle: ".sticky-drag-active",
       position: dragPositions.current[note.id] ?? { x: note.x, y: note.y },
       data: { title: note.title, text: note.text, onTitleChange: onNoteTitleChange, onTextChange: onNoteTextChange, onDelete: onNoteDelete } satisfies StickyNoteData,
       style: { width: note.width, height: note.height },
@@ -257,15 +264,16 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
   }
 
   return (
-    <div data-testid="workflow-canvas" className="relative h-full w-full" onClick={() => setCtxMenu(null)}>
+    <div data-testid="workflow-canvas" className="relative h-full w-full" onClick={() => { setCtxMenu(null); setStickyCtxMenu(null); }}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
         nodeTypes={NODE_TYPES}
         onNodeClick={handleNodeClick}
+        onNodeContextMenu={handleNodeContextMenu}
         onNodesChange={onNodesChange}
         onPaneContextMenu={handlePaneContextMenu}
-        onPaneClick={() => setCtxMenu(null)}
+        onPaneClick={() => { setCtxMenu(null); setStickyCtxMenu(null); }}
         nodesDraggable
         nodesConnectable={false}
         edgesFocusable={false}
@@ -283,6 +291,14 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
           y={ctxMenu.y}
           onInsertNote={handleInsertNote}
           onClose={() => setCtxMenu(null)}
+        />
+      )}
+      {stickyCtxMenu && (
+        <StickyNoteContextMenu
+          x={stickyCtxMenu.x}
+          y={stickyCtxMenu.y}
+          onDelete={() => onNoteDelete(stickyCtxMenu.noteId)}
+          onClose={() => setStickyCtxMenu(null)}
         />
       )}
       <WorkFlowBlackboard

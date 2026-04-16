@@ -52,7 +52,7 @@ import "@xyflow/react/dist/style.css";
 import { useTranslation } from "react-i18next";
 
 import { layoutDag } from "./layout";
-import { CanvasContextMenu } from "./CanvasContextMenu";
+import { CanvasContextMenu, StickyNoteContextMenu } from "./CanvasContextMenu";
 import { ModelRibbonLayer } from "./ModelRibbonLayer";
 import { MODEL_KINDS, colorForModel, edgeModel } from "./effectiveModel";
 import { ChatFlowNodeCard, type ChatFlowNodeData } from "./nodes/ChatFlowNodeCard";
@@ -179,6 +179,9 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
     });
   }, [paneMenu, scheduleStickyFlush]);
 
+  // Right-click menu for sticky notes (rendered at canvas level)
+  const [stickyCtxMenu, setStickyCtxMenu] = useState<{ x: number; y: number; noteId: string } | null>(null);
+
   // Listen for drill-down requests from the node card's ⤢ button. We
   // use a window CustomEvent rather than passing a callback through
   // React Flow's node-data channel because data flows back out of
@@ -277,7 +280,6 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
     const stickyNodes: Node<any>[] = Object.values(stickyNotes).map((note) => ({
       id: note.id,
       type: "stickyNote",
-      dragHandle: ".sticky-drag-active",
       position: dragPositions.current[note.id] ?? { x: note.x, y: note.y },
       data: { title: note.title, text: note.text, onTitleChange: onNoteTitleChange, onTextChange: onNoteTextChange, onDelete: onNoteDelete } satisfies StickyNoteData,
       style: { width: note.width, height: note.height },
@@ -318,13 +320,18 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
 
   const handleContextMenu: NodeMouseHandler = (event, node) => {
     event.preventDefault();
-    setContextMenu({ nodeId: node.id, x: event.clientX, y: event.clientY });
-    selectNode(node.id);
+    if (String(node.id).startsWith("_sticky_")) {
+      setStickyCtxMenu({ x: event.clientX, y: event.clientY, noteId: node.id });
+    } else {
+      setContextMenu({ nodeId: node.id, x: event.clientX, y: event.clientY });
+      selectNode(node.id);
+    }
   };
 
   const handlePaneClick = useCallback(() => {
     setContextMenu(null);
     setPaneMenu(null);
+    setStickyCtxMenu(null);
   }, []);
 
   if (!chatflow) {
@@ -432,6 +439,14 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
           y={paneMenu.y}
           onInsertNote={handleInsertNote}
           onClose={() => setPaneMenu(null)}
+        />
+      )}
+      {stickyCtxMenu && (
+        <StickyNoteContextMenu
+          x={stickyCtxMenu.x}
+          y={stickyCtxMenu.y}
+          onDelete={() => onNoteDelete(stickyCtxMenu.noteId)}
+          onClose={() => setStickyCtxMenu(null)}
         />
       )}
 
