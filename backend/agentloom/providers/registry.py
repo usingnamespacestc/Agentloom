@@ -24,11 +24,16 @@ def build_adapter(
     base_url: str,
     api_key: str | None,
     extra_headers: dict[str, str] | None = None,
+    sub_kind: str | None = None,
     **kwargs: Any,
 ) -> ProviderAdapter:
     if kind not in _KINDS:
         raise ValueError(f"Unknown provider kind: {kind!r}. Known: {sorted(_KINDS)}")
     cls = _KINDS[kind]
+    # ``sub_kind`` is openai_compat-only: anthropic_native's single sub_kind
+    # (``anthropic``) is already implicit in the adapter choice.
+    if kind == "openai_compat":
+        kwargs["sub_kind"] = sub_kind
     return cls(
         friendly_name=friendly_name,
         base_url=base_url,

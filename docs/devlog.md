@@ -861,6 +861,239 @@ M10 定的三模式中 `semi_auto` 实装太重（要画布关键帧 UI），先
 - **一键复制消息**：用户 / 助手消息各有复制原始文本按钮
 - **Judge tool_use structured output**：judge 调用通过 `judge_verdict_tool_def` 生成工具定义，不强制 `tool_choice`（Ollama 忽略该参数）
 
+## 2026-04-16 (续) — Structured JSON output 支持（provider / model 双层 json_mode）
+
+Planner corrective retry 只是 band-aid：原 bug 是模型吐出缺引号的 JSON 被 `json.loads` 拒绝。真正的根治是用 provider 侧的 structured output 能力（Ollama format+schema、OpenAI response_format、DeepSeek json_object）把 JSON 合法性从"提示工程祈祷"升级成"协议级约束"。
+
+不同 provider 的 JSON 原生能力分三档，所以增加一个 `JsonMode` enum 让用户在 Settings 里挂配置：
+
+| 档位 | 语义 | 典型 provider |
+|---|---|---|
+| `schema` | `response_format={"type":"json_schema","json_schema":{...}}` | Ollama, Volcengine Ark（新版 Doubao）, OpenAI gpt-4o+ |
+| `object` | `response_format={"type":"json_object"}`（只保合法 JSON，不校验 schema） | DeepSeek, Moonshot, GLM |
+| `none` | 不发 `response_format`，继续靠 prompt 约束 | Anthropic（走 tool_use）、未知 provider 的保守默认 |
+
+实现分两层：
+
+- **Provider 级默认值**：`ProviderConfig.json_mode: JsonMode = NONE`。新建时默认不开，用户在 Settings 里按 provider 文档手动选档。
+- **Model 级可选覆盖**：`ModelInfo.json_mode: JsonMode | None = None`。留空 = 跟随 provider；覆盖时 per-model 优先（混合能力 fleet 的逃生舱，比如一个 provider 下一批老模型只支持 `object`、新模型支持 `schema`）。Resolve 逻辑 `model.json_mode or provider.json_mode`，发生在 `_provider_call_from_settings`。
+
+### Backend wiring
+
+- `schemas/provider.py` — 新增 `JsonMode` enum + 两个字段；JSONB payload 无需迁移，历史行 deserialize 时缺字段就取默认 `NONE` / `None`。
+- `providers/base.py` / `openai_compat.py` / `anthropic_native.py` — `chat()` 签名加 `json_mode` + `json_schema`。OpenAI-compat 根据 `json_mode` 转成 `response_format`；**tools 同时出现时跳过** `response_format`（大部分 provider 互斥，tool JSON 本身就是 structured output）。Anthropic 原生是 tool_use 走 structured output，所以这两个参数 no-op。
+- `engine/workflow_engine.py` — `_invoke_and_freeze` 加 `json_schema` 参数；`_run_llm_call` 针对 `WorkNodeRole.PLANNER` 把 `RecursivePlannerOutput.model_json_schema()` 塞进去。`object` 档的 provider 自动退化为自由 JSON（不校验字段），已经比 `none` 强得多。
+- `api/workflows.py::_provider_call_from_settings` — 闭包签名加 `json_schema`，在 DB config 里 resolve `json_mode` 后转给 adapter。
+- `api/providers.py` — CRUD `CreateProviderRequest` / `PatchProviderRequest` 加 `json_mode` 字段。
+
+### Frontend
+
+- `lib/api.ts` — 新增 `JsonMode` 类型，`ProviderSummary` / `ProviderDetail` / `CreateProviderBody` 加 `json_mode?`，`ModelInfoDTO` 加可空 `json_mode`。
+- `components/Settings.tsx` — provider 表单加「JSON 输出模式」下拉（none / object / schema + 说明），每个 model 行多一个小下拉 `inherit / none / object / schema`（空值映射到 `null` = 跟随）。新增 7 条 i18n（中英文各一份）。
+
+### 测试
+
+- `test_providers_openai_compat.py` 新增 4 个单测：
+  - `test_json_mode_schema_sets_response_format_json_schema`
+  - `test_json_mode_object_sets_json_object_response_format`
+  - `test_json_mode_none_omits_response_format`
+  - `test_json_mode_skipped_when_tools_present`
+- 既有 210 unit + 96 integration 全绿。现有 provider_call stub 都用 `**_kwargs` 接，所以新增 `json_schema` 参数对测试 double 透明。
+
+### 刻意没做的
+
+- Anthropic native 也可以用 tool_use forcing 跑 structured output，本轮只把签名对齐、未实现转义逻辑。planner 目前只在 openai_compat 路径下工作，后续如有需要在 Anthropic 原生 provider 跑 planner 再加。
+- `response_format` + `tools` 共存的 edge case（OpenAI o1 系列 / Anthropic 结构化）未覆盖；当前策略是"有 tools 就跳 response_format"，够用。
+- Provider 发现阶段（discover_models）不自动填 `json_mode` — provider 不一定在元数据里标注能力，留给用户按文档手动选。
+
+## 2026-04-17 — Planner reasoning / DB 连接池漏 / 引擎 session 生命周期 / provider_sub_kind
+
+本轮集中拆历史 incident 遗留的几颗定时炸弹，并把按模型调参数这条线补齐。
+
+### #115 — Planner 降级用 response_format=json_schema
+
+修 planner 偶尔回 markdown-fenced JSON 的问题。根因：`_run_llm_call` 调 planner 时 `expose_tools=True`，让 `_invoke_and_freeze → _to_wire_tools` 返回非空 `wire_tools`；`openai_compat.chat` 的 "tools 存在时跳过 `response_format`" 互斥逻辑就把 planner 的 `json_schema` 默默吞了，退化回纯提示词约束。
+
+改动：`workflow_engine._run_llm_call` 对 `node.role == PLANNER` 强制 `expose_tools=False`，并把 `RecursivePlannerOutput.model_json_schema()` 传下去。现在 planner 路径固定走 `response_format={type:"json_schema",...}`，模型做不出合法 JSON 就直接 400 到重试循环，不再默默吐坏 JSON 让下游解析器救场。
+
+### #116 — Planner 输出加 `reasoning` 字段
+
+`RecursivePlannerOutput` 顶层多一个 `reasoning: str | None`，让 planner 在承诺 atomic/decompose 之前先用 1–2 句交代判断依据。prompt 里附了说明：模型若已有 thinking channel（Anthropic 扩展思考、DeepSeek reasoning_content），这里写结论摘要即可，别重复 full trace。
+
+不对模型的 thinking 能力做分叉——统一字段对非思考模型也有好处（外显的元认知 trace 对 judge 的诊断有用），而且字段 optional，思考模型留 null 也不罚。
+
+### #117 / #118 / #119 — DB 连接池耗尽 root cause
+
+现象：跑一个 53 分钟的大工作流时，`/api/providers` 突然爆几个 500；其他请求也偶发 QueuePool timeout。
+
+诊断过程：
+
+1. 最开始怀疑是并发调 provider API 飙高，但日志显示问题期 `/api/providers` 并没有流量激增。
+2. 查代码发现 `api/chatflows.py::submit_turn` 是 `async def` + `Depends(get_session)`，整个 handler 生命周期持一个 session → 一个 DB 连接。
+3. `submit_turn` 内部调 `engine.submit_user_turn(...)` 会 `await future`，等整个 workflow 跑完才 return。workflow 可能几十分钟。期间这条连接一直被这个 handler 持着，池里剩 14 个给其他请求（`pool_size=5, max_overflow=10`，下面立刻扩到 20+30=50）。
+4. 与此同时 workflow 跑出几十个 planner / judge，每个都 `async with get_session_maker()()` 开短 session 查 provider，也要抢池里的连接。连接数压力和工作流时长成正比。
+
+修法分两步：
+
+- **#118 短期缓解**：`db/base.py::configure_engine` 把 `pool_size` 从 5 提到 20，`max_overflow` 从 10 提到 30（50 并发连接上限，给 50 并发 sub_workflow 留够）。
+- **#119 根治**：`api/chatflows.py::submit_turn` 拆成 Phase 1 / 2 / 3 —— Phase 1 用一条短 session 从 DB 加载 ChatFlow 挂上 engine；Phase 2 把 session close 掉再 `await engine.submit_user_turn(...)`（几十分钟的长 await 完全不占连接）；Phase 3 用新的短 session 保存最终状态。
+- FastAPI 侧加 `get_session_scope()` 依赖（返回 `async_sessionmaker` 而不是 session），handler 自己管 session 生命周期，测试同样通过 `app.dependency_overrides[get_session_scope]` 换成测试 DB 的 sessionmaker。
+
+最初只把 `get_session_maker()` 直接调掉，结果集成测试开始 404：因为绕过了 FastAPI 的 `dependency_overrides`，测试客户端走到了生产 DB 连接配置。改成通过 `Depends(get_session_scope)` 注入后，测试 fixture 正常 override，306/306 全绿。
+
+### #120 — 七层工作流诊断
+
+用户反馈一个任务跑到了第 7 层 planner 递归。把 ChatNode `019d98a5-c0ff-7d43-909a-b7fa44ff869c` 的完整 workflow tree 拉出来数：
+
+- 实际最大嵌套 12 层、共 117 个 planner、267 次 LLM 调用
+- 42 次 `ReadTimeout` 来自 Ollama（上面的 #118/#119 改动正好压测到）
+- 28 次 `QueuePool timeout` 印证 #117 的诊断
+
+用户用的是 `qwopus3.5:27b-32k`，open-ended research 型任务，信息本身稀缺，模型也在反复自我怀疑。放弃这个组合，转做 #121。
+
+### #121 — provider_sub_kind + per-model sampling params（完整全栈）
+
+此前 per-model 能填 temperature / top_p / top_k / presence_penalty / repetition_penalty，但几个问题：
+
+1. OpenAI Chat Completions API 对 `top_k` / `repetition_penalty` 会 400（严格校验未知字段）；`openai_compat.py` 靠 `"api.openai.com" in base_url` 这种字符串检查来豁免，易错又不扩展。
+2. 缺 Ollama 专属 `num_ctx`、OpenAI 家 `frequency_penalty`、Anthropic 扩展思考的 `thinking_budget_tokens`。
+3. 用户要按 provider 类型给不同的参数集——ollama/volcengine/openai 三家互相不兼容，不能一把全给出。
+
+#### Phase 1A — schema + migration
+
+- `schemas/provider.py` 加 `ProviderSubKind` enum（`openai_chat` / `ollama` / `volcengine` / `anthropic`）+ `SUB_KIND_PARAM_WHITELIST` 字典。四档的允许参数集：
+  - `openai_chat`: temperature / top_p / max_output_tokens / presence_penalty / frequency_penalty
+  - `ollama`: temperature / top_p / top_k / max_output_tokens / repetition_penalty / num_ctx
+  - `volcengine`: 同 `openai_chat`（火山引擎兼容 OpenAI 接口但需要 thinking enable，走 `extra` 携带）
+  - `anthropic`: temperature / top_p / top_k / max_output_tokens / thinking_budget_tokens
+- `ProviderConfig` 新加字段 `provider_sub_kind: ProviderSubKind | None`（`None` = 管理员未分类，不校验）+ `_validate_sub_kind_params` `model_validator`：sub_kind 设了就遍历 available_models，非 None 的参数必须在白名单里，否则 `ValueError`。
+- `ModelInfo` 补三个字段：`frequency_penalty`、`num_ctx`、`thinking_budget_tokens`。`max_output_tokens` 名字保留原值（frontend 已有大量依赖），不做重命名。
+- Alembic 迁移 `0009_provider_sub_kind_backfill.py`：`provider_sub_kind` 存 JSONB `payload`，不改列；用一条 `UPDATE` 把现存 `provider_kind='anthropic_native'` 的行 payload 里 `provider_sub_kind` 回填为 `"anthropic"`。`openai_compat` 行留 NULL——管理员在 Settings UI 手动挑一次（最初想按 base_url 猜 ollama/volcengine，用户否了："ollama可不一定是localhost:11434，这个还是得让用户自己选了"）。
+
+#### Phase 1B — adapter wiring
+
+- `providers/base.py::chat` 签名加三个新 kw：`frequency_penalty`、`num_ctx`、`thinking_budget_tokens`。
+- `providers/openai_compat.py::__init__` 多一个 `sub_kind: str | None` 参数；`chat()` 用 `SUB_KIND_PARAM_WHITELIST[ProviderSubKind(self._sub_kind)]` 查允许集，通过 `_allowed(name)` 闭包一层过滤 payload。`sub_kind=None` 时退化为旧行为（全量发送），保证测试 double 和未迁移的历史 provider 不炸。
+- 旧的 `"api.openai.com" in self.base_url` 字符串判断删掉——现在由白名单驱动，不再需要特判。
+- `providers/anthropic_native.py::chat` 接 `thinking_budget_tokens`：置位时 `payload["thinking"] = {"type":"enabled","budget_tokens":N}`，并**丢掉 `temperature`**（Anthropic 要求 thinking enabled 时 temperature=1，直接不发让服务端用默认最省事）。
+- `providers/registry.py::build_adapter` 多一个 `sub_kind` 参数；只在 `kind=="openai_compat"` 时透传（anthropic_native 的 sub_kind 由 adapter 类隐含）。
+- `api/workflows.py::_provider_call_from_settings` 取 `config.provider_sub_kind` 传给 `build_adapter`，从 `model_info` 读三个新字段传给 `adapter.chat`。
+- `api/providers.py` 的 `CreateProviderRequest` / `PatchProviderRequest` 加 `provider_sub_kind` 字段；PATCH handler 在字段变更后显式 `ProviderConfig.model_validate(config.model_dump())` 重跑一遍校验器（Pydantic v2 字段赋值默认不触发 `model_validator`），违反白名单时返回 422。
+- `db/repositories/provider.py::list_all` 在轻量 summary 里暴露 `provider_sub_kind`，让 UI 识别「未分类」状态。
+
+新增 7 个单测：
+- `test_providers_openai_compat.py`：`test_sub_kind_openai_chat_drops_top_k_and_repetition_penalty` / `test_sub_kind_ollama_keeps_top_k_and_num_ctx_but_drops_frequency_penalty` / `test_sub_kind_none_is_permissive`
+- `test_providers_anthropic_native.py`：`test_chat_thinking_budget_tokens_emits_thinking_block`（验证 `thinking` block + `temperature` 被丢弃）
+- `test_schemas.py`：`test_provider_config_sub_kind_rejects_disallowed_param` / `test_provider_config_sub_kind_allows_whitelisted_params` / `test_provider_config_sub_kind_none_skips_validation`
+
+#### Phase 2 — 前端 UI
+
+- `lib/api.ts` 加 `ProviderSubKind` 类型 + `SUB_KIND_PARAM_WHITELIST` 常量（直接镜像后端）+ `ModelInfoDTO` / `ProviderSummary` / `CreateProviderBody` 三个接口新字段。
+- `components/Settings.tsx::ProviderForm`：
+  - 加 `subKind` state，仅在 `kind === "openai_compat"` 时渲染「子类型」下拉（openai_chat / ollama / volcengine + 未分类）。切换 kind 时自动把 `anthropic_native` 绑定到 `anthropic`，`openai_compat` 清空为 null 让用户重选。
+  - 原来硬编码 5 列的采样参数网格改为白名单驱动：`SAMPLING_FIELDS` 列表里 8 个字段，根据当前 `subKind` 的白名单过滤出实际可编字段。
+  - sub_kind 未选时展开采样面板显示琥珀色提示「请先选择子类型」，禁止编辑——避免写入会被后端 422 拒绝的参数。
+- i18n 补 8 条键（中英双份）：`sub_kind` / `sub_kind_unset` / `sub_kind_openai_chat` / `sub_kind_ollama` / `sub_kind_volcengine` / `sub_kind_hint` / `sub_kind_required_for_sampling` + 采样 toggle hint 重写。
+
+#### 端到端验证
+
+- 后端 306 → 313 测试（+7）全绿。
+- 前端 53/53 测试全绿；`tsc --noEmit` 干净（仅 `ConversationView.tsx:287` 一条 pre-existing 的 ChatFlowNode|null 类型错，和本轮无关）。
+- 跑了一次真实 PATCH 验证：`provider_sub_kind=openai_chat` + `available_models=[{id:"x",top_k:40}]` → HTTP 422，错误信息清晰点名 `model x: param 'top_k' not allowed for provider_sub_kind=openai_chat`。
+- 应用迁移 `0009` 到 dev DB 后 `/api/providers` 返回正确：Volcengine/Ollama 两行 `provider_sub_kind=null`（待用户分类），Anthropic 行自动 `anthropic`。
+
+### 刻意没做的
+
+- **discover_models 自动推断 sub_kind**：最初设计里想靠 `base_url` heuristic 自动填，用户否了。现在是完全手动——管理员在 Settings UI 给每个 `openai_compat` provider 挑一次就行，挑完后以前写的参数若非法会在 PATCH 时 422 暴露。
+- **Anthropic native 的 thinking_budget_tokens UI**：字段和 schema 打通了，但 Settings 没有专门的「思考预算」可视化提示。ModelInfo 的白名单里它和其它数值字段一样用普通 `SamplingInput` 编辑，功能上够用。
+- **Volcengine thinking enable 的 UI 开关**：目前还是 `_provider_call_from_settings` 里硬编码检测 `volces.com` / friendly_name 包含 "volcengine" 才注入 `extra={"thinking":{"type":"enabled"}}`。sub_kind 已经能识别了，但这一跳还没串起来，下一轮再改。
+- **discover_models 调用**：`api/providers.py::discover_models` 和 `test_connection` 里的 `build_adapter` 也加上了 `sub_kind` 透传，但这两个场景本身不跑采样，作用仅是 wire 一致。
+
+## 2026-04-17 (续) — Ollama usage / ChatFlow UX / 接地率熔断
+
+用户反馈 WorkNode ribbon 上的 token 用量一直是 0，并观察到拖动**运行中**的 ChatNode 松手后位置会回弹。从这两个小 bug 起步，最后落到"planner 打转几小时不落地"的根因分析，以及一个全栈的熔断机制。
+
+### #122 — Ollama 流式 usage=0
+
+curl 直连 `http://localhost:11434/v1/chat/completions`，不主动 opt-in 时，Ollama 的最后一个 chunk 里根本不带 `usage` 字段，OpenAI 家和 volcengine 则必须加 `stream_options.include_usage=true` 才会在末尾追发一个空 choices + usage 的 terminal chunk。
+
+`providers/openai_compat.py` 流式分支加一行 `payload["stream_options"] = {"include_usage": True}`；非流式分支不动（OpenAI API 会 400 于非流式请求中出现该字段）。`test_providers_openai_compat.py` 补两条：流式路径断言 body 带 `stream_options=={"include_usage":true}`，unary 路径断言没有该键。顺带给三个历史 sub_kind 测试加上 `@pytest.mark.asyncio` 装饰器——虽然 conftest `asyncio_mode=auto` 下不加也能跑，但和文件其它测试保持一致，避免以后改了模式再踩。
+
+### #123 — 运行中 ChatNode 拖拽不保存
+
+症状：`status=running` 的 ChatNode 拖动松手后位置回弹，completed 节点正常。
+
+Root cause 是 React Flow 的 node 对象身份 vs. SSE 驱动的刷新之间的 race：`refreshChatFlow` → `setState({chatflow: fresh})` → 依赖 chatflow 的 effect 重建 React Flow nodes 数组 → 新 Node 对象替换旧对象 → drag state 跟随旧对象失效 → `onNodeDragStop` 没机会 fire。completed 节点因为运行中 SSE 事件少，drag 窗口没被打断所以没暴露。
+
+1+2 双保险：
+1. `isDragging` ref，drag 过程中 effect 提前 return，不覆盖 Node 数组；
+2. `syncTick` state 作 effect 依赖，onNodeDragStop 里 bump 一次强制触发一次末态同步，兜住首次 drag 结束后的 SSE 事件。
+
+ChatFlowCanvas + WorkFlowCanvas 对称改动（内层 canvas 同样吃这个 race）。
+
+### #124 — ChatFlow 活动工作面板（ChatFlowActiveWorkPanel）
+
+Canvas 右下角浮动新组件，列"当前实际在跑"的 WorkNode，点击 drill 进对应 ChatNode 的 workflow（含嵌套 sub_workflow）。
+
+Filter 设计用户亲自把关（hybrid c）：`status=="running" AND (step_kind=="tool_call" OR streamingDeltas[id].length > 0)`。单看 `status=running` 会把 GPU 并发=1 时排队中的 10+ 节点全列出——实际一次只能跑一个；`streamingDeltas` 非空表明该节点已经开始吐 token，是"正在执行"最可靠的信号，而 tool_call 是 RPC 不吐 token，所以单独放进条件里。`sub_agent_delegation` 容器跳过，它的 children 作为真正的 worker 会自然上来。
+
+点击 → 新 store action `jumpToWorkNode(chatNodeId, subPath, workNodeId)`：重建 `drillStack`（ChatNode 帧 + 一串 sub_workflow 帧）、切 `viewMode="workflow"`、设 `workflowSelectedNodeId`、清 `workflowBranchMemory`，复用现有的 drill 基础设施。
+
+i18n 两条键 `chatflow.active_work` / `chatflow.active_work_empty`；面板在 `<ReactFlow>` 内 `<ModelRibbonLayer>` 旁 mount。
+
+### #125 — 慢 ChatNode `019d99b4-29fa-7c32-b6ea-e8b526bdeea5` 诊断
+
+用户跑了约 2h 46m 才失去耐心手动停止。Forensic diagnosis 从 Postgres docker container 里 dump 整棵 WorkFlow 树：
+
+- 392 个 WorkNode、11 层 `sub_agent_delegation` 嵌套、只有 **2 个成功的 tool_call**——planner 纯粹在"拆 / 评审 / 再拆"打转，从不落到真正的动作。
+- ChatNode 用的是 `gemma4:26b-64k` 本地 Ollama，**且该 ChatFlow 未设 `default_judge_model` / `default_tool_call_model` 覆盖**，所以判断/规划/主 LLM 调用全打同一个慢模型，平均单次成功 ~300s，最长 17 分钟。
+- 53 次 `judge_call` + 13 次 `llm_call` 命中 `ReadTimeout`，每次卡 ~6 分钟（httpx 120s × `_MAX_RETRIES=3` + 指数退避 1+2+4s ≈ 366s）。
+- `~/.agentloom/logs/backend.log` 只留 HTTP access，引擎级日志没 flush——下次排查前先修 logging。
+
+结论：这种"深嵌套 planner 空转"的病态模式需要熔断。直接引出 #126。
+
+### #126 — 接地率熔断（planner-grounding fuse）
+
+每一层 engine 独立判决：完成的非 `sub_agent_delegation` 叶子（`succeeded`/`failed` 状态的 llm_call + tool_call + judge_call）中，`tool_call` 占比若低于 `min_ground_ratio` 且总数超过 `ground_ratio_grace_nodes` → 设 `workflow.pending_user_prompt`，复用现有 halt 路径把信号冒泡到 ChatFlow 层。
+
+几个关键设计选择：
+
+- **局部判决而非全树递归**：sub-halt bubbling 已经实现（`_run_sub_agent_delegation` 里 `sub.pending_user_prompt != None` 时 `node.error = "sub-WorkFlow halted: …"; node.status=FAILED`），每层 sub-engine 自己的 halt 会顺势冒泡。局部判决避免双重计算，语义也更清晰："这一层自己是不是在空转"。
+- **排除 `sub_agent_delegation` 容器**：一个健康的 dispatching 父层可能 20 个 delegation、0 个直接 tool_call，若把容器算进总数会误判。容器不是叶子，不应被计数。
+- **只数 terminal 状态叶子**：`PLANNED` / `RUNNING` 的节点不算（planner 还在"结果未知"态，不该据此下结论）。
+- **默认启用**：用户明确要求开启。schema 默认 `min_ground_ratio=0.05, grace=20`——即已完成 20 个叶子后若 tool_call 占比低于 5% 就熔断。`None` 禁用。UI 把 0-1 小数转换为 0-100 百分比展示，留空 ↔ `null` ↔ 禁用。
+
+全栈改动：
+
+- `schemas/chatflow.py`：`ChatFlow` 加两个字段（`min_ground_ratio: float | None = 0.05`、`ground_ratio_grace_nodes: int = 20`）。
+- `engine/workflow_engine.py`：`execute()` 加两个 `_UNSET`-sentinel 参数；加 module-level `_compute_ground_ratio()`；每个 batch 完后、halt 判定前调用一次；`_run_sub_agent_delegation` 把阈值透传给 sub-engine。
+- `engine/judge_formatter.py`：加 `format_ground_ratio_halt_prompt(leaves, tools, min_ratio)`，仿 `format_revise_budget_halt_prompt` 风格。
+- `engine/chatflow_engine.py`：`self._inner.execute(...)` 调用处 plumb 两个新参数。
+- `db/repositories/chatflow.py`：`patch_metadata` 加两个 kwargs + payload 写入。
+- `api/chatflows.py`：`PatchChatFlowRequest` 加字段 + kwargs 展开 + runtime mirror（注意 `min_ground_ratio=None` 是合法语义"禁用"，runtime mirror 不做 `is not None` 过滤）。
+- 前端：`types/schema.ts` + `lib/api.ts` + `store/chatflowStore.ts`（optimistic 更新同样要处理 `None` 语义）+ `components/ChatFlowSettings.tsx` 加两个数字输入框 + i18n 四条键（中英）。
+- 6 处老 fixture 补齐两个新字段：`sed` 一把刷过 `ConversationView.test.tsx` / `ChatFlowCanvas.test.tsx`(×2) / `chatflowStore.test.ts`(×3)。
+- 新集成测 `tests/backend/integration/test_ground_ratio_halt.py` 4 条：默认禁用时允许 100% llm_call 运行、阈值触发时 `pending_user_prompt` 被设置且包含预期措辞、grace 窗口内不触发、`_compute_ground_ratio` 单元正确排除 delegation 容器和 PLANNED 节点。
+
+最终 backend 318 passed + 4 skipped、frontend 53/53、tsc 干净（除 pre-existing `ConversationView:287`，见 #128）。
+
+### #127 — ChatFlowSettings 三个模型下拉折进「高级」区块
+
+Composer 侧已有 `ComposerModelPicker`（`ConversationView.tsx:472`）覆盖 llm/judge/tool_call 三 kind 的 per-turn 选择，存 `usePreferencesStore.composerModels` 跨 ChatFlow 共享。ChatFlow 层的 `default_model` / `default_judge_model` / `default_tool_call_model` 变成 composer 留"继承"时的 fallback——不同 ChatFlow 要各自兜底时仍然有用，所以不删。
+
+改成可折叠的「高级：本 ChatFlow 的模型兜底」disclosure，默认收起，点击展开。中英文 hint 里解释层级关系（composer 是全局偏好、ChatFlow 层是 per-ChatFlow 兜底），免得半年后忘了为什么保留。i18n 两条新键 `advanced_models` / `advanced_models_hint`。
+
+### #128 — ConversationView leafNode 类型修复
+
+顺手扫雷。`ConversationView.tsx:169` 算出 `leafNode: ChatFlowNode | null`（`?? null`），但 `ComposerFooter` props 声明 `ChatFlowNode | undefined`，tsc 两周前就在报这个 `TS2322`。内部只用 `leafNode?.status === "running"` 可选链，运行时一直没事。一行把 props 类型改 `| null`。
+
+### 刻意没做的
+
+- **ChatFlowActiveWorkPanel vitest 单测**：组件依赖 store + i18n + JSX mount，写起来重；逻辑核心 `collectActiveWorkNodes` 是纯函数，未来要加单测先从它开始。
+- **接地率熔断的实战回归**：单测覆盖了触发逻辑，但没跑真实 planner-stuck 场景看 halt 后的 UX（用户见到 `pending_user_prompt` 被渲染成"需要你"提示）。下次 opportunity 再做，本地跑需要先设个会打转的 setup。
+- **backend engine 日志 flush 修复**：#125 诊断时发现 `backend.log` 只有 HTTP access、引擎级 log 没出来。下次排查前先修。
+- **Volcengine thinking enable UI 开关**（上一轮 #121 遗留）：`_provider_call_from_settings` 里还是硬编码 URL 判断，sub_kind 能识别了但 wire 还没串到这里。
+
 ## 故意没动的（next-step 候选清单）
 
 - 半自动模式 UI（关键帧画布、locked/unlocked 操作）

@@ -40,10 +40,16 @@ class OpenAICompatAdapter(ProviderAdapter):
         api_key: str | None,
         extra_headers: dict[str, str] | None = None,
         timeout: float = 120.0,
+        sub_kind: str | None = None,
     ) -> None:
         super().__init__(friendly_name=friendly_name, base_url=base_url, api_key=api_key)
         self._extra_headers = extra_headers or {}
         self._client = httpx.AsyncClient(timeout=timeout)
+        #: Fine-grained classification (``openai_chat``, ``ollama``,
+        #: ``volcengine``). Drives per-request param filtering so e.g.
+        #: api.openai.com doesn't 400 on ``top_k``. ``None`` = permissive
+        #: superset (send everything non-None).
+        self._sub_kind = sub_kind
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -188,16 +194,59 @@ class OpenAICompatAdapter(ProviderAdapter):
         model: str,
         messages: list[Message],
         tools: list[ToolDefinition] | None = None,
-        temperature: float = 0.0,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        presence_penalty: float | None = None,
+        frequency_penalty: float | None = None,
+        repetition_penalty: float | None = None,
+        num_ctx: int | None = None,
+        thinking_budget_tokens: int | None = None,  # noqa: ARG002 — Anthropic-only
         max_tokens: int | None = None,
         extra: dict[str, Any] | None = None,
         on_token: TokenCallback | None = None,
+        json_mode: str | None = None,
+        json_schema: dict[str, Any] | None = None,
     ) -> ChatResponse:
         payload: dict[str, Any] = {
             "model": model,
             "messages": self._to_wire_messages(messages),
-            "temperature": temperature,
         }
+        # Per-sub_kind whitelist filters sampling params so strict backends
+        # (api.openai.com) don't 400 on Ollama-only fields. ``None`` sub_kind
+        # means admin hasn't classified the provider yet → permissive superset.
+        allowed: frozenset[str] | None
+        if self._sub_kind is None:
+            allowed = None  # permissive
+        else:
+            from agentloom.schemas.provider import (
+                SUB_KIND_PARAM_WHITELIST,
+                ProviderSubKind,
+            )
+            try:
+                allowed = SUB_KIND_PARAM_WHITELIST[ProviderSubKind(self._sub_kind)]
+            except (ValueError, KeyError):
+                allowed = None
+
+        def _allowed(name: str) -> bool:
+            return allowed is None or name in allowed
+
+        if temperature is not None and _allowed("temperature"):
+            payload["temperature"] = temperature
+        if top_p is not None and _allowed("top_p"):
+            payload["top_p"] = top_p
+        if top_k is not None and _allowed("top_k"):
+            payload["top_k"] = top_k
+        if presence_penalty is not None and _allowed("presence_penalty"):
+            payload["presence_penalty"] = presence_penalty
+        if frequency_penalty is not None and _allowed("frequency_penalty"):
+            payload["frequency_penalty"] = frequency_penalty
+        if repetition_penalty is not None and _allowed("repetition_penalty"):
+            payload["repetition_penalty"] = repetition_penalty
+        if num_ctx is not None and _allowed("num_ctx"):
+            # Ollama reads ``num_ctx`` from ``options`` on the native API
+            # but accepts it as a top-level param on the OpenAI-compat shim.
+            payload["num_ctx"] = num_ctx
         wire_tools = self._to_wire_tools(tools)
         if wire_tools is not None:
             payload["tools"] = wire_tools
@@ -205,10 +254,30 @@ class OpenAICompatAdapter(ProviderAdapter):
             payload["max_tokens"] = max_tokens
         if on_token is not None:
             payload["stream"] = True
-            # We previously sent ``stream_options.include_usage`` here,
-            # but Ollama's older ``/v1`` shim ignored it and we don't
-            # need usage mid-stream — the final chunk's ``usage`` is
-            # delivered without the opt-in on every backend we target.
+            # Empirically, Ollama's ``/v1`` shim does NOT emit ``usage``
+            # in the final chunk without this opt-in (tested 2026-04-17
+            # against ``http://localhost:11434/v1``). OpenAI & volcengine
+            # also honor this — they simply send an extra terminal chunk
+            # carrying ``{choices: [], usage: {...}}``. Without it,
+            # TokenUsage ends up all zeros and the UI ribbon reads 0.
+            payload["stream_options"] = {"include_usage": True}
+        # Structured-output shaping. We only emit ``response_format``
+        # when the caller opts in and tools are NOT set — tool-use and
+        # response_format are mutually exclusive on most OpenAI-compat
+        # backends (the tool JSON itself is the structured output).
+        if json_mode and not wire_tools:
+            if json_mode == "schema" and json_schema is not None:
+                payload["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": json_schema.get("title", "Output"),
+                        "schema": json_schema,
+                        "strict": True,
+                    },
+                }
+            elif json_mode == "object":
+                payload["response_format"] = {"type": "json_object"}
+            # ``none`` → no-op; caller falls back to prompt-only discipline.
         if extra:
             payload.update(extra)
 

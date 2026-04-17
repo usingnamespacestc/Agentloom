@@ -64,8 +64,18 @@ class SubTask(BaseModel):
 
 class RecursivePlannerOutput(BaseModel):
     """Typed view of the planner's JSON. See planner.yaml for the schema
-    the LLM is prompted to emit."""
+    the LLM is prompted to emit.
 
+    ``reasoning`` is listed first so json_schema-enforced models are
+    nudged to think before committing to a mode. It's optional — thinking-
+    channel models (Claude extended thinking, o-series, Qwen3 reasoning)
+    may leave it null because their reasoning is carried on a private
+    channel; direct-output models tend to populate it. Either way the
+    field gives us a parseable, user-visible trace of the decomposition
+    rationale that's otherwise lost.
+    """
+
+    reasoning: str | None = None
     mode: Literal["atomic", "decompose", "infeasible"]
     atomic: AtomicBrief | None = None
     subtasks: list[SubTask] | None = None

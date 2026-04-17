@@ -148,6 +148,8 @@ export interface ChatFlowStoreState {
     default_tool_call_model?: ProviderModelRef | null;
     default_execution_mode?: ExecutionMode;
     judge_retry_budget?: number;
+    min_ground_ratio?: number | null;
+    ground_ratio_grace_nodes?: number;
     disabled_tool_names?: string[];
   }) => Promise<void>;
 
@@ -186,6 +188,16 @@ export interface ChatFlowStoreState {
    * ``sub_agent_delegation`` WorkNode in the current top frame). The
    * caller is responsible for verifying that node has a ``sub_workflow``. */
   enterSubWorkflow: (parentWorkNodeId: NodeId) => void;
+  /** Atomically drill directly to a WorkNode at any nesting depth and
+   * select it. ``subPath`` is the chain of ``sub_agent_delegation``
+   * parent WorkNode ids between the outer workflow and the target's
+   * workflow (empty for the outer workflow). Used by the active-work
+   * navigator to jump across chat/sub-flow boundaries. */
+  jumpToWorkNode: (
+    chatNodeId: NodeId,
+    subPath: NodeId[],
+    workNodeId: NodeId,
+  ) => void;
   /** Pop the topmost drill frame. If the stack becomes empty, returns
    * to the ChatFlow view. */
   popDrill: () => void;
@@ -252,6 +264,7 @@ const INITIAL: Omit<
   | "pickBranch"
   | "enterWorkflow"
   | "enterSubWorkflow"
+  | "jumpToWorkNode"
   | "popDrill"
   | "truncateDrillStack"
   | "exitWorkflow"
@@ -476,6 +489,15 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     if ("judge_retry_budget" in patch && patch.judge_retry_budget !== undefined) {
       updated.judge_retry_budget = patch.judge_retry_budget;
     }
+    if ("min_ground_ratio" in patch) {
+      updated.min_ground_ratio = patch.min_ground_ratio ?? null;
+    }
+    if (
+      "ground_ratio_grace_nodes" in patch
+      && patch.ground_ratio_grace_nodes !== undefined
+    ) {
+      updated.ground_ratio_grace_nodes = patch.ground_ratio_grace_nodes;
+    }
     if ("disabled_tool_names" in patch && patch.disabled_tool_names !== undefined) {
       updated.disabled_tool_names = patch.disabled_tool_names;
     }
@@ -611,6 +633,23 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     });
     const leaf = autoLeafForWorkFlow(chat, next);
     if (leaf) get().selectWorkflowNode(leaf);
+  },
+
+  jumpToWorkNode(chatNodeId, subPath, workNodeId) {
+    const chat = get().chatflow;
+    const stack: DrillFrame[] = [
+      { kind: "chatnode", chatNodeId },
+      ...subPath.map((id) => ({ kind: "subworkflow" as const, parentWorkNodeId: id })),
+    ];
+    const wf = resolveDrilledWorkflow(chat, stack);
+    if (!wf || !wf.nodes[workNodeId]) return;
+    set({
+      drillStack: stack,
+      viewMode: "workflow",
+      drillDownChatNodeId: chatNodeId,
+      workflowSelectedNodeId: workNodeId,
+      workflowBranchMemory: {},
+    });
   },
 
   popDrill() {

@@ -143,6 +143,20 @@ class ChatFlow(BaseModel):
     #: (round 1 is the initial judgement). ``-1`` = unlimited. Applied
     #: to every new turn's inner WorkFlow.
     judge_retry_budget: int = 3
+    #: Ground-ratio fuse — halts a WorkFlow (or sub_agent_delegation)
+    #: whose planner is spinning without ever reaching a real tool_call.
+    #: ``min_ground_ratio`` is the minimum fraction of completed leaf
+    #: nodes (llm_call + tool_call + judge_call, excluding
+    #: sub_agent_delegation containers) that must be ``tool_call`` before
+    #: the engine halts the layer. ``None`` disables the check entirely.
+    #: ``ground_ratio_grace_nodes`` is the number of completed leaves
+    #: required before the fuse arms — keeps a healthy run's first few
+    #: planner/judge steps from tripping it. Each recursive engine level
+    #: evaluates its own local ratio independently; overall runaway is
+    #: still bounded because every level applies the fuse. See §5.4
+    #: (planner-grounding fuse).
+    min_ground_ratio: float | None = 0.05
+    ground_ratio_grace_nodes: int = 20
     #: Per-ChatFlow tool denylist. Tool names listed here are hidden
     #: from every LLM call inside this chatflow's WorkFlows AND refused
     #: at execute-time if the model hallucinates them. Covers both

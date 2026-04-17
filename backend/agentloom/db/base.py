@@ -41,7 +41,14 @@ def configure_engine(url: str | None = None) -> AsyncEngine:
         # where that's fine.
         pass
     db_url = url or get_settings().database_url
-    _engine = create_async_engine(db_url, echo=False, future=True, pool_pre_ping=True)
+    _engine = create_async_engine(
+        db_url,
+        echo=False,
+        future=True,
+        pool_pre_ping=True,
+        pool_size=20,
+        max_overflow=30,
+    )
     _session_maker = async_sessionmaker(_engine, expire_on_commit=False, class_=AsyncSession)
     return _engine
 
@@ -64,3 +71,12 @@ async def get_session() -> AsyncIterator[AsyncSession]:
     """FastAPI dependency — yields one session per request."""
     async with get_session_maker()() as session:
         yield session
+
+
+def get_session_scope() -> async_sessionmaker[AsyncSession]:
+    """FastAPI dependency — returns the session *maker* so a handler
+    can open multiple short-lived sessions around a long await (e.g.
+    waiting for a workflow run to finish). Tests override this to bind
+    against the test DB, same way they override :func:`get_session`.
+    """
+    return get_session_maker()

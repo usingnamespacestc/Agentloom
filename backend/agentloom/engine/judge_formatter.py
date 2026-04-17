@@ -103,6 +103,30 @@ def format_revise_budget_halt_prompt(
     return "\n".join(lines)
 
 
+def format_ground_ratio_halt_prompt(
+    *,
+    leaves: int,
+    tools: int,
+    min_ratio: float,
+) -> str:
+    """Compose a check-in when the planner-grounding fuse trips.
+
+    Fires when the ratio of completed ``tool_call`` leaves to all
+    completed non-``sub_agent_delegation`` leaves drops below
+    ``min_ratio`` after the grace threshold. Signals the planner is
+    decomposing/judging without ever reaching a real action — the
+    2026-04-17 incident hit 2 tool_calls out of 392 nodes. See §5.4.
+    """
+    ratio = (tools / leaves) if leaves > 0 else 0.0
+    return (
+        f"I seem to be spinning — only {tools} tool call(s) out of "
+        f"{leaves} completed steps so far (ratio {ratio:.1%}, threshold "
+        f"{min_ratio:.1%}). The planner may be decomposing and judging "
+        "without ever landing on a real action. Should I keep pushing, "
+        "simplify the task, or stop?"
+    )
+
+
 def format_judge_post_prompt(verdict: JudgeVerdict) -> str:
     """Compose a check-in for the user from a judge_post verdict.
     Used when the post pass returns retry/fail and the agent needs the

@@ -55,6 +55,17 @@ export interface SubmitTurnResponse {
   agent_response: string;
 }
 
+/** Drop any ProviderModelRef that doesn't carry both provider_id and
+ * model_id as non-empty strings. A partial ref would serialize to a body
+ * missing a required field and 422 the backend (Pydantic requires both).
+ * Centralized here so every turn/retry/queue endpoint is covered. */
+function sanitizeRef(ref: ProviderModelRef | null | undefined): ProviderModelRef | null {
+  if (!ref) return null;
+  if (typeof ref.provider_id !== "string" || !ref.provider_id) return null;
+  if (typeof ref.model_id !== "string" || !ref.model_id) return null;
+  return { provider_id: ref.provider_id, model_id: ref.model_id };
+}
+
 export const api = {
   listChatFlows: () => request<ChatFlowSummary[]>("/api/chatflows"),
 
@@ -77,6 +88,8 @@ export const api = {
       default_tool_call_model?: ProviderModelRef | null;
       default_execution_mode?: ExecutionMode;
       judge_retry_budget?: number;
+      min_ground_ratio?: number | null;
+      ground_ratio_grace_nodes?: number;
       disabled_tool_names?: string[];
     },
   ) =>
@@ -107,9 +120,9 @@ export const api = {
       body: JSON.stringify({
         text,
         parent_id: parentId ?? null,
-        spawn_model: spawnModel ?? null,
-        judge_spawn_model: judgeSpawnModel ?? null,
-        tool_call_spawn_model: toolCallSpawnModel ?? null,
+        spawn_model: sanitizeRef(spawnModel),
+        judge_spawn_model: sanitizeRef(judgeSpawnModel),
+        tool_call_spawn_model: sanitizeRef(toolCallSpawnModel),
       }),
     }),
 
@@ -127,9 +140,9 @@ export const api = {
       body: JSON.stringify({
         text,
         source,
-        spawn_model: spawnModel ?? null,
-        judge_spawn_model: judgeSpawnModel ?? null,
-        tool_call_spawn_model: toolCallSpawnModel ?? null,
+        spawn_model: sanitizeRef(spawnModel),
+        judge_spawn_model: sanitizeRef(judgeSpawnModel),
+        tool_call_spawn_model: sanitizeRef(toolCallSpawnModel),
       }),
     }),
 
@@ -164,11 +177,10 @@ export const api = {
   ) =>
     request<{ node_id: string }>(`/api/chatflows/${chatflowId}/nodes/${nodeId}/retry`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        spawn_model: spawnModel ?? null,
-        judge_spawn_model: judgeSpawnModel ?? null,
-        tool_call_spawn_model: toolCallSpawnModel ?? null,
+        spawn_model: sanitizeRef(spawnModel),
+        judge_spawn_model: sanitizeRef(judgeSpawnModel),
+        tool_call_spawn_model: sanitizeRef(toolCallSpawnModel),
       }),
     }),
 
@@ -368,6 +380,47 @@ export interface PatchMCPServerBody {
 
 // ---- provider types ----
 
+export type JsonMode = "schema" | "object" | "none";
+
+export type ProviderSubKind =
+  | "openai_chat"
+  | "ollama"
+  | "volcengine"
+  | "anthropic";
+
+/** Mirror of agentloom.schemas.provider.SUB_KIND_PARAM_WHITELIST. */
+export const SUB_KIND_PARAM_WHITELIST: Record<ProviderSubKind, ReadonlySet<keyof ModelInfoDTO>> = {
+  openai_chat: new Set([
+    "temperature",
+    "top_p",
+    "max_output_tokens",
+    "presence_penalty",
+    "frequency_penalty",
+  ]),
+  ollama: new Set([
+    "temperature",
+    "top_p",
+    "top_k",
+    "max_output_tokens",
+    "repetition_penalty",
+    "num_ctx",
+  ]),
+  volcengine: new Set([
+    "temperature",
+    "top_p",
+    "max_output_tokens",
+    "presence_penalty",
+    "frequency_penalty",
+  ]),
+  anthropic: new Set([
+    "temperature",
+    "top_p",
+    "top_k",
+    "max_output_tokens",
+    "thinking_budget_tokens",
+  ]),
+};
+
 export interface ModelInfoDTO {
   id: string;
   context_window: number | null;
@@ -375,17 +428,28 @@ export interface ModelInfoDTO {
   supports_tools: boolean;
   supports_streaming: boolean;
   pinned: boolean;
+  json_mode?: JsonMode | null;
+  temperature?: number | null;
+  top_p?: number | null;
+  top_k?: number | null;
+  presence_penalty?: number | null;
+  frequency_penalty?: number | null;
+  repetition_penalty?: number | null;
+  num_ctx?: number | null;
+  thinking_budget_tokens?: number | null;
 }
 
 export interface ProviderSummary {
   id: string;
   friendly_name: string;
   provider_kind: string;
+  provider_sub_kind?: ProviderSubKind | null;
   base_url: string;
   available_models: ModelInfoDTO[];
   api_key_source: string;
   api_key_env_var: string | null;
   rate_limit_bucket: string | null;
+  json_mode?: JsonMode;
   created_at: string | null;
   updated_at: string | null;
 }
@@ -397,10 +461,12 @@ export interface ProviderDetail extends ProviderSummary {
 export interface CreateProviderBody {
   friendly_name: string;
   provider_kind: string;
+  provider_sub_kind?: ProviderSubKind | null;
   base_url: string;
   api_key_source?: string;
   api_key_env_var?: string | null;
   api_key_inline?: string | null;
   available_models?: ModelInfoDTO[];
   rate_limit_bucket?: string | null;
+  json_mode?: JsonMode;
 }

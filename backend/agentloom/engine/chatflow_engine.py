@@ -952,6 +952,13 @@ class ChatFlowEngine:
                 "upstream_kind": upstream_kind,
                 "upstream_summary": upstream_summary,
                 "worknode_catalog": worknode_catalog,
+                # Whitelist of node ids the engine will actually re-spawn
+                # on a ``retry`` verdict (worker llm_calls +
+                # sub_agent_delegations). Everything else gets dropped
+                # from redo_targets, and if nothing eligible remains
+                # the retry halts. Giving the judge the list up-front
+                # stops it from naming judge / planner / tool_call ids.
+                "redo_eligible_catalog": _format_redo_eligible(inner),
                 # Layer-local blackboard. Only judge_post reads it —
                 # planner / worker / planner_judge / worker_judge get
                 # their context via input_messages, this gives the exit
@@ -2176,6 +2183,8 @@ class ChatFlowEngine:
                 chat_node.workflow,
                 chatflow_tool_loop_budget=chatflow.tool_loop_budget,
                 chatflow_auto_mode_revise_budget=chatflow.auto_mode_revise_budget,
+                chatflow_min_ground_ratio=chatflow.min_ground_ratio,
+                chatflow_ground_ratio_grace_nodes=chatflow.ground_ratio_grace_nodes,
                 post_node_hook=self._build_post_node_hook(chat_node, chatflow),
                 disabled_tool_names=effective_disabled,
             )
@@ -3223,6 +3232,26 @@ def _format_layer_notes(notes: list) -> str:
             f"[{n.author_node_id} role={role_label} kind={n.kind}]\n  {n.summary}"
         )
     return "\n".join(lines)
+
+
+def _format_redo_eligible(workflow: WorkFlow) -> str:
+    """Render the whitelist of nodes the engine is willing to re-spawn.
+
+    Matches the gating in ``_spawn_redo_clones``: worker llm_calls and
+    sub_agent_delegations only. Other kinds (judges, planners,
+    tool_calls) are silently dropped from ``redo_targets`` and make
+    the whole retry halt with "none of the targets it named could be
+    redone" if nothing eligible is left. Feeding this list to
+    judge_post lets it name ids it knows will actually be re-run.
+    """
+    lines: list[str] = []
+    for n in workflow.nodes.values():
+        desc = (n.description.text if n.description else "").strip() or "(no description)"
+        if n.step_kind == StepKind.LLM_CALL and n.role == WorkNodeRole.WORKER:
+            lines.append(f"{n.id}: worker llm_call — {desc}")
+        elif n.step_kind == StepKind.SUB_AGENT_DELEGATION:
+            lines.append(f"{n.id}: sub_agent_delegation — {desc}")
+    return "\n".join(lines) if lines else "(none — do not request retry with redo_targets; prefer fail)"
 
 
 def _trio_params(workflow: WorkFlow) -> dict[str, str]:

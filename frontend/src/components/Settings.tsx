@@ -17,13 +17,16 @@ import { api } from "@/lib/api";
 import type {
   CreateMCPServerBody,
   CreateProviderBody,
+  JsonMode,
   MCPServerKind,
   MCPServerState,
   ModelInfoDTO,
+  ProviderSubKind,
   ProviderSummary,
   ToolDTO,
   ToolState,
 } from "@/lib/api";
+import { SUB_KIND_PARAM_WHITELIST } from "@/lib/api";
 import { formatTokensKM } from "@/lib/tokenFormat";
 import { usePreferencesStore } from "@/store/preferencesStore";
 
@@ -271,6 +274,8 @@ function CanvasPanel() {
   const setShowGenTime = usePreferencesStore((s) => s.setShowGenTime);
   const showGenSpeed = usePreferencesStore((s) => s.showGenSpeed);
   const setShowGenSpeed = usePreferencesStore((s) => s.setShowGenSpeed);
+  const showWorkNodeModel = usePreferencesStore((s) => s.showWorkNodeModel);
+  const setShowWorkNodeModel = usePreferencesStore((s) => s.setShowWorkNodeModel);
 
   const rows: Array<{ key: string; value: boolean; onChange: (v: boolean) => void }> = [
     { key: "show_node_id", value: showNodeId, onChange: setShowNodeId },
@@ -278,6 +283,7 @@ function CanvasPanel() {
     { key: "show_tokens", value: showTokens, onChange: setShowTokens },
     { key: "show_gen_time", value: showGenTime, onChange: setShowGenTime },
     { key: "show_gen_speed", value: showGenSpeed, onChange: setShowGenSpeed },
+    { key: "show_worknode_model", value: showWorkNodeModel, onChange: setShowWorkNodeModel },
   ];
 
   return (
@@ -354,11 +360,13 @@ function ProviderForm({
 
   const [name, setName] = useState("");
   const [kind, setKind] = useState("openai_compat");
+  const [subKind, setSubKind] = useState<ProviderSubKind | null>(null);
   const [baseUrl, setBaseUrl] = useState(DEFAULT_URLS.openai_compat);
   const [keySource, setKeySource] = useState<KeySource>("env_var");
   const [envVar, setEnvVar] = useState("");
   const [inlineKey, setInlineKey] = useState("");
   const [models, setModels] = useState<ModelInfoDTO[]>([]);
+  const [jsonMode, setJsonMode] = useState<JsonMode>("none");
   const [saving, setSaving] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; error?: string } | null>(null);
   const [discovering, setDiscovering] = useState(false);
@@ -369,16 +377,21 @@ function ProviderForm({
       void api.getProvider(providerId).then((p) => {
         setName(p.friendly_name);
         setKind(p.provider_kind);
+        setSubKind(p.provider_sub_kind ?? null);
         setBaseUrl(p.base_url);
         setKeySource(p.api_key_source as KeySource);
         setEnvVar(p.api_key_env_var ?? "");
         setModels(p.available_models);
+        setJsonMode(p.json_mode ?? "none");
       });
     }
   }, [providerId]);
 
   const handleKindChange = (newKind: string) => {
     setKind(newKind);
+    // anthropic_native has a single valid sub_kind; auto-assign.
+    // openai_compat needs admin to pick between openai_chat/ollama/volcengine.
+    setSubKind(newKind === "anthropic_native" ? "anthropic" : null);
     if (isNew) {
       setBaseUrl(DEFAULT_URLS[newKind] ?? "");
     }
@@ -399,11 +412,13 @@ function ProviderForm({
   const buildBody = (friendly?: string): CreateProviderBody => ({
     friendly_name: (friendly ?? name).trim(),
     provider_kind: kind,
+    provider_sub_kind: subKind,
     base_url: baseUrl.trim(),
     api_key_source: keySource,
     api_key_env_var: keySource === "env_var" ? envVar.trim() || null : null,
     api_key_inline: keySource === "inline" ? inlineKey : null,
     available_models: models,
+    json_mode: jsonMode,
   });
 
   const handleSave = async () => {
@@ -483,6 +498,45 @@ function ProviderForm({
     );
   };
 
+  const setModelJsonMode = (modelId: string, next: JsonMode | null) => {
+    setModels((prev) =>
+      prev.map((m) => (m.id === modelId ? { ...m, json_mode: next } : m)),
+    );
+  };
+
+  const [expandedSamplingId, setExpandedSamplingId] = useState<string | null>(null);
+
+  type SamplingKey =
+    | "temperature"
+    | "top_p"
+    | "top_k"
+    | "presence_penalty"
+    | "frequency_penalty"
+    | "repetition_penalty"
+    | "num_ctx"
+    | "thinking_budget_tokens";
+
+  const setModelSampling = (modelId: string, key: SamplingKey, next: number | null) => {
+    setModels((prev) =>
+      prev.map((m) => (m.id === modelId ? { ...m, [key]: next } : m)),
+    );
+  };
+
+  const SAMPLING_FIELDS: ReadonlyArray<{ key: SamplingKey; label: string; step: string }> = [
+    { key: "temperature", label: "temperature", step: "0.01" },
+    { key: "top_p", label: "top_p", step: "0.01" },
+    { key: "top_k", label: "top_k", step: "1" },
+    { key: "presence_penalty", label: "presence_pen", step: "0.1" },
+    { key: "frequency_penalty", label: "frequency_pen", step: "0.1" },
+    { key: "repetition_penalty", label: "repetition_pen", step: "0.01" },
+    { key: "num_ctx", label: "num_ctx", step: "1" },
+    { key: "thinking_budget_tokens", label: "thinking_budget", step: "1" },
+  ];
+
+  // Effective whitelist for the currently-picked sub_kind. Null means no
+  // sub_kind yet → editor disabled (admin must classify first).
+  const samplingWhitelist = subKind ? SUB_KIND_PARAM_WHITELIST[subKind] : null;
+
   return (
     <div className="space-y-3">
       <h3 className="text-sm font-medium text-gray-700">
@@ -536,6 +590,27 @@ function ProviderForm({
           ))}
         </select>
       </label>
+
+      {kind === "openai_compat" && (
+        <label className="block">
+          <span className="text-[11px] font-medium text-gray-500">
+            {t("providers.sub_kind")}
+          </span>
+          <select
+            value={subKind ?? ""}
+            onChange={(e) =>
+              setSubKind(e.target.value === "" ? null : (e.target.value as ProviderSubKind))
+            }
+            className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+          >
+            <option value="">{t("providers.sub_kind_unset")}</option>
+            <option value="openai_chat">{t("providers.sub_kind_openai_chat")}</option>
+            <option value="ollama">{t("providers.sub_kind_ollama")}</option>
+            <option value="volcengine">{t("providers.sub_kind_volcengine")}</option>
+          </select>
+          <p className="mt-1 text-[10px] text-gray-400">{t("providers.sub_kind_hint")}</p>
+        </label>
+      )}
 
       <label className="block">
         <span className="text-[11px] font-medium text-gray-500">{t("providers.base_url")}</span>
@@ -601,6 +676,24 @@ function ProviderForm({
         )}
       </div>
 
+      <label className="block">
+        <span className="text-[11px] font-medium text-gray-500">
+          {t("providers.json_mode")}
+        </span>
+        <select
+          value={jsonMode}
+          onChange={(e) => setJsonMode(e.target.value as JsonMode)}
+          className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+        >
+          <option value="none">{t("providers.json_mode_none")}</option>
+          <option value="object">{t("providers.json_mode_object")}</option>
+          <option value="schema">{t("providers.json_mode_schema")}</option>
+        </select>
+        <p className="mt-1 text-[10px] text-gray-400">
+          {t("providers.json_mode_hint")}
+        </p>
+      </label>
+
       <div className="flex items-center gap-2">
         <button
           type="button"
@@ -641,31 +734,80 @@ function ProviderForm({
         {models.length > 0 ? (
           <div className="mt-1 max-h-32 space-y-0.5 overflow-auto rounded border border-gray-200 p-1.5">
             {models.map((m) => (
-              <div
-                key={m.id}
-                className="flex items-center gap-2 rounded px-1.5 py-1 text-[11px] hover:bg-gray-50"
-              >
-                <span className="min-w-0 flex-1 truncate font-mono text-gray-700" title={m.id}>
-                  {m.id}
-                </span>
-                <ContextWindowInput
-                  value={m.context_window}
-                  onCommit={(v) => setContextWindow(m.id, v)}
-                  placeholder={t("providers.context_window")}
-                  title={t("providers.context_window_hint")}
-                />
-                <button
-                  type="button"
-                  onClick={() => togglePinned(m.id)}
-                  className={[
-                    "rounded-full px-1.5 py-0.5 text-[9px]",
-                    m.pinned
-                      ? "bg-blue-100 text-blue-700"
-                      : "bg-gray-100 text-gray-400 hover:text-gray-600",
-                  ].join(" ")}
-                >
-                  {m.pinned ? "\u2605" : "\u2606"} {t("providers.pinned")}
-                </button>
+              <div key={m.id} className="rounded hover:bg-gray-50">
+                <div className="flex items-center gap-2 px-1.5 py-1 text-[11px]">
+                  <span className="min-w-0 flex-1 truncate font-mono text-gray-700" title={m.id}>
+                    {m.id}
+                  </span>
+                  <ContextWindowInput
+                    value={m.context_window}
+                    onCommit={(v) => setContextWindow(m.id, v)}
+                    placeholder={t("providers.context_window")}
+                    title={t("providers.context_window_hint")}
+                  />
+                  <select
+                    value={m.json_mode ?? ""}
+                    onChange={(e) =>
+                      setModelJsonMode(
+                        m.id,
+                        e.target.value === "" ? null : (e.target.value as JsonMode),
+                      )
+                    }
+                    title={t("providers.json_mode_model_hint")}
+                    className="rounded border border-gray-200 bg-white px-1 py-0.5 text-[10px] text-gray-600 focus:border-blue-400 focus:outline-none"
+                  >
+                    <option value="">{t("providers.json_mode_inherit")}</option>
+                    <option value="none">{t("providers.json_mode_none")}</option>
+                    <option value="object">{t("providers.json_mode_object")}</option>
+                    <option value="schema">{t("providers.json_mode_schema")}</option>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExpandedSamplingId((cur) => (cur === m.id ? null : m.id))
+                    }
+                    title={t("providers.sampling_toggle_hint")}
+                    className={[
+                      "rounded px-1 py-0.5 text-[10px]",
+                      expandedSamplingId === m.id
+                        ? "bg-blue-100 text-blue-700"
+                        : "bg-gray-100 text-gray-500 hover:text-gray-700",
+                    ].join(" ")}
+                  >
+                    {expandedSamplingId === m.id ? "\u25BE" : "\u25B8"} T
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => togglePinned(m.id)}
+                    className={[
+                      "rounded-full px-1.5 py-0.5 text-[9px]",
+                      m.pinned
+                        ? "bg-blue-100 text-blue-700"
+                        : "bg-gray-100 text-gray-400 hover:text-gray-600",
+                    ].join(" ")}
+                  >
+                    {m.pinned ? "\u2605" : "\u2606"} {t("providers.pinned")}
+                  </button>
+                </div>
+                {expandedSamplingId === m.id && (
+                  samplingWhitelist === null ? (
+                    <div className="border-t border-gray-100 bg-amber-50 px-2 py-1.5 text-[10px] text-amber-700">
+                      {t("providers.sub_kind_required_for_sampling")}
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-4 gap-1 border-t border-gray-100 bg-gray-50 px-1.5 py-1.5 text-[10px]">
+                      {SAMPLING_FIELDS.filter((f) => samplingWhitelist.has(f.key)).map((f) => (
+                        <SamplingInput
+                          key={f.key}
+                          label={f.label}
+                          value={(m[f.key] as number | null | undefined) ?? null}
+                          step={f.step}
+                          onCommit={(v) => setModelSampling(m.id, f.key, v)}
+                        />
+                      ))}
+                    </div>
+                  )
+                )}
               </div>
             ))}
           </div>
@@ -760,6 +902,67 @@ function ContextWindowInput({
       title={title}
       className="w-20 rounded border border-gray-200 bg-white px-1.5 py-0.5 text-right text-[10px] text-gray-600 focus:border-blue-400 focus:outline-none"
     />
+  );
+}
+
+function SamplingInput({
+  label,
+  value,
+  step,
+  onCommit,
+}: {
+  label: string;
+  value: number | null;
+  step: string;
+  onCommit: (next: number | null) => void;
+}) {
+  const [draft, setDraft] = useState(value === null ? "" : String(value));
+
+  useEffect(() => {
+    setDraft(value === null ? "" : String(value));
+  }, [value]);
+
+  const commit = () => {
+    const trimmed = draft.trim();
+    if (trimmed === "") {
+      if (value !== null) onCommit(null);
+      return;
+    }
+    const parsed = Number(trimmed);
+    if (Number.isFinite(parsed)) {
+      if (parsed !== value) onCommit(parsed);
+      setDraft(String(parsed));
+    } else {
+      setDraft(value === null ? "" : String(value));
+    }
+  };
+
+  return (
+    <label className="flex flex-col gap-0.5">
+      <span className="truncate text-[9px] font-mono text-gray-500" title={label}>
+        {label}
+      </span>
+      <input
+        type="number"
+        inputMode="decimal"
+        step={step}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            (e.target as HTMLInputElement).blur();
+          }
+          if (e.key === "Escape") {
+            setDraft(value === null ? "" : String(value));
+            (e.target as HTMLInputElement).blur();
+          }
+        }}
+        placeholder="—"
+        className="w-full rounded border border-gray-200 bg-white px-1 py-0.5 text-right text-[10px] text-gray-700 focus:border-blue-400 focus:outline-none"
+      />
+    </label>
   );
 }
 

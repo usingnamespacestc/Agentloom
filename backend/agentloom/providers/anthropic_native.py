@@ -278,20 +278,42 @@ class AnthropicNativeAdapter(ProviderAdapter):
         model: str,
         messages: list[Message],
         tools: list[ToolDefinition] | None = None,
-        temperature: float = 0.0,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        presence_penalty: float | None = None,  # noqa: ARG002 — not in Anthropic API
+        frequency_penalty: float | None = None,  # noqa: ARG002 — not in Anthropic API
+        repetition_penalty: float | None = None,  # noqa: ARG002 — not in Anthropic API
+        num_ctx: int | None = None,  # noqa: ARG002 — Ollama-only
+        thinking_budget_tokens: int | None = None,
         max_tokens: int | None = None,
         extra: dict[str, Any] | None = None,
         on_token: TokenCallback | None = None,  # noqa: ARG002 — streaming TBD
+        json_mode: str | None = None,  # noqa: ARG002 — Anthropic uses tool_use for structured output
+        json_schema: dict[str, Any] | None = None,  # noqa: ARG002
     ) -> ChatResponse:
         system_blocks, body = self._split_system(messages)
         payload: dict[str, Any] = {
             "model": model,
             "messages": self._to_wire_messages(body),
-            "temperature": temperature,
             # Anthropic requires max_tokens; default to a reasonable
             # ceiling if the caller omits it.
             "max_tokens": max_tokens if max_tokens is not None else 4096,
         }
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if top_k is not None:
+            payload["top_k"] = top_k
+        if thinking_budget_tokens is not None:
+            # Extended thinking mode. Anthropic requires temperature=1
+            # when thinking is enabled, so drop any caller-set value.
+            payload["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": thinking_budget_tokens,
+            }
+            payload.pop("temperature", None)
         if system_blocks is not None:
             payload["system"] = system_blocks
         wire_tools = self._to_wire_tools(tools)

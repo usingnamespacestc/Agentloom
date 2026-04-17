@@ -28,12 +28,12 @@ from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sse_starlette.sse import EventSourceResponse
 
 from agentloom import tenancy_runtime
 from agentloom.api import workflows as _workflows_api
-from agentloom.db.base import get_session
+from agentloom.db.base import get_session, get_session_scope
 from agentloom.db.models.tenancy import DEFAULT_WORKSPACE_ID
 from agentloom.db.repositories.chatflow import (
     ChatFlowNotFoundError,
@@ -303,6 +303,8 @@ class PatchChatFlowRequest(BaseModel):
     default_tool_call_model: ProviderModelRef | None = None
     default_execution_mode: ExecutionMode | None = None
     judge_retry_budget: int | None = None
+    min_ground_ratio: float | None = None
+    ground_ratio_grace_nodes: int | None = None
     disabled_tool_names: list[str] | None = None
 
 
@@ -332,6 +334,10 @@ async def patch_chatflow(
         kwargs["default_execution_mode"] = body.default_execution_mode
     if "judge_retry_budget" in provided:
         kwargs["judge_retry_budget"] = body.judge_retry_budget
+    if "min_ground_ratio" in provided:
+        kwargs["min_ground_ratio"] = body.min_ground_ratio
+    if "ground_ratio_grace_nodes" in provided:
+        kwargs["ground_ratio_grace_nodes"] = body.ground_ratio_grace_nodes
     if "disabled_tool_names" in provided:
         kwargs["disabled_tool_names"] = body.disabled_tool_names
     if not kwargs:
@@ -364,6 +370,15 @@ async def patch_chatflow(
             rt_chat.default_execution_mode = body.default_execution_mode
         if "judge_retry_budget" in provided and body.judge_retry_budget is not None:
             rt_chat.judge_retry_budget = body.judge_retry_budget
+        if "min_ground_ratio" in provided:
+            # None is a legal value here (= disable the fuse), so we
+            # mirror it through verbatim rather than checking not None.
+            rt_chat.min_ground_ratio = body.min_ground_ratio
+        if (
+            "ground_ratio_grace_nodes" in provided
+            and body.ground_ratio_grace_nodes is not None
+        ):
+            rt_chat.ground_ratio_grace_nodes = body.ground_ratio_grace_nodes
         if "disabled_tool_names" in provided and body.disabled_tool_names is not None:
             rt_chat.disabled_tool_names = body.disabled_tool_names
 
@@ -496,12 +511,27 @@ async def submit_turn(
     chatflow_id: str,
     body: SubmitTurnRequest,
     request: Request,
-    session: AsyncSession = Depends(get_session),
+    session_maker: async_sessionmaker[AsyncSession] = Depends(get_session_scope),
 ) -> SubmitTurnResponse:
-    engine = _get_engine(request)
-    repo = _repo(session)
-    chat = await _attached_chatflow(engine, repo, chatflow_id)
+    """Submit a user turn and block until the spawned ChatNode finishes.
 
+    Session lifecycle is split into two short-lived scopes around the
+    long ``submit_user_turn`` await. A single ``Depends(get_session)``
+    would pin one DB connection for the entire workflow run (minutes
+    to hours on semi_auto/auto chains), which under the default pool
+    size quickly exhausts the pool and causes unrelated endpoints
+    (e.g. GET /api/providers) to 500 with QueuePool timeouts. The
+    engine itself never touches the DB — persistence is handler-side
+    — so releasing the session between phases is safe.
+    """
+    engine = _get_engine(request)
+
+    # Phase 1: load + attach (short session)
+    async with session_maker() as session:
+        repo = _repo(session)
+        chat = await _attached_chatflow(engine, repo, chatflow_id)
+
+    # Phase 2: run the turn — no DB connection held
     try:
         chat_node = await engine.submit_user_turn(
             chat,
@@ -516,8 +546,11 @@ async def submit_turn(
     except DiscardedUpstreamFailure as exc:
         raise HTTPException(409, str(exc)) from exc
 
-    await repo.save(chat)
-    await session.commit()
+    # Phase 3: persist the final state (fresh short session)
+    async with session_maker() as session:
+        await _repo(session).save(chat)
+        await session.commit()
+
     return SubmitTurnResponse(
         node_id=chat_node.id,
         status=chat_node.status.value,

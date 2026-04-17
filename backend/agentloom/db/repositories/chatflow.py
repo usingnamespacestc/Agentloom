@@ -118,6 +118,8 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         default_tool_call_model: ProviderModelRef | None = ...,  # type: ignore[assignment]
         default_execution_mode: ExecutionMode | None = ...,  # type: ignore[assignment]
         judge_retry_budget: int | None = ...,  # type: ignore[assignment]
+        min_ground_ratio: float | None = ...,  # type: ignore[assignment]
+        ground_ratio_grace_nodes: int | None = ...,  # type: ignore[assignment]
         disabled_tool_names: list[str] | None = ...,  # type: ignore[assignment]
     ) -> None:
         """Update metadata fields. Pass ``...`` (default) to skip a field.
@@ -170,6 +172,11 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         if judge_retry_budget is not ...:
             if judge_retry_budget is not None:
                 payload["judge_retry_budget"] = judge_retry_budget
+        if min_ground_ratio is not ...:
+            payload["min_ground_ratio"] = min_ground_ratio
+        if ground_ratio_grace_nodes is not ...:
+            if ground_ratio_grace_nodes is not None:
+                payload["ground_ratio_grace_nodes"] = ground_ratio_grace_nodes
         if disabled_tool_names is not ...:
             if disabled_tool_names is not None:
                 payload["disabled_tool_names"] = list(disabled_tool_names)

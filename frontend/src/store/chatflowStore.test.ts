@@ -48,6 +48,8 @@ function seedChatFlow(): ChatFlow {
     default_tool_call_model: null,
     default_execution_mode: 'direct',
     judge_retry_budget: 3,
+    min_ground_ratio: null,
+    ground_ratio_grace_nodes: 20,
       disabled_tool_names: [],
     root_ids: ["n1"],
     created_at: "2026-04-10T00:00:00Z",
@@ -244,6 +246,8 @@ describe("chatflowStore", () => {
       default_tool_call_model: null,
       default_execution_mode: 'direct',
       judge_retry_budget: 3,
+    min_ground_ratio: null,
+    ground_ratio_grace_nodes: 20,
       disabled_tool_names: [],
       root_ids: ["a"],
       nodes: {
@@ -401,6 +405,8 @@ describe("chatflowStore", () => {
       default_tool_call_model: null,
       default_execution_mode: 'direct',
       judge_retry_budget: 3,
+    min_ground_ratio: null,
+    ground_ratio_grace_nodes: 20,
       disabled_tool_names: [],
       root_ids: ["a"],
       nodes: {

@@ -168,12 +168,17 @@ export function edgeModel(
     case "llm":
       return child.resolved_model ?? chatflow.default_model;
     case "judge":
+      // Prefer the stamp on the child's WorkFlow — that's what
+      // actually ran. ``default_judge_model`` is the composer default
+      // for *new* turns and can drift after submit.
       return (
+        child.workflow.judge_model_override ??
         chatflow.default_judge_model ??
         edgeModel(chatflow, parentId, childId, "llm")
       );
     case "tool_call":
       return (
+        child.workflow.tool_call_model_override ??
         chatflow.default_tool_call_model ??
         edgeModel(chatflow, parentId, childId, "llm")
       );

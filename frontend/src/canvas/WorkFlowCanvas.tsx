@@ -25,6 +25,7 @@ import {
   type Node,
   type NodeChange,
   type NodeMouseHandler,
+  type OnNodeDrag,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useTranslation } from "react-i18next";
@@ -165,6 +166,11 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
   const dirtyPositions = useRef<Set<string>>(new Set());
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastWorkflowId = useRef<string | null>(null);
+  // Mid-drag, SSE-driven ``setNodes([...])`` replacements disrupt React
+  // Flow's drag state; gate the sync effect and bump ``syncTick`` on
+  // drag stop to catch up.
+  const isDragging = useRef(false);
+  const [syncTick, setSyncTick] = useState(0);
 
   const flushPositions = useCallback(() => {
     if (subPath.length > 0 || !chatflowId || !outerChatNodeId || dirtyPositions.current.size === 0) return;
@@ -181,6 +187,7 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
   }, [chatflowId, outerChatNodeId, subPath]);
 
   useEffect(() => {
+    if (isDragging.current) return;
     if (workflow?.id !== lastWorkflowId.current) {
       dragPositions.current = {};
       dirtyPositions.current.clear();
@@ -210,7 +217,7 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
     }));
     setNodes([...merged, ...stickyNodes]);
     setEdges(laid.edges);
-  }, [workflow, workflowSelectedNodeId, ctxWindowByModel, stickyNotes, editingStickyId, selectedStickyId, onNoteTitleChange, onNoteTextChange, onNoteDelete]);
+  }, [workflow, workflowSelectedNodeId, ctxWindowByModel, stickyNotes, editingStickyId, selectedStickyId, onNoteTitleChange, onNoteTextChange, onNoteDelete, syncTick]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     const filtered = changes.filter((c) => c.type !== "select");
@@ -235,6 +242,23 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(flushPositions, 500);
     }
+  }, [flushPositions, updateStickyNote, isSticky]);
+
+  const handleNodeDragStart: OnNodeDrag = useCallback(() => {
+    isDragging.current = true;
+  }, []);
+
+  const handleNodeDragStop: OnNodeDrag = useCallback((_event, node) => {
+    isDragging.current = false;
+    dragPositions.current[node.id] = { x: node.position.x, y: node.position.y };
+    if (isSticky(String(node.id))) {
+      updateStickyNote(node.id, { x: node.position.x, y: node.position.y });
+    } else {
+      dirtyPositions.current.add(node.id);
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(flushPositions, 500);
+    }
+    setSyncTick((t) => t + 1);
   }, [flushPositions, updateStickyNote, isSticky]);
 
   const handleNodeClick: NodeMouseHandler = (_event, node) => {
@@ -300,6 +324,8 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
         onNodeDoubleClick={handleNodeDoubleClick}
         onNodeContextMenu={handleNodeContextMenu}
         onNodesChange={onNodesChange}
+        onNodeDragStart={handleNodeDragStart}
+        onNodeDragStop={handleNodeDragStop}
         onPaneContextMenu={handlePaneContextMenu}
         onPaneClick={() => { setCtxMenu(null); setStickyCtxMenu(null); setSelectedStickyId(null); setEditingStickyId(null); }}
         nodesDraggable

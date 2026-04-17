@@ -28,6 +28,18 @@ const EMPTY_COMPOSER_MODELS: ComposerModelMap = {
   tool_call: null,
 };
 
+/** Accept only refs that carry both provider_id and model_id as non-empty
+ * strings. Guards against stale localStorage shapes (pre-migration partial
+ * refs, or refs whose model_id was lost in an older build), which would
+ * otherwise serialize to a body missing ``model_id`` and 422 the backend. */
+function sanitizeRef(ref: unknown): ProviderModelRef | null {
+  if (!ref || typeof ref !== "object") return null;
+  const r = ref as Partial<ProviderModelRef>;
+  if (typeof r.provider_id !== "string" || !r.provider_id) return null;
+  if (typeof r.model_id !== "string" || !r.model_id) return null;
+  return { provider_id: r.provider_id, model_id: r.model_id };
+}
+
 export interface Preferences {
   /** Render the raw DB node id in the top-right corner of each node card. */
   showNodeId: boolean;
@@ -39,6 +51,9 @@ export interface Preferences {
   showGenTime: boolean;
   /** Show generation speed (completion_tokens / seconds). */
   showGenSpeed: boolean;
+  /** Show the resolved model_override on every WorkNode card (llm_call
+   * already shows it; this also enables it for judge_call / tool_call). */
+  showWorkNodeModel: boolean;
   /** Per-kind sticky composer picks (llm / judge / tool_call). Each
    * new turn defaults to these until the user changes them. */
   composerModels: ComposerModelMap;
@@ -50,6 +65,7 @@ const DEFAULTS: Preferences = {
   showTokens: false,
   showGenTime: false,
   showGenSpeed: false,
+  showWorkNodeModel: false,
   composerModels: EMPTY_COMPOSER_MODELS,
 };
 
@@ -63,12 +79,14 @@ function load(): Preferences {
     // Migration: pre-per-kind builds stored a single composerModel.
     // Promote it to composerModels.llm so existing users don't lose
     // their pick.
+    const rawComposer = (parsed.composerModels ?? {}) as Partial<ComposerModelMap>;
     const composerModels: ComposerModelMap = {
-      ...EMPTY_COMPOSER_MODELS,
-      ...(parsed.composerModels ?? {}),
+      llm: sanitizeRef(rawComposer.llm),
+      judge: sanitizeRef(rawComposer.judge),
+      tool_call: sanitizeRef(rawComposer.tool_call),
     };
     if (parsed.composerModel && !parsed.composerModels) {
-      composerModels.llm = parsed.composerModel;
+      composerModels.llm = sanitizeRef(parsed.composerModel);
     }
     return { ...DEFAULTS, ...parsed, composerModels };
   } catch {
@@ -90,6 +108,7 @@ interface PreferencesStore extends Preferences {
   setShowTokens: (value: boolean) => void;
   setShowGenTime: (value: boolean) => void;
   setShowGenSpeed: (value: boolean) => void;
+  setShowWorkNodeModel: (value: boolean) => void;
   setComposerModel: (kind: keyof ComposerModelMap, value: ProviderModelRef | null) => void;
 }
 
@@ -114,6 +133,10 @@ export const usePreferencesStore = create<PreferencesStore>((set, get) => ({
   setShowGenSpeed(value) {
     set({ showGenSpeed: value });
     save({ ...get(), showGenSpeed: value });
+  },
+  setShowWorkNodeModel(value) {
+    set({ showWorkNodeModel: value });
+    save({ ...get(), showWorkNodeModel: value });
   },
   setComposerModel(kind, value) {
     const next = { ...get().composerModels, [kind]: value };

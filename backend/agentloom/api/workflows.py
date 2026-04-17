@@ -361,7 +361,7 @@ def _provider_call_from_settings():
     from agentloom.db.repositories.provider import ProviderRepository
     from agentloom.providers.registry import build_adapter
 
-    async def call(messages, tools, model, on_token=None, extra=None):  # type: ignore[no-untyped-def]
+    async def call(messages, tools, model, on_token=None, extra=None, json_schema=None):  # type: ignore[no-untyped-def]
         async with get_session_maker()() as session:
             repo = ProviderRepository(session, workspace_id=DEFAULT_WORKSPACE_ID)
             providers = await repo.list_all()
@@ -400,6 +400,7 @@ def _provider_call_from_settings():
                 friendly_name=config.friendly_name,
                 base_url=config.base_url,
                 api_key=api_key,
+                sub_kind=config.provider_sub_kind.value if config.provider_sub_kind else None,
             )
             # Use first pinned model as default if no model specified.
             if not model_id:
@@ -426,13 +427,48 @@ def _provider_call_from_settings():
                     or _FALLBACK_MAX_TOKENS
                 )
 
+            # Resolve structured-output discipline: per-model override
+            # wins; otherwise the provider-level default. ``"none"``
+            # (the default default) skips response_format altogether.
+            resolved_json_mode = None
+            if model_info is not None and model_info.json_mode is not None:
+                resolved_json_mode = model_info.json_mode.value
+            elif config.json_mode is not None:
+                resolved_json_mode = config.json_mode.value
+
+            # Per-model sampling parameters; ``None`` falls through to
+            # adapter → provider default. No provider-level default here
+            # (scoped to ModelInfo only). Schema-layer validation
+            # (ProviderConfig._validate_sub_kind_params) guarantees that
+            # only params legal for this sub_kind are ever non-None.
+            temperature = model_info.temperature if model_info else None
+            top_p = model_info.top_p if model_info else None
+            top_k = model_info.top_k if model_info else None
+            presence_penalty = model_info.presence_penalty if model_info else None
+            frequency_penalty = model_info.frequency_penalty if model_info else None
+            repetition_penalty = model_info.repetition_penalty if model_info else None
+            num_ctx = model_info.num_ctx if model_info else None
+            thinking_budget_tokens = (
+                model_info.thinking_budget_tokens if model_info else None
+            )
+
             return await adapter.chat(
                 messages=messages,
                 tools=tools,
                 model=model_id,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                presence_penalty=presence_penalty,
+                frequency_penalty=frequency_penalty,
+                repetition_penalty=repetition_penalty,
+                num_ctx=num_ctx,
+                thinking_budget_tokens=thinking_budget_tokens,
                 max_tokens=max_tokens,
                 extra=call_extra or None,
                 on_token=on_token,
+                json_mode=resolved_json_mode,
+                json_schema=json_schema,
             )
 
     return call

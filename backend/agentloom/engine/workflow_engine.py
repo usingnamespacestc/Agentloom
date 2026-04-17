@@ -20,6 +20,7 @@ from collections.abc import Awaitable, Callable
 
 from agentloom.engine.events import EventBus, WorkflowEvent
 from agentloom.engine.judge_formatter import (
+    format_ground_ratio_halt_prompt,
     format_judge_post_prompt,
     format_revise_budget_halt_prompt,
     judge_post_needs_user_input,
@@ -33,6 +34,7 @@ from agentloom.engine.judge_parser import (
 from agentloom.engine.model_resolution import effective_model_for
 from agentloom.engine.recursive_planner_parser import (
     PlannerParseError,
+    RecursivePlannerOutput,
     parse_recursive_planner_output,
 )
 from agentloom.providers.types import (
@@ -127,6 +129,11 @@ class WorkflowEngine:
         #: caller (typically ChatFlowEngine) grow the DAG dynamically —
         #: e.g. spawn judge_post once judge_pre/llm_call has settled.
         self._post_node_hook: PostNodeHook | None = None
+        #: Resolved once per ``execute()``. ``None`` means the
+        #: planner-grounding fuse is disabled for this run.
+        self._effective_min_ground_ratio: float | None = None
+        #: Minimum completed leaves before the grounding fuse arms.
+        self._effective_ground_ratio_grace: int = 20
 
     async def execute(
         self,
@@ -134,6 +141,8 @@ class WorkflowEngine:
         *,
         chatflow_tool_loop_budget: int | None | object = _UNSET,
         chatflow_auto_mode_revise_budget: int | None | object = _UNSET,
+        chatflow_min_ground_ratio: float | None | object = _UNSET,
+        chatflow_ground_ratio_grace_nodes: int | object = _UNSET,
         post_node_hook: PostNodeHook | None = None,
         disabled_tool_names: frozenset[str] | None = None,
     ) -> WorkFlow:
@@ -163,6 +172,12 @@ class WorkflowEngine:
         )
         self._effective_revise_budget = _effective_revise_budget(
             workflow.auto_mode_revise_budget, chatflow_auto_mode_revise_budget
+        )
+        self._effective_min_ground_ratio = (
+            None if chatflow_min_ground_ratio is _UNSET else chatflow_min_ground_ratio  # type: ignore[assignment]
+        )
+        self._effective_ground_ratio_grace = (
+            20 if chatflow_ground_ratio_grace_nodes is _UNSET else chatflow_ground_ratio_grace_nodes  # type: ignore[assignment]
         )
         self._revise_count = 0
         self._post_node_hook = post_node_hook
@@ -213,6 +228,25 @@ class WorkflowEngine:
                     broken.add(n.id)
                 done.add(n.id)
 
+            # Planner-grounding fuse: once enough leaves have resolved,
+            # require tool_calls to occupy at least ``min_ground_ratio``
+            # of them. Catches runaway planner/judge churn that never
+            # lands a real action (see §5.4 / 2026-04-17 incident).
+            if (
+                workflow.pending_user_prompt is None
+                and self._effective_min_ground_ratio is not None
+            ):
+                leaves, tools = _compute_ground_ratio(workflow)
+                if (
+                    leaves >= self._effective_ground_ratio_grace
+                    and tools / leaves < self._effective_min_ground_ratio
+                ):
+                    workflow.pending_user_prompt = format_ground_ratio_halt_prompt(
+                        leaves=leaves,
+                        tools=tools,
+                        min_ratio=self._effective_min_ground_ratio,
+                    )
+
             # If a judge pass decided the WorkFlow must bounce back
             # to the ChatFlow layer for user clarification, stop
             # running — remaining planned nodes stay dashed, and
@@ -251,6 +285,31 @@ class WorkflowEngine:
             )
 
         return publish
+
+    async def _forward_sub_events(
+        self,
+        sub_id: str,
+        parent_id: str,
+        queue: asyncio.Queue[WorkflowEvent | None],
+    ) -> None:
+        """Re-publish ``sub_id``-scoped events under ``parent_id``.
+
+        Preserves ``kind``, ``node_id``, and ``data`` — only the
+        ``workflow_id`` changes. Drops ``workflow.completed`` so each
+        sub-WorkFlow's internal completion doesn't look like the
+        outer run's completion to downstream subscribers.
+        """
+        async for event in self._bus.drain(sub_id, queue):
+            if event.kind == "workflow.completed":
+                continue
+            await self._bus.publish(
+                WorkflowEvent(
+                    workflow_id=parent_id,
+                    kind=event.kind,
+                    node_id=event.node_id,
+                    data=event.data,
+                )
+            )
 
     async def _run_node(self, workflow: WorkFlow, node: WorkFlowNode) -> None:
         node.status = NodeStatus.RUNNING
@@ -329,6 +388,7 @@ class WorkflowEngine:
         expose_tools: bool,
         override_tools: list[ToolDefinition] | None = None,
         extra: dict[str, Any] | None = None,
+        json_schema: dict[str, Any] | None = None,
     ) -> None:
         """Shared provider-call path for ``llm_call`` and ``judge_call``.
 
@@ -377,6 +437,7 @@ class WorkflowEngine:
             model,
             on_token=self._token_callback(workflow, node),
             extra=extra,
+            json_schema=json_schema,
         )
 
         # Freeze the result on the node.
@@ -404,7 +465,26 @@ class WorkflowEngine:
         tool_call ancestors contribute a ``tool`` message. If the node
         carries explicit ``input_messages``, we use those as-is.
         """
-        await self._invoke_and_freeze(workflow, node, expose_tools=True)
+        # Planner nodes emit a JSON object matching RecursivePlannerOutput.
+        # When the downstream provider supports structured output, we
+        # pass the Pydantic-derived schema so the wire layer can enforce
+        # it (Ollama format:, OpenAI response_format json_schema, etc.).
+        # Adapters whose json_mode resolves to "object" will get a plain
+        # json_object shape; "none" falls through to prompt-only.
+        # Planner nodes must NOT expose tools: the openai_compat adapter
+        # silently drops ``response_format`` when ``tools`` is non-empty,
+        # so if we expose tools the json_schema enforcement is lost and
+        # models fall back to markdown-fenced JSON (which the parser then
+        # has to heuristically unwrap). Planners are pure "decide how to
+        # decompose" nodes — they never actually call a tool — so tools
+        # can safely be suppressed on this path.
+        is_planner = node.role == WorkNodeRole.PLANNER
+        planner_schema: dict[str, Any] | None = (
+            RecursivePlannerOutput.model_json_schema() if is_planner else None
+        )
+        await self._invoke_and_freeze(
+            workflow, node, expose_tools=not is_planner, json_schema=planner_schema
+        )
         assert node.output_message is not None
 
         # ------------------------------------------------------------- tool loop
@@ -432,6 +512,18 @@ class WorkflowEngine:
         outer-resolved budgets are passed as the inner's "chatflow
         defaults" so a sub-WorkFlow without its own override inherits
         the running effective values.
+
+        SSE forwarding: the sub engine publishes its node events on
+        ``sub.id`` (its own ``workflow_id``), but the ChatFlow-level
+        relay only subscribes to the outermost WorkFlow's id. Without
+        a forwarder the frontend would see nothing inside any
+        ``sub_agent_delegation`` — pre/planner/judge/etc. would all
+        be invisible until the next full-snapshot refresh. We open a
+        subscription to ``sub.id`` and re-publish every event under
+        the outer ``workflow.id``. Nested delegations chain through:
+        sub_2 → sub_1 → outer → ChatFlow relay. ``workflow.completed``
+        is dropped so only the outermost completion reaches the
+        ChatFlow layer.
         """
         sub = node.sub_workflow
         if sub is None:
@@ -445,13 +537,33 @@ class WorkflowEngine:
             self._tools,
             self._tool_ctx,
         )
-        await sub_engine.execute(
-            sub,
-            chatflow_tool_loop_budget=self._effective_budget,
-            chatflow_auto_mode_revise_budget=self._effective_revise_budget,
-            post_node_hook=self._post_node_hook,
-            disabled_tool_names=self._disabled_tool_names,
+        forward_queue = self._bus.open_subscription(sub.id)
+        forward_task = asyncio.create_task(
+            self._forward_sub_events(sub.id, workflow.id, forward_queue),
+            name=f"forward-{sub.id}",
         )
+        try:
+            await sub_engine.execute(
+                sub,
+                chatflow_tool_loop_budget=self._effective_budget,
+                chatflow_auto_mode_revise_budget=self._effective_revise_budget,
+                chatflow_min_ground_ratio=self._effective_min_ground_ratio,
+                chatflow_ground_ratio_grace_nodes=self._effective_ground_ratio_grace,
+                post_node_hook=self._post_node_hook,
+                disabled_tool_names=self._disabled_tool_names,
+            )
+        finally:
+            # execute() itself publishes ``workflow.completed`` on
+            # ``sub.id`` at the end. Signal end-of-stream so the
+            # forwarder drains the tail (including that completed
+            # event, which it filters out) and exits naturally. A
+            # cancel() here would race the last-batch events and
+            # drop them.
+            await self._bus.close(sub.id)
+            try:
+                await forward_task
+            except Exception:  # noqa: BLE001 — forwarder must not raise into run loop
+                pass
 
         # Absorb sub-layer halt signals into this delegation node
         # instead of bubbling. The outer ChatNode-level judge is the
@@ -861,6 +973,35 @@ def _assert_tool_loop_budget(
             f"tool-use loop exceeded budget ({effective_budget} iterations); "
             "aborting to protect against runaway agents"
         )
+
+
+def _compute_ground_ratio(workflow: WorkFlow) -> tuple[int, int]:
+    """Count this WorkFlow's *completed* leaves for the grounding fuse.
+
+    Returns ``(leaves, tool_calls)`` where ``leaves`` is the number of
+    terminal-status non-``sub_agent_delegation`` nodes and
+    ``tool_calls`` is the subset of those whose step_kind is
+    ``tool_call``.
+
+    Why local-only (no recursion into sub_workflows)? Each recursive
+    engine level already runs the check on its own WorkFlow — so a
+    sub_agent_delegation whose inner tree is churning halts *inside*
+    itself and bubbles up via the existing sub-halt mechanism. The
+    outer level's count correctly ignores delegation containers
+    (they're not leaves) so a healthy parent that's only dispatching
+    to children never trips the fuse.
+    """
+    leaves = 0
+    tools = 0
+    for node in workflow.nodes.values():
+        if node.step_kind == StepKind.SUB_AGENT_DELEGATION:
+            continue
+        if node.status not in (NodeStatus.SUCCEEDED, NodeStatus.FAILED):
+            continue
+        leaves += 1
+        if node.step_kind == StepKind.TOOL_CALL:
+            tools += 1
+    return leaves, tools
 
 
 def _effective_revise_budget(

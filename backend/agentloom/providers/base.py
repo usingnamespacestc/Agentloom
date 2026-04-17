@@ -47,10 +47,19 @@ class ProviderAdapter(ABC):
         model: str,
         messages: list[Message],
         tools: list[ToolDefinition] | None = None,
-        temperature: float = 0.0,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        presence_penalty: float | None = None,
+        frequency_penalty: float | None = None,
+        repetition_penalty: float | None = None,
+        num_ctx: int | None = None,
+        thinking_budget_tokens: int | None = None,
         max_tokens: int | None = None,
         extra: dict[str, Any] | None = None,
         on_token: TokenCallback | None = None,
+        json_mode: str | None = None,
+        json_schema: dict[str, Any] | None = None,
     ) -> ChatResponse:
         """Call the chat completions endpoint and return a typed response.
 
@@ -58,6 +67,12 @@ class ProviderAdapter(ABC):
         provider's streaming endpoint and invoke the callback as each
         text fragment arrives. The final return value is still the
         fully assembled ``ChatResponse``.
+
+        ``json_mode`` selects structured-output discipline:
+        ``"schema"`` (full JSON Schema, requires ``json_schema``),
+        ``"object"`` (free-form JSON object), or ``"none"`` / ``None``
+        (prompt-only). The adapter translates this to whatever its wire
+        protocol expects (OpenAI-compat: ``response_format``).
         """
 
     @abstractmethod

@@ -214,6 +214,13 @@ export interface WorkFlow {
   id: NodeId;
   nodes: Record<NodeId, WorkFlowNode>;
   root_ids: NodeId[];
+  /** Judge model stamped at submit time from the composer / ChatFlow
+   * default. Source of truth for which model actually ran the inner
+   * judges (``default_judge_model`` on ChatFlow is only the default
+   * for *new* turns and may drift after submit). */
+  judge_model_override?: ProviderModelRef | null;
+  /** Tool-call follow-up llm_call model stamped at submit time. */
+  tool_call_model_override?: ProviderModelRef | null;
   /**
    * Set by the engine when a judge decides the WorkFlow cannot proceed
    * without user clarification. The ChatFlow layer renders this as the
@@ -285,6 +292,15 @@ export interface ChatFlow {
   default_execution_mode: ExecutionMode;
   /** Hard cap on judge_post retry rounds. ``-1`` means unlimited. */
   judge_retry_budget: number;
+  /**
+   * Planner-grounding fuse. Halts this ChatFlow (each recursive
+   * sub_agent_delegation level independently) when the fraction of
+   * completed ``tool_call`` leaves drops below ``min_ground_ratio``
+   * after ``ground_ratio_grace_nodes`` leaves have accumulated. ``null``
+   * disables the check. Default 5% / 20. See backend §5.4.
+   */
+  min_ground_ratio: number | null;
+  ground_ratio_grace_nodes: number;
   /**
    * Per-ChatFlow tool denylist — tool names hidden from every LLM call
    * and refused at execute-time. Covers both built-ins (``Bash``,

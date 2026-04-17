@@ -19,6 +19,7 @@ import { NodeIdLine } from "./NodeIdLine";
 import { getRoleStyle } from "./roleStyles";
 import { TokenBar } from "./ChatFlowNodeCard";
 import { useChatFlowStore } from "@/store/chatflowStore";
+import { usePreferencesStore } from "@/store/preferencesStore";
 import type { WorkFlowNode } from "@/types/schema";
 
 export interface WorkFlowNodeData extends Record<string, unknown> {
@@ -117,10 +118,11 @@ function LlmCallBody({ node, maxCtx }: { node: WorkFlowNode; maxCtx: number | nu
   const thinking = node.output_message?.extras?.thinking;
   const usage = node.usage;
   const modelRef = node.model_override;
+  const showModel = usePreferencesStore((s) => s.showWorkNodeModel);
 
   return (
     <div className="space-y-1">
-      {modelRef && (
+      {showModel && modelRef && (
         <div className="text-[10px] text-gray-500">
           {t("workflow.model")}: {modelRef.model_id}
         </div>
@@ -178,6 +180,8 @@ function JudgeCallBody({ node, maxCtx }: { node: WorkFlowNode; maxCtx: number | 
     (s) => s.streamingDeltas[node.id] ?? "",
   );
   const live = node.status === "running" && streamingDelta;
+  const showModel = usePreferencesStore((s) => s.showWorkNodeModel);
+  const modelRef = node.model_override;
 
   // Pick the one-word headline that matches the variant's discriminator.
   const headline = verdict
@@ -199,6 +203,11 @@ function JudgeCallBody({ node, maxCtx }: { node: WorkFlowNode; maxCtx: number | 
 
   return (
     <div className="space-y-1">
+      {showModel && modelRef && (
+        <div className="text-[10px] text-gray-500">
+          {t("workflow.model")}: {modelRef.model_id}
+        </div>
+      )}
       <div className="flex items-center gap-1 text-[10px] text-gray-500">
         <span className="rounded bg-amber-200/60 px-1 py-0.5 font-medium text-amber-900">
           {variant ? t(`workflow.judge_variant_${variant}`) : "—"}
@@ -293,8 +302,15 @@ function ToolCallBody({ node }: { node: WorkFlowNode }) {
   const { t } = useTranslation();
   const result = node.tool_result;
   const label = node.tool_name ?? "tool";
+  const showModel = usePreferencesStore((s) => s.showWorkNodeModel);
+  const modelRef = node.model_override;
   return (
     <div className="space-y-1">
+      {showModel && modelRef && (
+        <div className="text-[10px] text-gray-500">
+          {t("workflow.model")}: {modelRef.model_id}
+        </div>
+      )}
       <div className="font-mono text-gray-700">{label}</div>
       {result && (
         <div>

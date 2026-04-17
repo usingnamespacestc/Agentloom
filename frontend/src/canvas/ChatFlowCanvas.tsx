@@ -47,12 +47,14 @@ import {
   type Node,
   type NodeChange,
   type NodeMouseHandler,
+  type OnNodeDrag,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useTranslation } from "react-i18next";
 
 import { layoutDag } from "./layout";
 import { CanvasContextMenu, StickyNoteContextMenu } from "./CanvasContextMenu";
+import { ChatFlowActiveWorkPanel } from "./ChatFlowActiveWorkPanel";
 import { ModelRibbonLayer } from "./ModelRibbonLayer";
 import { MODEL_KINDS, colorForModel, edgeModel } from "./effectiveModel";
 import { ChatFlowNodeCard, type ChatFlowNodeData } from "./nodes/ChatFlowNodeCard";
@@ -254,6 +256,13 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
   const dirtyPositions = useRef<Set<string>>(new Set());
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastChatflowId = useRef<string | null>(null);
+  // Mid-drag, SSE-driven ``setNodes([...])`` replacements disrupt React
+  // Flow's internal drag state (new Node identities per rebuild) and the
+  // final position event often never makes it to ``onNodesChange``.
+  // Gate the sync effect while dragging; bump ``syncTick`` on drag stop
+  // to force a catch-up re-sync.
+  const isDragging = useRef(false);
+  const [syncTick, setSyncTick] = useState(0);
 
   // Debounced save of dirty drag positions to the backend.
   const flushPositions = useCallback(() => {
@@ -271,6 +280,7 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
   }, [chatflow]);
 
   useEffect(() => {
+    if (isDragging.current) return;
     if (chatflow?.id !== lastChatflowId.current) {
       dragPositions.current = {};
       dirtyPositions.current.clear();
@@ -300,7 +310,7 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
     }));
     setNodes([...merged, ...stickyNodes]);
     setEdges(laid.edges);
-  }, [chatflow, selectedNodeId, contextWindowByModel, stickyNotes, editingStickyId, selectedStickyId, onNoteTitleChange, onNoteTextChange, onNoteDelete]);
+  }, [chatflow, selectedNodeId, contextWindowByModel, stickyNotes, editingStickyId, selectedStickyId, onNoteTitleChange, onNoteTextChange, onNoteDelete, syncTick]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     const filtered = changes.filter((c) => c.type !== "select");
@@ -325,6 +335,26 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(flushPositions, 500);
     }
+  }, [flushPositions, updateStickyNote, isSticky]);
+
+  const handleNodeDragStart: OnNodeDrag = useCallback(() => {
+    isDragging.current = true;
+  }, []);
+
+  // Fallback capture of the final drop position. ``onNodesChange``'s
+  // final ``position`` event is often lost when an SSE-driven re-render
+  // interrupts the drag — this runs on mouseup regardless.
+  const handleNodeDragStop: OnNodeDrag = useCallback((_event, node) => {
+    isDragging.current = false;
+    dragPositions.current[node.id] = { x: node.position.x, y: node.position.y };
+    if (isSticky(String(node.id))) {
+      updateStickyNote(node.id, { x: node.position.x, y: node.position.y });
+    } else {
+      dirtyPositions.current.add(node.id);
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(flushPositions, 500);
+    }
+    setSyncTick((t) => t + 1);
   }, [flushPositions, updateStickyNote, isSticky]);
 
   const handleNodeClick: NodeMouseHandler = (_event, node) => {
@@ -399,6 +429,8 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
         onPaneContextMenu={handlePaneContextMenu}
         onPaneClick={handlePaneClick}
         onNodesChange={onNodesChange}
+        onNodeDragStart={handleNodeDragStart}
+        onNodeDragStop={handleNodeDragStop}
         onEdgeMouseEnter={(_, edge) =>
           setHoveredEdge({ parent: edge.source, child: edge.target })
         }
@@ -415,6 +447,7 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
         <Background />
         <Controls showInteractive={false} />
         <ModelRibbonLayer chatflow={chatflow} />
+        <ChatFlowActiveWorkPanel chatflow={chatflow} />
       </ReactFlow>
 
       {hoveredEdge && cursorPos && chatflow && (

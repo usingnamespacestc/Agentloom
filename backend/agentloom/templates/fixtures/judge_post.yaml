@@ -39,6 +39,16 @@ params_schema:
     description: >
       Newline-separated ``id: description`` pairs so the judge can
       cite a location when flagging an issue.
+  redo_eligible_catalog:
+    type: string
+    required: false
+    description: >
+      Newline-separated ``id: kind — description`` pairs for nodes the
+      engine is willing to re-spawn (worker llm_calls and
+      sub_agent_delegations only). Every ``redo_targets[].node_id``
+      MUST appear in this list — ids outside it (judges, planners,
+      tool_calls) will be silently dropped by the engine and the
+      retry will halt.
   layer_notes:
     type: string
     required: false
@@ -126,6 +136,24 @@ plan:
                               it again — that's a loop. Choose
                               ``fail`` and surface the issue to the
                               user.
+
+                          (d) Every ``redo_targets[].node_id`` MUST
+                              appear verbatim in the
+                              "Redo-eligible WorkNodes" list further
+                              down. The engine can only re-spawn
+                              worker llm_calls and sub_agent_delegations;
+                              it will silently drop any id that names
+                              a planner, planner_judge, worker_judge,
+                              post_judge, pre_judge, or tool_call —
+                              and if nothing redoable remains, the
+                              whole WorkFlow halts to the user. If you
+                              want behavior from a judge / planner /
+                              tool_call to change, instead retry the
+                              upstream worker whose output that node
+                              consumed, and describe the desired
+                              change in the critique. Copy ids
+                              character-for-character; do not
+                              paraphrase or reconstruct them.
               - fail:   the WorkFlow cannot succeed as built (or a halt
                         condition fired before completion). Write a
                         ``user_message`` explaining the situation and
@@ -263,6 +291,10 @@ plan:
             WorkNode catalog
             ----------------
             {{ worknode_catalog }}
+
+            Redo-eligible WorkNodes (worker llm_calls + sub_agent_delegations)
+            -----------------------------------------------------------------
+            {{ redo_eligible_catalog }}
 
             Upstream kind: {{ upstream_kind }}
 

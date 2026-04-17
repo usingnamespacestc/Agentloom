@@ -20,7 +20,13 @@ from agentloom.db.base import get_session
 from agentloom.db.models.tenancy import DEFAULT_WORKSPACE_ID
 from agentloom.db.repositories.provider import ProviderNotFoundError, ProviderRepository
 from agentloom.providers.registry import build_adapter
-from agentloom.schemas.provider import ModelInfo, ProviderConfig, ProviderKind
+from agentloom.schemas.provider import (
+    JsonMode,
+    ModelInfo,
+    ProviderConfig,
+    ProviderKind,
+    ProviderSubKind,
+)
 
 router = APIRouter(prefix="/api/providers", tags=["providers"])
 
@@ -35,22 +41,26 @@ def _repo(session: AsyncSession) -> ProviderRepository:
 class CreateProviderRequest(BaseModel):
     friendly_name: str
     provider_kind: ProviderKind
+    provider_sub_kind: ProviderSubKind | None = None
     base_url: str
     api_key_source: str = "env_var"
     api_key_env_var: str | None = None
     api_key_inline: str | None = None  # plaintext in MVP
     available_models: list[ModelInfo] = []
     rate_limit_bucket: str | None = None
+    json_mode: JsonMode = JsonMode.NONE
 
 
 class PatchProviderRequest(BaseModel):
     friendly_name: str | None = None
+    provider_sub_kind: ProviderSubKind | None = None
     base_url: str | None = None
     api_key_source: str | None = None
     api_key_env_var: str | None = None
     api_key_inline: str | None = None
     available_models: list[ModelInfo] | None = None
     rate_limit_bucket: str | None = None
+    json_mode: JsonMode | None = None
 
 
 class TestConnectionRequest(BaseModel):
@@ -76,6 +86,7 @@ async def create_provider(
     config = ProviderConfig(
         friendly_name=body.friendly_name,
         provider_kind=body.provider_kind,
+        provider_sub_kind=body.provider_sub_kind,
         base_url=body.base_url,
         api_key_source=body.api_key_source,  # type: ignore[arg-type]
         api_key_env_var=body.api_key_env_var if body.api_key_source == "env_var" else None,
@@ -86,6 +97,7 @@ async def create_provider(
         ),
         available_models=body.available_models,
         rate_limit_bucket=body.rate_limit_bucket,
+        json_mode=body.json_mode,
     )
     repo = _repo(session)
     row = await repo.create(config)
@@ -124,6 +136,8 @@ async def patch_provider(
     provided = body.model_fields_set
     if "friendly_name" in provided and body.friendly_name is not None:
         config.friendly_name = body.friendly_name
+    if "provider_sub_kind" in provided:
+        config.provider_sub_kind = body.provider_sub_kind
     if "base_url" in provided and body.base_url is not None:
         config.base_url = body.base_url
     if "api_key_source" in provided and body.api_key_source is not None:
@@ -144,6 +158,15 @@ async def patch_provider(
         config.available_models = body.available_models
     if "rate_limit_bucket" in provided:
         config.rate_limit_bucket = body.rate_limit_bucket
+    if "json_mode" in provided and body.json_mode is not None:
+        config.json_mode = body.json_mode
+
+    # Re-run model validators (sub_kind/param whitelist, key-source
+    # invariants) — field assignment alone doesn't trigger them.
+    try:
+        config = ProviderConfig.model_validate(config.model_dump())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
     await repo.save(config)
     await session.commit()
@@ -185,6 +208,7 @@ async def test_connection(
             friendly_name=config.friendly_name,
             base_url=config.base_url,
             api_key=api_key,
+            sub_kind=config.provider_sub_kind.value if config.provider_sub_kind else None,
         )
         models = await adapter.list_models()
         await adapter.close()
@@ -213,6 +237,7 @@ async def discover_models(
             friendly_name=config.friendly_name,
             base_url=config.base_url,
             api_key=api_key,
+            sub_kind=config.provider_sub_kind.value if config.provider_sub_kind else None,
         )
         model_ids = await adapter.list_models()
         await adapter.close()

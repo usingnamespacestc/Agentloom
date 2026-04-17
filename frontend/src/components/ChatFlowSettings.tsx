@@ -41,6 +41,8 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
   const [judgeModelKey, setJudgeModelKey] = useState("");
   const [toolCallModelKey, setToolCallModelKey] = useState("");
   const [retryBudgetStr, setRetryBudgetStr] = useState("");
+  const [minGroundRatioPctStr, setMinGroundRatioPctStr] = useState("");
+  const [groundGraceStr, setGroundGraceStr] = useState("");
   // Per-tool visibility: set of built-in tool names the user has
   // enabled for this chatflow. A tool is "checked" iff its name is
   // NOT in the stored ``disabled_tool_names`` list.
@@ -51,6 +53,12 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
   // none of its registered tool names are in that list.
   const [enabledMcpIds, setEnabledMcpIds] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
+  // The three per-call-type model fallbacks are rarely changed —
+  // day-to-day model picking lives in the composer picker. Collapse
+  // them behind an Advanced disclosure so this modal leads with the
+  // knobs users actually turn. Open on demand to change a ChatFlow's
+  // fallback without disturbing other ChatFlows' composer preferences.
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const loadProviders = useCallback(async () => {
     try {
@@ -88,6 +96,14 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
       setJudgeModelKey(refKey(chatflow?.default_judge_model ?? null));
       setToolCallModelKey(refKey(chatflow?.default_tool_call_model ?? null));
       setRetryBudgetStr(String(chatflow?.judge_retry_budget ?? 3));
+      // min_ground_ratio is stored as a 0-1 fraction but surfaced to
+      // the user as a 0-100 percentage. ``null`` means "fuse disabled"
+      // and shows as an empty input.
+      const mgr = chatflow?.min_ground_ratio;
+      setMinGroundRatioPctStr(
+        mgr == null ? "" : String(Math.round(mgr * 1000) / 10),
+      );
+      setGroundGraceStr(String(chatflow?.ground_ratio_grace_nodes ?? 20));
     }
   }, [open, chatflow, loadProviders, loadMcpServers, loadTools]);
 
@@ -138,6 +154,27 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
         Number.isFinite(parsed) && Number.isInteger(parsed) && parsed >= -1
           ? parsed
           : (chatflow?.judge_retry_budget ?? 3);
+      // Grounding fuse inputs: empty % disables the fuse (sends null);
+      // numeric % in [0, 100] is clamped and converted back to a 0-1
+      // fraction. Invalid input falls back to whatever's already stored.
+      const mgrTrim = minGroundRatioPctStr.trim();
+      let minGroundRatio: number | null;
+      if (mgrTrim === "") {
+        minGroundRatio = null;
+      } else {
+        const pct = Number(mgrTrim);
+        if (Number.isFinite(pct) && pct >= 0 && pct <= 100) {
+          minGroundRatio = pct / 100;
+        } else {
+          minGroundRatio = chatflow?.min_ground_ratio ?? null;
+        }
+      }
+      const graceTrim = groundGraceStr.trim();
+      const graceParsed = graceTrim === "" ? NaN : Number(graceTrim);
+      const groundGrace =
+        Number.isFinite(graceParsed) && Number.isInteger(graceParsed) && graceParsed >= 0
+          ? graceParsed
+          : (chatflow?.ground_ratio_grace_nodes ?? 20);
       // Rebuild disabled_tool_names: preserve any stored entries the
       // UI doesn't know about (e.g. tools from a disconnected MCP
       // server), then append every built-in the user unchecked plus
@@ -162,6 +199,8 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
         default_judge_model: parseRefKey(judgeModelKey),
         default_tool_call_model: parseRefKey(toolCallModelKey),
         judge_retry_budget: budget,
+        min_ground_ratio: minGroundRatio,
+        ground_ratio_grace_nodes: groundGrace,
         disabled_tool_names: persistedDisabled,
       });
       onClose();
@@ -193,37 +232,55 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
         </div>
 
         <div className="space-y-4 px-5 py-4">
-          <ModelPicker
-            label={t("chatflow_settings.default_model")}
-            hint={t("chatflow_settings.default_model_hint")}
-            value={modelKey}
-            options={modelOptions}
-            onChange={setModelKey}
-          />
+          <div className="rounded border border-gray-200">
+            <button
+              type="button"
+              onClick={() => setAdvancedOpen((v) => !v)}
+              className="flex w-full items-center justify-between px-3 py-2 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
+              data-testid="chatflow-settings-advanced-toggle"
+            >
+              <span>{t("chatflow_settings.advanced_models")}</span>
+              <span className="text-gray-400">{advancedOpen ? "\u25BE" : "\u25B8"}</span>
+            </button>
+            {advancedOpen && (
+              <div className="space-y-4 border-t border-gray-200 px-3 py-3">
+                <p className="text-[10px] text-gray-400">
+                  {t("chatflow_settings.advanced_models_hint")}
+                </p>
+                <ModelPicker
+                  label={t("chatflow_settings.default_model")}
+                  hint={t("chatflow_settings.default_model_hint")}
+                  value={modelKey}
+                  options={modelOptions}
+                  onChange={setModelKey}
+                />
 
-          {modelOptions.length === 0 && (
-            <p className="rounded border border-dashed border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
-              {t("chatflow_settings.no_models_hint")}
-            </p>
-          )}
+                {modelOptions.length === 0 && (
+                  <p className="rounded border border-dashed border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
+                    {t("chatflow_settings.no_models_hint")}
+                  </p>
+                )}
 
-          <ModelPicker
-            label={t("chatflow_settings.default_judge_model")}
-            hint={t("chatflow_settings.default_judge_model_hint")}
-            value={judgeModelKey}
-            options={modelOptions}
-            onChange={setJudgeModelKey}
-            inheritOption={t("chatflow_settings.inherit_main_model")}
-          />
+                <ModelPicker
+                  label={t("chatflow_settings.default_judge_model")}
+                  hint={t("chatflow_settings.default_judge_model_hint")}
+                  value={judgeModelKey}
+                  options={modelOptions}
+                  onChange={setJudgeModelKey}
+                  inheritOption={t("chatflow_settings.inherit_main_model")}
+                />
 
-          <ModelPicker
-            label={t("chatflow_settings.default_tool_call_model")}
-            hint={t("chatflow_settings.default_tool_call_model_hint")}
-            value={toolCallModelKey}
-            options={modelOptions}
-            onChange={setToolCallModelKey}
-            inheritOption={t("chatflow_settings.inherit_main_model")}
-          />
+                <ModelPicker
+                  label={t("chatflow_settings.default_tool_call_model")}
+                  hint={t("chatflow_settings.default_tool_call_model_hint")}
+                  value={toolCallModelKey}
+                  options={modelOptions}
+                  onChange={setToolCallModelKey}
+                  inheritOption={t("chatflow_settings.inherit_main_model")}
+                />
+              </div>
+            )}
+          </div>
 
           <label className="block">
             <span className="text-[11px] font-medium text-gray-500">
@@ -240,6 +297,43 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
             />
             <p className="mt-1 text-[10px] text-gray-400">
               {t("chatflow_settings.judge_retry_budget_hint")}
+            </p>
+          </label>
+
+          <label className="block">
+            <span className="text-[11px] font-medium text-gray-500">
+              {t("chatflow_settings.min_ground_ratio")}
+            </span>
+            <input
+              type="number"
+              min={0}
+              max={100}
+              step={1}
+              value={minGroundRatioPctStr}
+              onChange={(e) => setMinGroundRatioPctStr(e.target.value)}
+              data-testid="min-ground-ratio-input"
+              className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+            />
+            <p className="mt-1 text-[10px] text-gray-400">
+              {t("chatflow_settings.min_ground_ratio_hint")}
+            </p>
+          </label>
+
+          <label className="block">
+            <span className="text-[11px] font-medium text-gray-500">
+              {t("chatflow_settings.ground_ratio_grace_nodes")}
+            </span>
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={groundGraceStr}
+              onChange={(e) => setGroundGraceStr(e.target.value)}
+              data-testid="ground-ratio-grace-input"
+              className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+            />
+            <p className="mt-1 text-[10px] text-gray-400">
+              {t("chatflow_settings.ground_ratio_grace_nodes_hint")}
             </p>
           </label>
 

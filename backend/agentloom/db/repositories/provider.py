@@ -62,6 +62,7 @@ class ProviderRepository(WorkspaceScopedRepository):
                 "id": r.id,
                 "friendly_name": r.friendly_name,
                 "provider_kind": r.provider_kind,
+                "provider_sub_kind": (r.payload or {}).get("provider_sub_kind"),
                 "base_url": r.base_url,
                 "available_models": (r.payload or {}).get("available_models", []),
                 "api_key_source": (r.payload or {}).get("api_key_source", "env_var"),

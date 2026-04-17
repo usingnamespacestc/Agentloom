@@ -319,7 +319,7 @@ function ComposerFooter({
   composerModels,
   t,
 }: {
-  leafNode: ChatFlowNode | undefined;
+  leafNode: ChatFlowNode | null;
   inputText: string;
   setInputText: (v: string) => void;
   sending: boolean;

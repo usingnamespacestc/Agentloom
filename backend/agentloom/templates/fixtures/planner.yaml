@@ -94,6 +94,7 @@ plan:
             Return JSON only. Schema:
 
             {
+              "reasoning": str | null,
               "mode": "atomic" | "decompose" | "infeasible",
               "atomic": {
                  "step_kind": "llm_call" | "tool_call",
@@ -109,6 +110,13 @@ plan:
               ] | null,
               "reason": str | null
             }
+
+            Fill `reasoning` with 1–2 sentences explaining your
+            atomic-vs-decompose decision *before* you commit to the rest
+            of the JSON. This is your chain-of-thought — brief is fine.
+            If your model already reasons on a private channel (thinking
+            mode), a one-line summary of the conclusion is enough; don't
+            duplicate the full trace.
 
             No prose outside the JSON.
         - role: user
