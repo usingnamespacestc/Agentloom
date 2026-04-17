@@ -411,6 +411,7 @@ export const SUB_KIND_PARAM_WHITELIST: Record<ProviderSubKind, ReadonlySet<keyof
     "max_output_tokens",
     "presence_penalty",
     "frequency_penalty",
+    "thinking_enabled",
   ]),
   anthropic: new Set([
     "temperature",
@@ -437,6 +438,7 @@ export interface ModelInfoDTO {
   repetition_penalty?: number | null;
   num_ctx?: number | null;
   thinking_budget_tokens?: number | null;
+  thinking_enabled?: boolean | null;
 }
 
 export interface ProviderSummary {

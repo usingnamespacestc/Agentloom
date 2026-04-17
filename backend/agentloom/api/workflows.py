@@ -22,6 +22,7 @@ from agentloom.engine.events import get_event_bus
 from agentloom.engine.workflow_engine import WorkflowEngine
 from agentloom.schemas import StepKind, WorkFlow, WorkFlowNode
 from agentloom.schemas.common import FrozenNodeError, JudgeVariant
+from agentloom.schemas.provider import ProviderSubKind
 from agentloom.schemas.workflow import WireMessage
 from agentloom.mcp.runtime import get_shared_registry
 from agentloom.tools.base import ToolContext
@@ -388,13 +389,6 @@ def _provider_call_from_settings():
             config = await repo.get(chosen["id"])
             api_key = repo.resolve_api_key(config)
 
-            call_extra: dict = {}
-            # Volcengine needs explicit thinking enable.
-            if "volces.com" in config.base_url or "volcengine" in config.friendly_name.lower():
-                call_extra = {"thinking": {"type": "enabled"}}
-            if extra:
-                call_extra.update(extra)
-
             adapter = build_adapter(
                 kind=config.provider_kind.value,
                 friendly_name=config.friendly_name,
@@ -451,6 +445,20 @@ def _provider_call_from_settings():
             thinking_budget_tokens = (
                 model_info.thinking_budget_tokens if model_info else None
             )
+
+            # Volcengine's Ark API needs explicit ``{"thinking": {"type":
+            # "enabled"}}`` to turn reasoning on. Per-model
+            # ``thinking_enabled`` overrides the provider default (which is
+            # currently on for volcengine to preserve pre-toggle behavior).
+            call_extra: dict = {}
+            if config.provider_sub_kind == ProviderSubKind.VOLCENGINE:
+                thinking_on = True
+                if model_info is not None and model_info.thinking_enabled is not None:
+                    thinking_on = model_info.thinking_enabled
+                if thinking_on:
+                    call_extra["thinking"] = {"type": "enabled"}
+            if extra:
+                call_extra.update(extra)
 
             return await adapter.chat(
                 messages=messages,

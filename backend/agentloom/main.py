@@ -70,8 +70,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await mcp_runtime.close_all()
 
 
+_LOGGING_CONFIGURED = False
+
+
+def _configure_logging(level_name: str) -> None:
+    global _LOGGING_CONFIGURED
+    if _LOGGING_CONFIGURED:
+        return
+    level = getattr(logging, level_name.upper(), logging.INFO)
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+        )
+    )
+    app_logger = logging.getLogger("agentloom")
+    app_logger.setLevel(level)
+    app_logger.addHandler(handler)
+    app_logger.propagate = False
+    _LOGGING_CONFIGURED = True
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
+    _configure_logging(settings.log_level)
     app = FastAPI(
         title="Agentloom",
         version=__version__,

@@ -16,7 +16,10 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
+
+log = logging.getLogger(__name__)
 
 from agentloom.engine.events import EventBus, WorkflowEvent
 from agentloom.engine.judge_formatter import (
@@ -245,6 +248,14 @@ class WorkflowEngine:
                         leaves=leaves,
                         tools=tools,
                         min_ratio=self._effective_min_ground_ratio,
+                    )
+                    log.info(
+                        "ground-ratio fuse halt: workflow=%s leaves=%d tools=%d ratio=%.3f threshold=%.3f",
+                        workflow.id,
+                        leaves,
+                        tools,
+                        tools / leaves,
+                        self._effective_min_ground_ratio,
                     )
 
             # If a judge pass decided the WorkFlow must bounce back
@@ -575,6 +586,12 @@ class WorkflowEngine:
         # ``sub.pending_user_prompt`` is cleared so only the outermost
         # WorkFlow may carry a user-facing prompt.
         if sub.pending_user_prompt is not None:
+            log.info(
+                "sub-WorkFlow halt bubbling up: parent=%s sub=%s node=%s",
+                workflow.id,
+                sub.id,
+                node.id,
+            )
             node.error = f"sub-WorkFlow halted: {sub.pending_user_prompt}"
             node.status = NodeStatus.FAILED
             node.finished_at = utcnow()
@@ -684,6 +701,12 @@ class WorkflowEngine:
             self._revise_count += 1
             budget = self._effective_revise_budget
             if budget is not None and self._revise_count > budget:
+                log.info(
+                    "revise-budget halt: workflow=%s revise_count=%d budget=%d",
+                    workflow.id,
+                    self._revise_count,
+                    budget,
+                )
                 workflow.pending_user_prompt = format_revise_budget_halt_prompt(
                     revise_count=self._revise_count,
                     budget=budget,

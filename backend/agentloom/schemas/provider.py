@@ -55,7 +55,14 @@ SUB_KIND_PARAM_WHITELIST: dict[ProviderSubKind, frozenset[str]] = {
         {"temperature", "top_p", "top_k", "max_output_tokens", "repetition_penalty", "num_ctx"}
     ),
     ProviderSubKind.VOLCENGINE: frozenset(
-        {"temperature", "top_p", "max_output_tokens", "presence_penalty", "frequency_penalty"}
+        {
+            "temperature",
+            "top_p",
+            "max_output_tokens",
+            "presence_penalty",
+            "frequency_penalty",
+            "thinking_enabled",
+        }
     ),
     ProviderSubKind.ANTHROPIC: frozenset(
         {"temperature", "top_p", "top_k", "max_output_tokens", "thinking_budget_tokens"}
@@ -108,6 +115,12 @@ class ModelInfo(BaseModel):
     repetition_penalty: float | None = None
     num_ctx: int | None = None
     thinking_budget_tokens: int | None = None
+    #: Volcengine-only explicit thinking toggle. The Ark API requires
+    #: ``{"thinking": {"type": "enabled"}}`` in the request body to turn
+    #: reasoning on (no token budget — the model decides). ``None`` means
+    #: "use provider default" (currently: on for volcengine sub_kind,
+    #: irrelevant elsewhere).
+    thinking_enabled: bool | None = None
 
 
 ApiKeySource = Literal["inline", "env_var", "none"]
@@ -171,6 +184,7 @@ class ProviderConfig(BaseModel):
             "repetition_penalty",
             "num_ctx",
             "thinking_budget_tokens",
+            "thinking_enabled",
         )
         for m in self.available_models:
             for field in param_fields:

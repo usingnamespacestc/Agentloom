@@ -522,6 +522,12 @@ function ProviderForm({
     );
   };
 
+  const setModelThinkingEnabled = (modelId: string, next: boolean | null) => {
+    setModels((prev) =>
+      prev.map((m) => (m.id === modelId ? { ...m, thinking_enabled: next } : m)),
+    );
+  };
+
   const SAMPLING_FIELDS: ReadonlyArray<{ key: SamplingKey; label: string; step: string }> = [
     { key: "temperature", label: "temperature", step: "0.01" },
     { key: "top_p", label: "top_p", step: "0.01" },
@@ -795,16 +801,25 @@ function ProviderForm({
                       {t("providers.sub_kind_required_for_sampling")}
                     </div>
                   ) : (
-                    <div className="grid grid-cols-4 gap-1 border-t border-gray-100 bg-gray-50 px-1.5 py-1.5 text-[10px]">
-                      {SAMPLING_FIELDS.filter((f) => samplingWhitelist.has(f.key)).map((f) => (
-                        <SamplingInput
-                          key={f.key}
-                          label={f.label}
-                          value={(m[f.key] as number | null | undefined) ?? null}
-                          step={f.step}
-                          onCommit={(v) => setModelSampling(m.id, f.key, v)}
+                    <div className="border-t border-gray-100 bg-gray-50 px-1.5 py-1.5 text-[10px]">
+                      <div className="grid grid-cols-4 gap-1">
+                        {SAMPLING_FIELDS.filter((f) => samplingWhitelist.has(f.key)).map((f) => (
+                          <SamplingInput
+                            key={f.key}
+                            label={f.label}
+                            value={(m[f.key] as number | null | undefined) ?? null}
+                            step={f.step}
+                            onCommit={(v) => setModelSampling(m.id, f.key, v)}
+                          />
+                        ))}
+                      </div>
+                      {samplingWhitelist.has("thinking_enabled") && (
+                        <ThinkingToggle
+                          value={m.thinking_enabled ?? null}
+                          onChange={(v) => setModelThinkingEnabled(m.id, v)}
+                          t={t}
                         />
-                      ))}
+                      )}
                     </div>
                   )
                 )}
@@ -963,6 +978,35 @@ function SamplingInput({
         className="w-full rounded border border-gray-200 bg-white px-1 py-0.5 text-right text-[10px] text-gray-700 focus:border-blue-400 focus:outline-none"
       />
     </label>
+  );
+}
+
+function ThinkingToggle({
+  value,
+  onChange,
+  t,
+}: {
+  value: boolean | null;
+  onChange: (next: boolean | null) => void;
+  t: (key: string) => string;
+}) {
+  // Tri-state: null = "inherit provider default", true = forced on, false = forced off.
+  return (
+    <div className="mt-1.5 flex items-center gap-2 border-t border-gray-200/60 pt-1.5">
+      <span className="text-[10px] font-mono text-gray-500">thinking</span>
+      <select
+        value={value === null ? "default" : value ? "on" : "off"}
+        onChange={(e) => {
+          const v = e.target.value;
+          onChange(v === "default" ? null : v === "on");
+        }}
+        className="rounded border border-gray-200 bg-white px-1 py-0.5 text-[10px] text-gray-700 focus:border-blue-400 focus:outline-none"
+      >
+        <option value="default">{t("providers.thinking_default")}</option>
+        <option value="on">{t("providers.thinking_on")}</option>
+        <option value="off">{t("providers.thinking_off")}</option>
+      </select>
+    </div>
   );
 }
 

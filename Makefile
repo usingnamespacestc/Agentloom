@@ -1,7 +1,8 @@
-.PHONY: help dev dev-down test test-unit test-integration test-smoke test-e2e test-all lint format typecheck frontend backend clean
+.PHONY: help up dev dev-down test test-unit test-integration test-smoke test-e2e test-all lint format typecheck frontend backend clean
 
 help:
 	@echo "Agentloom dev targets:"
+	@echo "  make up             - one-terminal launcher (pg+redis+backend+frontend)"
 	@echo "  make dev            - docker compose up (postgres + redis + backend)"
 	@echo "  make dev-down       - docker compose down"
 	@echo "  make backend        - run backend locally (no docker)"
@@ -12,6 +13,9 @@ help:
 	@echo "  make test-e2e       - frontend playwright tests"
 	@echo "  make lint           - ruff + tsc checks"
 	@echo "  make format         - ruff format + prettier"
+
+up:
+	bash scripts/dev.sh
 
 dev:
 	docker compose up -d postgres redis
