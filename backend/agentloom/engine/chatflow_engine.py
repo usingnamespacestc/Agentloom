@@ -630,6 +630,12 @@ class ChatFlowEngine:
                 chatflow_auto_mode_revise_budget=chatflow.auto_mode_revise_budget,
                 chatflow_min_ground_ratio=None,  # compact workers are single-shot
                 chatflow_ground_ratio_grace_nodes=20,
+                # Tier 1 inside the compact worker itself is disabled —
+                # the worker already IS a compaction, so auto-compacting
+                # its own input would recurse uselessly. Downstream
+                # ChatFlow turns re-read the chatflow settings on their
+                # own execute() and re-enable Tier 1 normally.
+                chatflow_compact_trigger_pct=None,
                 disabled_tool_names=effective_disabled,
             )
         except Exception as exc:  # noqa: BLE001 — engine boundary
@@ -2418,6 +2424,10 @@ class ChatFlowEngine:
                 chatflow_auto_mode_revise_budget=chatflow.auto_mode_revise_budget,
                 chatflow_min_ground_ratio=chatflow.min_ground_ratio,
                 chatflow_ground_ratio_grace_nodes=chatflow.ground_ratio_grace_nodes,
+                chatflow_compact_trigger_pct=chatflow.compact_trigger_pct,
+                chatflow_compact_target_pct=chatflow.compact_target_pct,
+                chatflow_compact_preserve_recent_turns=chatflow.compact_preserve_recent_turns,
+                chatflow_compact_model=chatflow.compact_model,
                 post_node_hook=self._build_post_node_hook(chat_node, chatflow),
                 disabled_tool_names=effective_disabled,
             )

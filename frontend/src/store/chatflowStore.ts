@@ -151,6 +151,11 @@ export interface ChatFlowStoreState {
     min_ground_ratio?: number | null;
     ground_ratio_grace_nodes?: number;
     disabled_tool_names?: string[];
+    compact_trigger_pct?: number | null;
+    compact_target_pct?: number;
+    compact_preserve_recent_turns?: number;
+    compact_model?: ProviderModelRef | null;
+    compact_require_confirmation?: boolean;
   }) => Promise<void>;
 
   /** Which edge is currently hovered on the ChatFlow canvas — drives
@@ -501,6 +506,27 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     if ("disabled_tool_names" in patch && patch.disabled_tool_names !== undefined) {
       updated.disabled_tool_names = patch.disabled_tool_names;
     }
+    if ("compact_trigger_pct" in patch) {
+      updated.compact_trigger_pct = patch.compact_trigger_pct ?? null;
+    }
+    if ("compact_target_pct" in patch && patch.compact_target_pct !== undefined) {
+      updated.compact_target_pct = patch.compact_target_pct;
+    }
+    if (
+      "compact_preserve_recent_turns" in patch
+      && patch.compact_preserve_recent_turns !== undefined
+    ) {
+      updated.compact_preserve_recent_turns = patch.compact_preserve_recent_turns;
+    }
+    if ("compact_model" in patch) {
+      updated.compact_model = patch.compact_model ?? null;
+    }
+    if (
+      "compact_require_confirmation" in patch
+      && patch.compact_require_confirmation !== undefined
+    ) {
+      updated.compact_require_confirmation = patch.compact_require_confirmation;
+    }
     set({ chatflow: updated as typeof cf });
     // Refresh sidebar list too (title may have changed).
     void get().fetchChatFlowList();
@@ -749,6 +775,7 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
       agent_response: { text: "", provenance: "unset", updated_at: now },
       workflow: { id: `wf-${optimisticId}`, root_ids: [], nodes: {} },
       pending_queue: [],
+      compact_snapshot: null,
     };
     const nextOptIds = new Set(get()._optimisticIds);
     nextOptIds.add(optimisticId);

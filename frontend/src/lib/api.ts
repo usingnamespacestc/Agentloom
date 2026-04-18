@@ -91,6 +91,11 @@ export const api = {
       min_ground_ratio?: number | null;
       ground_ratio_grace_nodes?: number;
       disabled_tool_names?: string[];
+      compact_trigger_pct?: number | null;
+      compact_target_pct?: number;
+      compact_preserve_recent_turns?: number;
+      compact_model?: ProviderModelRef | null;
+      compact_require_confirmation?: boolean;
     },
   ) =>
     request<{ ok: boolean }>(`/api/chatflows/${id}`, {

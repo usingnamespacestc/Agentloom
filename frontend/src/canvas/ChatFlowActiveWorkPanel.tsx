@@ -41,6 +41,7 @@ const STEP_KIND_COLOR: Record<StepKind, string> = {
   tool_call: "bg-amber-100 text-amber-800",
   judge_call: "bg-purple-100 text-purple-800",
   sub_agent_delegation: "bg-gray-100 text-gray-700",
+  compact: "bg-teal-100 text-teal-800",
 };
 
 function collectActiveWorkNodes(

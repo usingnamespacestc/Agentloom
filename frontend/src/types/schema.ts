@@ -29,6 +29,7 @@ export const STEP_KINDS = [
   "tool_call",
   "judge_call",
   "sub_agent_delegation",
+  "compact",
 ] as const;
 
 export type StepKind = (typeof STEP_KINDS)[number];
@@ -198,6 +199,9 @@ export interface WorkFlowNode extends NodeBaseFields {
   judge_variant?: JudgeVariant | null;
   judge_target_id?: NodeId | null;
   judge_verdict?: JudgeVerdict | null;
+
+  // compact (Tier 1)
+  compact_snapshot?: CompactSnapshot | null;
 }
 
 export interface StickyNote {
@@ -249,11 +253,32 @@ export interface PendingTurn {
   spawn_model: ProviderModelRef | null;
 }
 
+/**
+ * Mirror of ``agentloom.schemas.workflow.CompactSnapshot``.
+ * Populated on WorkFlowNodes with ``step_kind="compact"`` (Tier 1)
+ * and on ChatFlowNodes that serve as compact points for their
+ * subtree (Tier 2). ``summary`` empty means the snapshot is stubbed
+ * but the compact worker hasn't finished yet.
+ */
+export interface CompactSnapshot {
+  summary: string;
+  preserved_messages: WireMessage[];
+  source_range: [number, number];
+  dropped_count: number;
+  original_tokens: number;
+  compacted_tokens: number;
+  compact_instruction: string | null;
+}
+
 export interface ChatFlowNode extends NodeBaseFields {
   user_message: EditableText | null;
   agent_response: EditableText;
   workflow: WorkFlow;
   pending_queue: PendingTurn[];
+  /** Tier 2 marker — see backend schema. A populated snapshot means
+   * this ChatNode is a compact point: ``agent_response.text`` holds
+   * the summary prose and downstream context builds root here. */
+  compact_snapshot: CompactSnapshot | null;
 }
 
 /** Lightweight summary returned by GET /api/chatflows (list). */
@@ -308,6 +333,27 @@ export interface ChatFlow {
    * no per-chatflow filter on top of the workspace defaults.
    */
   disabled_tool_names: string[];
+  /**
+   * Tier 1 pre-llm_call auto-compact threshold: when the pending
+   * message-list footprint crosses this fraction of the target
+   * model's context window, the engine inserts a compact WorkNode
+   * before the call. ``null`` disables Tier 1 entirely. Default 0.7.
+   */
+  compact_trigger_pct: number | null;
+  /**
+   * Target footprint for Tier 1 summaries, as a fraction of the
+   * target model's context window. Default 0.5.
+   */
+  compact_target_pct: number;
+  /**
+   * Trailing messages kept verbatim on the downstream side of a
+   * compact. Smaller = more aggressive; larger = more fidelity.
+   */
+  compact_preserve_recent_turns: number;
+  /** Optional pin for the compact worker itself. ``null`` = inherit. */
+  compact_model: ProviderModelRef | null;
+  /** Whether explicit UI-driven compacts open a confirmation dialog. */
+  compact_require_confirmation: boolean;
   sticky_notes?: Record<string, StickyNote>;
   created_at: string;
 }

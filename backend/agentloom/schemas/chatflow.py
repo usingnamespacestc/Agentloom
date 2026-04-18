@@ -184,6 +184,30 @@ class ChatFlow(BaseModel):
     #: ``judge_pre_enabled``, ``judge_during_enabled``, ``judge_post_enabled``)
     #: from this per §3.4.1 — see :func:`derive_switches_from_mode`.
     default_execution_mode: ExecutionMode = ExecutionMode.DIRECT
+    #: Tier 1 pre-llm_call auto-compact threshold. When the estimated
+    #: ancestor-context footprint of a pending llm_call crosses
+    #: ``compact_trigger_pct`` of the target model's context window,
+    #: the engine inserts a compact WorkNode before the call. ``None``
+    #: disables Tier 1 entirely for this ChatFlow.
+    compact_trigger_pct: float | None = 0.7
+    #: Target footprint for Tier 1 compact summaries, expressed as a
+    #: fraction of the target model's context window. Fed to the
+    #: compact worker as the ``target_tokens`` param.
+    compact_target_pct: float = 0.5
+    #: Number of trailing messages kept verbatim on the downstream side
+    #: of a compact. Smaller = more aggressive compaction, larger =
+    #: more fidelity.
+    compact_preserve_recent_turns: int = 3
+    #: Optional model pin for the compact worker itself. Lets users
+    #: route compactions to a cheap-and-fast model while keeping a
+    #: strong model for the main turn. ``None`` falls back to the
+    #: per-WorkNode ``model_override`` → turn model → chatflow default.
+    compact_model: ProviderModelRef | None = None
+    #: When True, a UI-driven auto-compact trigger (Tier 2) opens a
+    #: confirmation dialog before running. The backend field exists
+    #: so the preference travels with the ChatFlow; the dialog itself
+    #: lives in the frontend.
+    compact_require_confirmation: bool = True
     sticky_notes: dict[str, StickyNote] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utcnow)
 

@@ -197,7 +197,19 @@
     "builtin_tools_hint": "Untick to hide a tool from this chatflow's LLM calls. New chatflows inherit the workspace defaults (see Settings → Tools).",
     "mcp_servers": "MCP servers enabled in this chatflow",
     "mcp_servers_hint": "Untick a server to hide all of its tools from this chatflow's LLM calls.",
-    "mcp_no_global": "No MCP servers are globally enabled. Add one in Settings → MCP first."
+    "mcp_no_global": "No MCP servers are globally enabled. Add one in Settings → MCP first.",
+    "compact_title": "Conversation compaction",
+    "compact_hint": "Summarizes the oldest part of the message list when it grows too big for the target model's context window. Tier 1 fires automatically before each LLM call; Tier 2 is a chat-level compact triggered from the UI.",
+    "compact_trigger_pct": "Tier 1 trigger threshold (% of context window)",
+    "compact_trigger_pct_hint": "When the pending message-list footprint crosses this fraction of the model's context window, a compact WorkNode is inserted before the LLM call. Default 70%. Leave empty to disable Tier 1.",
+    "compact_target_pct": "Tier 1 target size (% of context window)",
+    "compact_target_pct_hint": "Target footprint for the summary — the compact worker is asked to bring the message list down to roughly this fraction of the context window. Smaller = more aggressive. Default 50%.",
+    "compact_preserve_turns": "Preserve recent turns (messages)",
+    "compact_preserve_turns_hint": "Trailing messages kept verbatim on the downstream side of a compact. Smaller = more aggressive summarisation; larger = more fidelity for recent context. Default 3.",
+    "compact_model": "Compact worker model",
+    "compact_model_hint": "Model used by the compact worker that produces the summary. Inherit = use the chat's default model.",
+    "compact_require_confirmation": "Ask before explicit compact",
+    "compact_require_confirmation_hint": "When on, invoking compact from the UI opens a confirmation dialog (review instructions, must-keep / must-drop, dry-run). Off = compact immediately."
   },
   "canvas_prefs": {
     "show_node_id": "Show node ID",

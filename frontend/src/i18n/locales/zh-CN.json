@@ -197,7 +197,19 @@
     "builtin_tools_hint": "取消勾选可在本对话中隐藏对应工具。新建对话会继承工作空间默认设置（见「全局设置 → 工具」）。",
     "mcp_servers": "本对话启用的 MCP 服务器",
     "mcp_servers_hint": "取消勾选某个服务器即可在本对话中隐藏其全部工具。",
-    "mcp_no_global": "尚无全局启用的 MCP 服务器。请先在「全局设置 → MCP」添加。"
+    "mcp_no_global": "尚无全局启用的 MCP 服务器。请先在「全局设置 → MCP」添加。",
+    "compact_title": "对话压缩",
+    "compact_hint": "当消息列表接近目标模型的 context window 上限时，对较早的消息生成摘要。Tier 1 在每次 LLM 调用前自动触发；Tier 2 是用户在 UI 上手动触发的 ChatFlow 级压缩。",
+    "compact_trigger_pct": "Tier 1 触发阈值（占 context window 的 %）",
+    "compact_trigger_pct_hint": "当即将发送的消息列表体积超过模型 context window 的这一比例时，会在 LLM 调用前插入 compact WorkNode。默认 70%。留空可关闭 Tier 1。",
+    "compact_target_pct": "Tier 1 目标体积（占 context window 的 %）",
+    "compact_target_pct_hint": "压缩 worker 的目标输出体积，大致占 context window 的这一比例。数值越小越激进。默认 50%。",
+    "compact_preserve_turns": "保留最近消息数（条）",
+    "compact_preserve_turns_hint": "压缩时在时间线下游保留原样的最近消息条数。越小越激进，越大越保真。默认 3。",
+    "compact_model": "压缩 worker 模型",
+    "compact_model_hint": "执行压缩摘要的 worker 所用模型。选择「继承」则沿用对话默认模型。",
+    "compact_require_confirmation": "手动压缩前先确认",
+    "compact_require_confirmation_hint": "勾选后，在 UI 上发起压缩会先弹出确认对话框（审阅指令、must-keep / must-drop、dry-run）。不勾选则立即压缩。"
   },
   "canvas_prefs": {
     "show_node_id": "显示节点 ID",

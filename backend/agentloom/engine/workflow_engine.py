@@ -303,6 +303,15 @@ class WorkflowEngine:
         self._effective_min_ground_ratio: float | None = None
         #: Minimum completed leaves before the grounding fuse arms.
         self._effective_ground_ratio_grace: int = 20
+        #: Resolved at execute() start from chatflow-level overrides,
+        #: falling back to the constructor defaults. Read by
+        #: :meth:`_needs_compact` / :meth:`_insert_compact_worknode` so
+        #: different ChatFlows can run different compact policies
+        #: against a single shared engine instance.
+        self._effective_compact_trigger_pct: float | None = compact_trigger_pct
+        self._effective_compact_target_pct: float = compact_target_pct
+        self._effective_compact_preserve_recent_turns: int = compact_preserve_recent_turns
+        self._effective_compact_model: ProviderModelRef | None = compact_model
 
     async def execute(
         self,
@@ -312,6 +321,10 @@ class WorkflowEngine:
         chatflow_auto_mode_revise_budget: int | None | object = _UNSET,
         chatflow_min_ground_ratio: float | None | object = _UNSET,
         chatflow_ground_ratio_grace_nodes: int | object = _UNSET,
+        chatflow_compact_trigger_pct: float | None | object = _UNSET,
+        chatflow_compact_target_pct: float | object = _UNSET,
+        chatflow_compact_preserve_recent_turns: int | object = _UNSET,
+        chatflow_compact_model: ProviderModelRef | None | object = _UNSET,
         post_node_hook: PostNodeHook | None = None,
         disabled_tool_names: frozenset[str] | None = None,
     ) -> WorkFlow:
@@ -348,6 +361,24 @@ class WorkflowEngine:
         self._effective_ground_ratio_grace = (
             20 if chatflow_ground_ratio_grace_nodes is _UNSET else chatflow_ground_ratio_grace_nodes  # type: ignore[assignment]
         )
+        # Compact overrides: _UNSET falls through to constructor
+        # defaults (the _compact_* instance attributes set in __init__).
+        if chatflow_compact_trigger_pct is not _UNSET:
+            self._effective_compact_trigger_pct = chatflow_compact_trigger_pct  # type: ignore[assignment]
+        else:
+            self._effective_compact_trigger_pct = self._compact_trigger_pct
+        if chatflow_compact_target_pct is not _UNSET:
+            self._effective_compact_target_pct = chatflow_compact_target_pct  # type: ignore[assignment]
+        else:
+            self._effective_compact_target_pct = self._compact_target_pct
+        if chatflow_compact_preserve_recent_turns is not _UNSET:
+            self._effective_compact_preserve_recent_turns = chatflow_compact_preserve_recent_turns  # type: ignore[assignment]
+        else:
+            self._effective_compact_preserve_recent_turns = self._compact_preserve_recent_turns
+        if chatflow_compact_model is not _UNSET:
+            self._effective_compact_model = chatflow_compact_model  # type: ignore[assignment]
+        else:
+            self._effective_compact_model = self._compact_model
         self._revise_count = 0
         self._post_node_hook = post_node_hook
         self._disabled_tool_names = disabled_tool_names or frozenset()
@@ -738,10 +769,17 @@ class WorkflowEngine:
         """Return True iff the estimated footprint of *messages*
         crosses the configured fraction of the target model's context
         window. Pure read — never mutates engine or workflow state.
+
+        ``chatflow_compact_trigger_pct=None`` (either at the ChatFlow
+        level or the engine default) disables Tier 1 entirely for this
+        run.
         """
+        trigger = self._effective_compact_trigger_pct
+        if trigger is None:
+            return False
         estimated = _estimate_tokens_from_provider_messages(messages)
         ctx = self._context_window_for(ref)
-        threshold = int(ctx * self._compact_trigger_pct)
+        threshold = int(ctx * trigger)
         return estimated >= threshold
 
     def _insert_compact_worknode(
@@ -770,13 +808,13 @@ class WorkflowEngine:
         """
         from agentloom.templates.instantiate import instantiate_fixture
 
-        keep = max(0, min(len(messages), self._compact_preserve_recent_turns))
+        keep = max(0, min(len(messages), self._effective_compact_preserve_recent_turns))
         head = messages[:-keep] if keep else messages
         tail = messages[-keep:] if keep else []
         head_serialized = _render_messages_to_compact(head)
         original_tokens = _estimate_tokens_from_provider_messages(messages)
         ctx = self._context_window_for(ref)
-        target_tokens = max(256, int(ctx * self._compact_target_pct))
+        target_tokens = max(256, int(ctx * self._effective_compact_target_pct))
 
         compact_plan, includes = _get_compact_fixture()
         compact_wf = instantiate_fixture(
@@ -807,7 +845,7 @@ class WorkflowEngine:
             compact_instruction=None,
         )
 
-        compact_model = self._compact_model or node.model_override or ref
+        compact_model = self._effective_compact_model or node.model_override or ref
         compact_node = WorkFlowNode(
             step_kind=StepKind.COMPACT,
             parent_ids=list(node.parent_ids),
@@ -902,10 +940,10 @@ class WorkflowEngine:
             self._tools,
             self._tool_ctx,
             context_window_lookup=self._context_window_lookup,
-            compact_trigger_pct=self._compact_trigger_pct,
-            compact_target_pct=self._compact_target_pct,
-            compact_preserve_recent_turns=self._compact_preserve_recent_turns,
-            compact_model=self._compact_model,
+            compact_trigger_pct=self._effective_compact_trigger_pct,
+            compact_target_pct=self._effective_compact_target_pct,
+            compact_preserve_recent_turns=self._effective_compact_preserve_recent_turns,
+            compact_model=self._effective_compact_model,
         )
         forward_queue = self._bus.open_subscription(sub.id)
         forward_task = asyncio.create_task(

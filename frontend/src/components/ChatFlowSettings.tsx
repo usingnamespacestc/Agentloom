@@ -43,6 +43,15 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
   const [retryBudgetStr, setRetryBudgetStr] = useState("");
   const [minGroundRatioPctStr, setMinGroundRatioPctStr] = useState("");
   const [groundGraceStr, setGroundGraceStr] = useState("");
+  // Compact (conversation-compaction) settings. Trigger-pct is an
+  // integer percentage 0-100; an empty string sends ``null`` (Tier 1
+  // disabled). Target-pct / preserve-turns use the same percentage /
+  // integer patterns.
+  const [compactTriggerPctStr, setCompactTriggerPctStr] = useState("");
+  const [compactTargetPctStr, setCompactTargetPctStr] = useState("");
+  const [compactPreserveTurnsStr, setCompactPreserveTurnsStr] = useState("");
+  const [compactModelKey, setCompactModelKey] = useState("");
+  const [compactRequireConfirmation, setCompactRequireConfirmation] = useState(true);
   // Per-tool visibility: set of built-in tool names the user has
   // enabled for this chatflow. A tool is "checked" iff its name is
   // NOT in the stored ``disabled_tool_names`` list.
@@ -104,6 +113,21 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
         mgr == null ? "" : String(Math.round(mgr * 1000) / 10),
       );
       setGroundGraceStr(String(chatflow?.ground_ratio_grace_nodes ?? 20));
+      // Compact config — trigger_pct and target_pct are stored as 0-1
+      // fractions and surfaced as 0-100 integer percentages. ``null``
+      // on trigger_pct means Tier 1 is disabled and shows as empty.
+      const trig = chatflow?.compact_trigger_pct;
+      setCompactTriggerPctStr(
+        trig == null ? "" : String(Math.round(trig * 100)),
+      );
+      setCompactTargetPctStr(
+        String(Math.round((chatflow?.compact_target_pct ?? 0.5) * 100)),
+      );
+      setCompactPreserveTurnsStr(
+        String(chatflow?.compact_preserve_recent_turns ?? 3),
+      );
+      setCompactModelKey(refKey(chatflow?.compact_model ?? null));
+      setCompactRequireConfirmation(chatflow?.compact_require_confirmation ?? true);
     }
   }, [open, chatflow, loadProviders, loadMcpServers, loadTools]);
 
@@ -194,6 +218,35 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
         .filter((s) => s.enabled && !enabledMcpIds.includes(s.id))
         .flatMap((s) => s.tool_names);
       const persistedDisabled = [...preserved, ...builtinHidden, ...mcpHidden];
+      // Compact settings: trigger-pct empty → Tier 1 off; otherwise a
+      // 0-100 % converted to 0-1 fraction. Target-pct defaults back
+      // to the stored value on invalid input.
+      const compactTrigTrim = compactTriggerPctStr.trim();
+      let compactTrigger: number | null;
+      if (compactTrigTrim === "") {
+        compactTrigger = null;
+      } else {
+        const pct = Number(compactTrigTrim);
+        compactTrigger =
+          Number.isFinite(pct) && pct >= 0 && pct <= 100
+            ? pct / 100
+            : (chatflow?.compact_trigger_pct ?? 0.7);
+      }
+      const compactTgtTrim = compactTargetPctStr.trim();
+      const compactTgtParsed = compactTgtTrim === "" ? NaN : Number(compactTgtTrim);
+      const compactTarget =
+        Number.isFinite(compactTgtParsed) && compactTgtParsed >= 1 && compactTgtParsed <= 95
+          ? compactTgtParsed / 100
+          : (chatflow?.compact_target_pct ?? 0.5);
+      const compactPreserveTrim = compactPreserveTurnsStr.trim();
+      const compactPreserveParsed =
+        compactPreserveTrim === "" ? NaN : Number(compactPreserveTrim);
+      const compactPreserve =
+        Number.isFinite(compactPreserveParsed) &&
+        Number.isInteger(compactPreserveParsed) &&
+        compactPreserveParsed >= 0
+          ? compactPreserveParsed
+          : (chatflow?.compact_preserve_recent_turns ?? 3);
       await patchChatFlow({
         default_model: parseRefKey(modelKey),
         default_judge_model: parseRefKey(judgeModelKey),
@@ -202,6 +255,11 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
         min_ground_ratio: minGroundRatio,
         ground_ratio_grace_nodes: groundGrace,
         disabled_tool_names: persistedDisabled,
+        compact_trigger_pct: compactTrigger,
+        compact_target_pct: compactTarget,
+        compact_preserve_recent_turns: compactPreserve,
+        compact_model: parseRefKey(compactModelKey),
+        compact_require_confirmation: compactRequireConfirmation,
       });
       onClose();
     } finally {
@@ -336,6 +394,20 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
               {t("chatflow_settings.ground_ratio_grace_nodes_hint")}
             </p>
           </label>
+
+          <CompactSettingsSection
+            triggerPctStr={compactTriggerPctStr}
+            onTriggerPctChange={setCompactTriggerPctStr}
+            targetPctStr={compactTargetPctStr}
+            onTargetPctChange={setCompactTargetPctStr}
+            preserveTurnsStr={compactPreserveTurnsStr}
+            onPreserveTurnsChange={setCompactPreserveTurnsStr}
+            modelKey={compactModelKey}
+            onModelKeyChange={setCompactModelKey}
+            modelOptions={modelOptions}
+            requireConfirmation={compactRequireConfirmation}
+            onRequireConfirmationChange={setCompactRequireConfirmation}
+          />
 
           <BuiltinToolsSection
             tools={allTools.filter((tt) => !tt.name.startsWith("mcp__"))}
@@ -490,6 +562,123 @@ function MCPEnablementSection({
       <p className="mt-1 text-[10px] text-gray-400">
         {t("chatflow_settings.mcp_servers_hint")}
       </p>
+    </div>
+  );
+}
+
+function CompactSettingsSection({
+  triggerPctStr,
+  onTriggerPctChange,
+  targetPctStr,
+  onTargetPctChange,
+  preserveTurnsStr,
+  onPreserveTurnsChange,
+  modelKey,
+  onModelKeyChange,
+  modelOptions,
+  requireConfirmation,
+  onRequireConfirmationChange,
+}: {
+  triggerPctStr: string;
+  onTriggerPctChange: (v: string) => void;
+  targetPctStr: string;
+  onTargetPctChange: (v: string) => void;
+  preserveTurnsStr: string;
+  onPreserveTurnsChange: (v: string) => void;
+  modelKey: string;
+  onModelKeyChange: (v: string) => void;
+  modelOptions: Array<{ key: string; label: string; pinned: boolean }>;
+  requireConfirmation: boolean;
+  onRequireConfirmationChange: (v: boolean) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="rounded border border-gray-200 p-3">
+      <span className="text-[11px] font-semibold text-gray-600">
+        {t("chatflow_settings.compact_title")}
+      </span>
+      <p className="mt-0.5 text-[10px] text-gray-400">
+        {t("chatflow_settings.compact_hint")}
+      </p>
+      <div className="mt-3 space-y-3">
+        <label className="block">
+          <span className="text-[11px] font-medium text-gray-500">
+            {t("chatflow_settings.compact_trigger_pct")}
+          </span>
+          <input
+            type="number"
+            min={0}
+            max={100}
+            step={1}
+            value={triggerPctStr}
+            onChange={(e) => onTriggerPctChange(e.target.value)}
+            data-testid="compact-trigger-pct-input"
+            className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+          />
+          <p className="mt-1 text-[10px] text-gray-400">
+            {t("chatflow_settings.compact_trigger_pct_hint")}
+          </p>
+        </label>
+
+        <label className="block">
+          <span className="text-[11px] font-medium text-gray-500">
+            {t("chatflow_settings.compact_target_pct")}
+          </span>
+          <input
+            type="number"
+            min={1}
+            max={95}
+            step={1}
+            value={targetPctStr}
+            onChange={(e) => onTargetPctChange(e.target.value)}
+            data-testid="compact-target-pct-input"
+            className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+          />
+          <p className="mt-1 text-[10px] text-gray-400">
+            {t("chatflow_settings.compact_target_pct_hint")}
+          </p>
+        </label>
+
+        <label className="block">
+          <span className="text-[11px] font-medium text-gray-500">
+            {t("chatflow_settings.compact_preserve_turns")}
+          </span>
+          <input
+            type="number"
+            min={0}
+            step={1}
+            value={preserveTurnsStr}
+            onChange={(e) => onPreserveTurnsChange(e.target.value)}
+            data-testid="compact-preserve-turns-input"
+            className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+          />
+          <p className="mt-1 text-[10px] text-gray-400">
+            {t("chatflow_settings.compact_preserve_turns_hint")}
+          </p>
+        </label>
+
+        <ModelPicker
+          label={t("chatflow_settings.compact_model")}
+          hint={t("chatflow_settings.compact_model_hint")}
+          value={modelKey}
+          options={modelOptions}
+          onChange={onModelKeyChange}
+          inheritOption={t("chatflow_settings.inherit_main_model")}
+        />
+
+        <label className="flex items-center gap-2 text-[11px] text-gray-700">
+          <input
+            type="checkbox"
+            checked={requireConfirmation}
+            onChange={(e) => onRequireConfirmationChange(e.target.checked)}
+            data-testid="compact-require-confirmation-input"
+          />
+          <span>{t("chatflow_settings.compact_require_confirmation")}</span>
+        </label>
+        <p className="-mt-2 pl-6 text-[10px] text-gray-400">
+          {t("chatflow_settings.compact_require_confirmation_hint")}
+        </p>
+      </div>
     </div>
   );
 }

@@ -42,6 +42,7 @@ function node(
     agent_response: { text: agentText, provenance: "pure_agent", updated_at: iso },
     workflow: { id: `wf-${id}`, root_ids: [], nodes: {} },
     pending_queue: [],
+    compact_snapshot: null,
   };
 }
 
@@ -59,6 +60,11 @@ function twoBranchFlow(): ChatFlow {
     min_ground_ratio: null,
     ground_ratio_grace_nodes: 20,
       disabled_tool_names: [],
+    compact_trigger_pct: 0.7,
+    compact_target_pct: 0.5,
+    compact_preserve_recent_turns: 3,
+    compact_model: null,
+    compact_require_confirmation: true,
     root_ids: ["a"],
     nodes: {
       a: node("a", [], "hello", "hi there", 0),
