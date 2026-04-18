@@ -17,6 +17,7 @@ import { useTranslation } from "react-i18next";
 
 import { api } from "@/lib/api";
 import type { ProviderSummary } from "@/lib/api";
+import { parseTokensKM } from "@/lib/tokenFormat";
 import type { ChatFlow, ChatFlowNode, ProviderModelRef } from "@/types/schema";
 
 export interface CompactConfirmDialogProps {
@@ -114,12 +115,9 @@ export function CompactConfirmDialog({
         preserveNum >= 0
           ? preserveNum
           : null;
-      const targetTrim = targetTokensStr.trim();
-      const targetNum = targetTrim === "" ? NaN : Number(targetTrim);
-      const targetTokens =
-        Number.isFinite(targetNum) && Number.isInteger(targetNum) && targetNum > 0
-          ? targetNum
-          : null;
+      // Accept "32k", "1.5m", "4096" — parseTokensKM returns null on
+      // empty/unparseable, which the backend reads as "use default".
+      const targetTokens = parseTokensKM(targetTokensStr);
       const res = await api.compactChain(chatflow.id, parentNode.id, {
         compact_instruction: instruction.trim() || null,
         must_keep: mustKeep.trim(),
@@ -232,9 +230,8 @@ export function CompactConfirmDialog({
                 {t("compact_dialog.target_tokens")}
               </span>
               <input
-                type="number"
-                min={0}
-                step={64}
+                type="text"
+                inputMode="text"
                 value={targetTokensStr}
                 onChange={(e) => setTargetTokensStr(e.target.value)}
                 data-testid="compact-dialog-target-tokens"

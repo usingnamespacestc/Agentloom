@@ -153,8 +153,8 @@
     "preserve_turns": "保留最近消息数",
     "preserve_turns_hint": "下游原样保留的最近消息条数。默认沿用 ChatFlow 设置。",
     "target_tokens": "目标 token 数",
-    "target_tokens_placeholder": "自动",
-    "target_tokens_hint": "摘要体积的手动上限。",
+    "target_tokens_placeholder": "自动（支持 2k、1.5M）",
+    "target_tokens_hint": "摘要体积的手动上限。可直接填写原始 token 数，也可用 k / M 简写（32k = 32768，1M = 1048576）。",
     "model": "压缩 worker 模型",
     "model_inherit": "（继承 ChatFlow 默认）",
     "submit": "开始压缩"

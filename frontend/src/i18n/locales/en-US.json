@@ -153,8 +153,8 @@
     "preserve_turns": "Preserve recent turns",
     "preserve_turns_hint": "Trailing messages kept verbatim. Defaults to the ChatFlow setting.",
     "target_tokens": "Target tokens",
-    "target_tokens_placeholder": "auto",
-    "target_tokens_hint": "Optional override of the summary's target size in tokens.",
+    "target_tokens_placeholder": "auto (e.g. 2k, 1.5M)",
+    "target_tokens_hint": "Optional override of the summary's target size. Accepts raw tokens or k/M suffixes (32k = 32768, 1M = 1048576).",
     "model": "Compact worker model",
     "model_inherit": "(inherit ChatFlow default)",
     "submit": "Compact"

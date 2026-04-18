@@ -24,3 +24,17 @@ export function formatTokensKM(n: number | null | undefined): string {
   const v = n / K;
   return v >= 10 || v % 1 === 0 ? `${Math.round(v)}k` : `${v.toFixed(1)}k`;
 }
+
+/** Parses "32k", "128K", "1m", "1.5M", "4096" (case-insensitive,
+ *  optional whitespace between digits and suffix). k = 1024,
+ *  m = 1024*1024. Returns null for empty or unparseable input. */
+export function parseTokensKM(raw: string): number | null {
+  const s = raw.trim().toLowerCase();
+  if (!s) return null;
+  const match = /^(\d+(?:\.\d+)?)\s*([km]?)$/.exec(s);
+  if (!match) return null;
+  const n = Number.parseFloat(match[1]);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const mult = match[2] === "k" ? K : match[2] === "m" ? M : 1;
+  return Math.round(n * mult);
+}

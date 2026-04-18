@@ -27,7 +27,7 @@ import type {
   ToolState,
 } from "@/lib/api";
 import { SUB_KIND_PARAM_WHITELIST } from "@/lib/api";
-import { formatTokensKM } from "@/lib/tokenFormat";
+import { formatTokensKM, parseTokensKM } from "@/lib/tokenFormat";
 import { usePreferencesStore } from "@/store/preferencesStore";
 
 type TabId = "providers" | "mcp" | "tools" | "canvas";
@@ -856,19 +856,6 @@ function ProviderForm({
   );
 }
 
-// Parses "32k", "128K", "1m", "1.5M", "4096" (case-insensitive, optional
-// space). k = 1024, m = 1024*1024. Returns null for empty / invalid input.
-function parseContextWindow(raw: string): number | null {
-  const s = raw.trim().toLowerCase();
-  if (!s) return null;
-  const match = /^(\d+(?:\.\d+)?)\s*([km]?)$/.exec(s);
-  if (!match) return null;
-  const n = Number.parseFloat(match[1]);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  const mult = match[2] === "k" ? 1024 : match[2] === "m" ? 1024 * 1024 : 1;
-  return Math.round(n * mult);
-}
-
 function formatContextWindow(n: number | null | undefined): string {
   return formatTokensKM(n);
 }
@@ -891,7 +878,7 @@ function ContextWindowInput({
   }, [value]);
 
   const commit = () => {
-    const parsed = parseContextWindow(draft);
+    const parsed = parseTokensKM(draft);
     if (parsed !== value) onCommit(parsed);
     setDraft(formatContextWindow(parsed));
   };
