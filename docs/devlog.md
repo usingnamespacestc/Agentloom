@@ -1155,3 +1155,107 @@ Frontend：
 - 通知外部通道（webhook / desktop / 邮件）
 - **Conversation compaction**（三层压缩：ChatFlow / WorkFlow / UI）— 报告见 `docs/research-conversation-compaction.md`，待讨论
 
+---
+
+## 2026-04-18 夜 — Conversation Compaction 设计定稿
+
+与用户迭代讨论压缩系统设计，最终确定三档策略与 Tier 1 触发点。
+
+### Merge 与 Compact 的统一
+
+用户指出 "merge 也是一种特殊的 compact"——两者的"最近几轮"都可以用**距离输出边的拓扑距离**定义：`recency(node) = distance_to_output_edge(node)`。线性 ChatFlow 是这个定义的退化形式，DAG WorkFlow 是一般情况。后续压缩算法对两者统一处理。
+
+### 压缩作为可复用的 plan
+
+Compact 不是硬编码的引擎动作，而是一个**存档的 WorkFlow 模板（compact_plan.yaml）**。每次触发就基于这个 plan 实例化一个 compact WorkNode，和 judge/planner 走一样的模板实例化路径。优势：dogfooding（平台级操作复用平台自身能力）、用户可以查看/修改压缩逻辑、snapshot 有清晰的产生者。
+
+### 双轨制：ChatFlow 触发 vs WorkFlow 触发
+
+不把触发点全下沉到 WorkFlow 层。双轨并存：
+- **ChatFlow 层显式触发**：bar 显示基于 judge_model 的 context_window（judge 是对话的 bookend），到达 trigger_threshold 时自动添加 compact ChatNode 或用户手动添加；用户能清楚看到自己的消息何时被压缩。
+- **WorkFlow 层隐式触发**：每次 llm_call 前引擎做字符级 token 估算，超 70% 就**在当前节点前插一个 compact WorkNode**，压缩完成后原节点重试。静默进行。
+
+### Bar 显示语义（讨论否决的方案）
+
+曾提议 "ChatFlow 显示上限 = 最窄模型上下文"——用户否决："假如我使用的 tool call 模型上下文很小，但是因为它的上下文是 planner 给它的，不需要携带全部上下文也能正常完成。如果按照它的上下文来压缩就委屈其他上下文更长的模型了。" 改为：**bar 显示 = judge_model 的 context_window**（如无 judge 则 llm_call 的），因为 judge 是 ChatFlow 对话的开头和结尾。WorkFlow 内部 WorkNode 各自用自己模型的阈值独立判断，与 ChatFlow bar 解耦。
+
+### Bar 显示维度（讨论否决的方案）
+
+曾提议"超过最新 compact 节点之前的消息不计入 bar 占用"——用户否决（选了后者版本）："当选中它或者它的后续节点，右侧显示消息记录的时候，从这个节点压缩过的消息开始。" bar 始终按当前 ChatNode 视角的实际上下文计算；但**消息面板**在选中 compact 节点或其后裔时，只显示 compact 之后的消息——用户能直观看到"哪些消息被压缩掉了"。
+
+### 频率控制（讨论否决的方案）
+
+曾提议 WorkFlow 压缩加"冷却期"防止同一路径反复触发压缩——用户否决："WorkFlow 大多数节点上下文也是独立的互不干涉，所以之类不应该设置频率控制。" 按需触发，每次 llm_call 前独立判断。
+
+### judge_post blackboard 溢出路径
+
+用户提出疑问：judge_post 有读 sibling 节点数据的能力吗？会不会 judge_post 自己输入不超限但读 sibling 数据时超限？
+
+查证结论：**目前没有动态读取能力**。judge_post 看到的 `layer_notes` 是引擎调用前静态拼好的（每 sibling 一行，硬截 200 char），`worknode_catalog` 也是静态列表。真正的溢出风险在 `upstream_summary` 的 `decompose_aggregation` / `redo_aggregation` 路径——它**静态拼入每个 subtask 的完整 body**，没有截断。这条路径仍落在 Tier 1（pre-llm_call 拦截）内覆盖，不需要新档位。
+
+将来 MCP/skills 落地后，可把 "read_node_detail(node_id, field)" 包成 skill 让 judge_post 按需拉取——届时会引入新的 tool_result 溢出路径，走 Tier 0 处理。已记入项目记忆 backlog。
+
+### 三档策略总览
+
+| Tier | 触发点 | 作用对象 | 实现位置 |
+|------|--------|----------|----------|
+| 0 | tool_call 返回后 | 单次 tool_result 过大（文件读取、网页抓取） | ToolRegistry 包装层（独立，后做） |
+| 1 | llm_call / judge_call 即将发起 | WorkFlow 内部上下文累积超限 | `_invoke_and_freeze` 前置检查 |
+| 2 | ChatFlow turn 生成 / 用户手动 | ChatFlow 消息链累积超限 | ChatFlow 引擎 + UI 显式节点 |
+
+### Tier 1 实现蓝图（即将落地）
+
+锚点：`workflow_engine.py:_invoke_and_freeze()`，messages 构建完、`self._provider_call` 之前。
+
+```python
+if _needs_compact(messages, ref):
+    _insert_compact_worknode(workflow, node, messages, ref)
+    raise _CompactRequested  # 冒泡到 execute() 主循环，重排 DAG
+```
+
+- `_needs_compact`：字符级估算 `sum(len)/4`，阈值 = ChatFlow 设置 `compact_trigger_pct`（默认 70%）× `ref.context_window`；`context_window=None` fallback 到 32000。
+- `_insert_compact_worknode`：新增 `StepKind.COMPACT` 节点，parent_ids 继承当前节点的 parent_ids，当前节点 parent_ids 改为 [compact]；当前节点状态回退到 planned。
+- 用 exception 冒泡而非原地插入：`_invoke_and_freeze` 已假设"调用一定发生"，用异常回 `execute()` 让它在下一轮 pick ready nodes 时自然 pick 到新插的 compact。
+
+### compact_plan.yaml 签名
+
+```yaml
+params_schema:
+  messages:          required=true   # 待压缩消息序列
+  target_tokens:     required=true   # 压缩后目标
+  preserve_recent_turns: default=3
+  preserve_recent_tokens: default=4000
+  must_keep:         optional        # 用户必留信息
+  must_drop:         optional        # 用户可丢信息
+  compact_instruction: optional      # 自由指令
+  source_range:      optional        # 高级：显式起止范围
+```
+
+内部是一个 llm_call worker，用 ChatFlow 设置的 `compact_model`（fallback `default_model`）。
+
+### CompactSnapshot schema
+
+```python
+class CompactSnapshot(BaseModel):
+    summary: str                        # 压缩摘要
+    preserved_messages: list[WireMessage]  # 近期完整保留
+    source_range: tuple[int, int]       # 源消息索引 [start, end)
+    dropped_count: int
+    original_tokens: int
+    compacted_tokens: int
+    compact_instruction: str | None
+```
+
+Descendants 读 context 时，遇到 compact ancestor 就从 `summary + preserved_messages` 开始，不再往上走。
+
+### 落地顺序
+
+1. Schema：`StepKind.COMPACT` + `CompactSnapshot`（纯数据，无行为）
+2. Engine Tier 1：字符级 token 估算 + `_needs_compact` + `_insert_compact_worknode` + ancestor walk 识别 compact 边界
+3. compact_plan.yaml 模板 + instantiate 接入
+4. ChatFlow Tier 2：显式 compact ChatNode + 消息面板从 snapshot 起读
+5. 设置面板（compact_trigger_pct / target_pct / model / preserve_recent_turns / require_confirmation）
+6. 确认弹窗 UI（manual 触发 + auto 触发需确认时）
+
+Tier 0 作为独立后续，单独改 ToolRegistry 返回值截断。
+
