@@ -19,7 +19,7 @@ from agentloom.schemas.common import (
     generate_node_id,
     utcnow,
 )
-from agentloom.schemas.workflow import WorkFlow
+from agentloom.schemas.workflow import CompactSnapshot, WorkFlow
 
 
 #: Canned greeting written to a brand-new ChatFlow's root node. Static
@@ -107,6 +107,16 @@ class ChatFlowNode(NodeBase):
     agent_response: EditableText = Field(default_factory=EditableText)
     workflow: WorkFlow = Field(default_factory=WorkFlow)
     pending_queue: list[PendingTurn] = Field(default_factory=list)
+    #: Tier 2 compact marker. When non-``None`` this ChatNode IS the
+    #: compaction point for its subtree: ``agent_response.text`` holds
+    #: the summary prose, ``compact_snapshot.preserved_messages`` is the
+    #: tail that wasn't summarized, and downstream context builds
+    #: skip every ancestor above this node — see
+    #: :func:`agentloom.engine.chatflow_engine._build_chat_context`.
+    #: ``user_message`` may still carry the user's compact instruction
+    #: when the compaction was explicit; engine-triggered compacts
+    #: leave it ``None``.
+    compact_snapshot: CompactSnapshot | None = None
 
 
 class ChatFlow(BaseModel):

@@ -54,11 +54,19 @@ from agentloom.engine.recursive_planner_parser import (
     parse_recursive_planner_output,
 )
 from agentloom import tenancy_runtime
-from agentloom.engine.workflow_engine import PostNodeHook, ProviderCall, WorkflowEngine
+from agentloom.engine.workflow_engine import (
+    DEFAULT_COMPACT_TARGET_PCT,
+    DEFAULT_PRESERVE_RECENT_TURNS,
+    PostNodeHook,
+    ProviderCall,
+    WorkflowEngine,
+    _estimate_tokens_from_wire,
+)
 from agentloom.schemas.common import JudgeVariant, JudgeVerdict, WorkNodeRole
 from agentloom.schemas import (
     ChatFlow,
     ChatFlowNode,
+    CompactSnapshot,
     PendingTurn,
     StepKind,
     WorkFlow,
@@ -455,6 +463,231 @@ class ChatFlowEngine:
             node.pending_queue = [by_id[i] for i in item_ids]
             await self._publish_queue_updated(runtime, node_id)
         await self._save(runtime)
+
+    async def compact_chain(
+        self,
+        chatflow_id: str,
+        parent_id: str,
+        *,
+        compact_instruction: str | None = None,
+        must_keep: str = "",
+        must_drop: str = "",
+        preserve_recent_turns: int | None = None,
+        target_tokens: int | None = None,
+        model: ProviderModelRef | None = None,
+    ) -> ChatFlowNode:
+        """Tier 2 manual compaction: summarize the chain above
+        ``parent_id`` into a new compact ChatNode rooted at that parent.
+
+        The resulting node becomes the chain's new "shoulder": future
+        turns forked from it (or its descendants) see the summary prose
+        + preserved recent turns instead of the full pre-compact
+        history. ``user_message`` on the compact ChatNode holds the
+        user's compact instruction when provided — nothing is lost; the
+        chain is queryable up-chain for anyone who wants the raw pre-
+        compact view (the message panel, history exports).
+
+        Returns the frozen compact ChatNode once the summary has been
+        generated and written.
+        """
+        runtime = self._require_runtime(chatflow_id)
+        preserve = (
+            preserve_recent_turns
+            if preserve_recent_turns is not None
+            else DEFAULT_PRESERVE_RECENT_TURNS
+        )
+
+        async with runtime.lock:
+            chatflow = runtime.chatflow
+            if parent_id not in chatflow.nodes:
+                raise KeyError(f"parent {parent_id!r} not in chatflow {chatflow_id!r}")
+            parent = chatflow.get(parent_id)
+            # Collect the full wire history INCLUDING the parent turn —
+            # everything visible to a child forked at ``parent_id``
+            # today. ``_build_chat_context`` wants ``parent_ids``, so
+            # pass [parent_id] to include parent.
+            full_wire = _build_chat_context(chatflow, [parent_id])
+
+            if not full_wire:
+                raise ValueError(
+                    f"chain rooted at {parent_id!r} has no prior turns to compact"
+                )
+
+            keep = max(0, min(len(full_wire), preserve))
+            head_wire = full_wire[:-keep] if keep else full_wire
+            tail_wire = full_wire[-keep:] if keep else []
+
+            if not head_wire:
+                raise ValueError(
+                    "nothing to compact — preserve_recent_turns ≥ total turns"
+                )
+
+            head_serialized = "\n".join(
+                f"[{m.role}] {m.content}" for m in head_wire
+            )
+            # Pick a reasonable default target — half the configured
+            # model's context, or 2048 tokens if no hint at all.
+            resolved_target = (
+                target_tokens
+                if target_tokens is not None
+                else max(512, int(4096 * DEFAULT_COMPACT_TARGET_PCT))
+            )
+
+            templated = instantiate_fixture(
+                self._fixture_plans["compact"],
+                {
+                    "messages_to_compact": head_serialized,
+                    "target_tokens": resolved_target,
+                    "must_keep": must_keep,
+                    "must_drop": must_drop,
+                    "compact_instruction": compact_instruction or "",
+                },
+                includes=self._fixture_includes,
+            )
+
+            # Pin the compact's model through the inner WorkFlow, same as
+            # turn-node spawning does: stamp on the compact llm_call's
+            # model_override. Without it the worker picks whatever the
+            # provider adapter falls back to.
+            inner_node = _single_node(templated)
+            if model is not None:
+                inner_node.model_override = model
+                inner_node.resolved_model = model
+            # ``_single_node`` mutates in place — instantiate_fixture
+            # built a one-node workflow so the override lands on the
+            # only node automatically.
+
+            original_tokens = _estimate_tokens_from_wire(head_wire)
+
+            compact_node = ChatFlowNode(
+                parent_ids=[parent_id],
+                user_message=(
+                    EditableText.by_user(compact_instruction)
+                    if compact_instruction
+                    else None
+                ),
+                agent_response=EditableText.by_agent(""),
+                workflow=templated,
+                status=NodeStatus.PLANNED,
+                compact_snapshot=CompactSnapshot(
+                    summary="",
+                    preserved_messages=list(tail_wire),
+                    source_range=(0, len(head_wire)),
+                    dropped_count=len(head_wire),
+                    original_tokens=original_tokens,
+                    compacted_tokens=0,
+                    compact_instruction=compact_instruction,
+                ),
+            )
+            chatflow.add_node(compact_node)
+            compact_id = compact_node.id
+
+        await self._bus.publish(
+            WorkflowEvent(
+                workflow_id=chatflow_id,
+                kind="chat.node.created",
+                node_id=compact_id,
+                data={
+                    "parent_id": parent_id,
+                    "compact": True,
+                },
+            )
+        )
+        await self._bus.publish(
+            WorkflowEvent(
+                workflow_id=chatflow_id,
+                kind="chat.node.status",
+                node_id=compact_id,
+                data={"status": NodeStatus.RUNNING.value},
+            )
+        )
+
+        async with runtime.lock:
+            compact_node = chatflow.get(compact_id)
+            compact_node.status = NodeStatus.RUNNING
+            compact_node.started_at = utcnow()
+
+        # Relay inner workflow events to the chatflow-level SSE channel
+        # so the frontend sees the compact worker running. Mirrors
+        # _execute_node's relay setup.
+        inner_wf_id = compact_node.workflow.id
+        relay_queue = self._bus.open_subscription(inner_wf_id)
+        relay_task = asyncio.create_task(
+            self._relay_inner_events(
+                chatflow.id, compact_id, inner_wf_id, relay_queue
+            )
+        )
+
+        runtime_error: str | None = None
+        ws_settings = tenancy_runtime.get_settings(self._inner._tool_ctx.workspace_id)
+        effective_disabled = (
+            frozenset(chatflow.disabled_tool_names) | frozenset(ws_settings.globally_disabled())
+        )
+        try:
+            await self._inner.execute(
+                compact_node.workflow,
+                chatflow_tool_loop_budget=chatflow.tool_loop_budget,
+                chatflow_auto_mode_revise_budget=chatflow.auto_mode_revise_budget,
+                chatflow_min_ground_ratio=None,  # compact workers are single-shot
+                chatflow_ground_ratio_grace_nodes=20,
+                disabled_tool_names=effective_disabled,
+            )
+        except Exception as exc:  # noqa: BLE001 — engine boundary
+            log.exception("compact ChatNode %s inner workflow raised", compact_id)
+            runtime_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            await self._bus.close(inner_wf_id)
+            try:
+                await relay_task
+            except Exception:
+                pass
+
+        async with runtime.lock:
+            compact_node = chatflow.get(compact_id)
+            inner_llm = _single_node(compact_node.workflow)
+            summary = (
+                (inner_llm.output_message.content or "").strip()
+                if inner_llm.output_message
+                else ""
+            )
+            if runtime_error is not None or not summary:
+                compact_node.status = NodeStatus.FAILED
+                compact_node.error = (
+                    runtime_error or "compact worker returned empty summary"
+                )
+                compact_node.finished_at = utcnow()
+            else:
+                compacted_tokens = len(summary) // 4 + _estimate_tokens_from_wire(
+                    compact_node.compact_snapshot.preserved_messages
+                    if compact_node.compact_snapshot
+                    else []
+                )
+                if compact_node.compact_snapshot is not None:
+                    compact_node.compact_snapshot = (
+                        compact_node.compact_snapshot.model_copy(
+                            update={
+                                "summary": summary,
+                                "compacted_tokens": compacted_tokens,
+                            }
+                        )
+                    )
+                compact_node.agent_response = EditableText.by_agent(summary)
+                compact_node.status = NodeStatus.SUCCEEDED
+                compact_node.finished_at = utcnow()
+
+        await self._bus.publish(
+            WorkflowEvent(
+                workflow_id=chatflow_id,
+                kind="chat.node.status",
+                node_id=compact_id,
+                data={
+                    "status": compact_node.status.value,
+                    **({"error": compact_node.error} if compact_node.error else {}),
+                },
+            )
+        )
+        await self._save(runtime)
+        return compact_node
 
     async def delete_node_cascade(
         self, chatflow_id: str, node_id: str
@@ -3364,6 +3597,13 @@ def _build_chat_context(chatflow: ChatFlow, parent_ids: list[str]) -> list[WireM
     with a ``user_message`` (skipping greeting roots for now), emit a
     ``user`` turn and an ``assistant`` turn. Unfrozen turns are
     ignored (they belong to branches in progress).
+
+    Tier 2 compaction: when a compact ChatNode (``compact_snapshot``
+    populated + settled summary) exists on the chain, everything
+    above it is replaced by a synthetic summary message plus the
+    snapshot's preserved tail. The latest compact wins when the chain
+    carries more than one — the older one has already been folded
+    into the newer one's input so we skip it.
     """
     if not parent_ids:
         return []
@@ -3376,10 +3616,43 @@ def _build_chat_context(chatflow: ChatFlow, parent_ids: list[str]) -> list[WireM
         current = node.parent_ids[0] if node.parent_ids else None
     chain.reverse()
 
+    # Find the most-recent settled compact ancestor. Chain is root→tip
+    # after reverse(); the last match wins.
+    compact_cutoff_idx: int | None = None
+    for i, nid in enumerate(chain):
+        node = chatflow.nodes[nid]
+        snap = node.compact_snapshot
+        if snap is not None and snap.summary:
+            compact_cutoff_idx = i
+
     messages: list[WireMessage] = []
-    for nid in chain:
+    start_idx = 0
+    if compact_cutoff_idx is not None:
+        snap = chatflow.nodes[chain[compact_cutoff_idx]].compact_snapshot
+        assert snap is not None  # loop guarantees
+        messages.append(
+            WireMessage(
+                role="user",
+                content=(
+                    "[Prior conversation — summarized to save context]\n\n"
+                    f"{snap.summary}"
+                ),
+            )
+        )
+        messages.extend(snap.preserved_messages)
+        start_idx = compact_cutoff_idx + 1
+
+    for nid in chain[start_idx:]:
         node = chatflow.nodes[nid]
         if not node.is_frozen:
+            continue
+        # A compact ChatNode after the cutoff (only possible if the
+        # newest compact isn't the cutoff — can't currently happen but
+        # guard anyway) should not re-emit its own user/assistant
+        # pair: its summary already lives in agent_response as the
+        # compaction output, which would leak upstream text into the
+        # new context.
+        if node.compact_snapshot is not None:
             continue
         if node.user_message is not None:
             messages.append(
