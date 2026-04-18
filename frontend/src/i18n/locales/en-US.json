@@ -71,6 +71,7 @@
     "ctx_cancel": "Cancel execution",
     "ctx_delete": "Delete",
     "ctx_delete_cascade": "Delete with descendants",
+    "ctx_compact": "Compact from here",
     "awaiting_user": "Needs you",
     "awaiting_user_hint": "The agent has a question for you — drill in to see what it's asking",
     "active_work": "Active work",

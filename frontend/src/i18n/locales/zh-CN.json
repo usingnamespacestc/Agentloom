@@ -71,6 +71,7 @@
     "ctx_cancel": "取消执行",
     "ctx_delete": "删除",
     "ctx_delete_cascade": "删除及所有后续节点",
+    "ctx_compact": "从此处执行压缩",
     "awaiting_user": "需要你",
     "awaiting_user_hint": "Agent 有问题要问你——点开工作流查看",
     "active_work": "正在执行",

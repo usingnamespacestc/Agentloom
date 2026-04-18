@@ -54,6 +54,7 @@ import { useTranslation } from "react-i18next";
 
 import { layoutDag } from "./layout";
 import { CanvasContextMenu, StickyNoteContextMenu } from "./CanvasContextMenu";
+import { CompactConfirmDialog } from "@/components/CompactConfirmDialog";
 import { ChatFlowActiveWorkPanel } from "./ChatFlowActiveWorkPanel";
 import { ModelRibbonLayer } from "./ModelRibbonLayer";
 import { MODEL_KINDS, colorForModel, edgeModel } from "./effectiveModel";
@@ -111,6 +112,10 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
 
   // Context menu state
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  // Manual-compact dialog: when the user picks "Compact from here" in
+  // the node context menu and the chatflow requires confirmation, we
+  // open CompactConfirmDialog pinned to the chosen node as parent.
+  const [compactDialogParentId, setCompactDialogParentId] = useState<string | null>(null);
   const reactFlow = useReactFlow();
 
   // Sticky notes — persisted via chatflow.sticky_notes
@@ -466,6 +471,10 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
         const leaves = computeLeafIds(chatflow.nodes);
         const isLeaf = leaves.has(node.id);
         const canDel = !undeletable.has(node.id);
+        // Compacting a compact node is nonsensical (it's already the
+        // summary). Everything else is fair game — server rejects if
+        // there's literally nothing to summarise.
+        const canCompact = node.compact_snapshot == null;
 
         return (
           <NodeContextMenu
@@ -474,6 +483,7 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
             status={node.status}
             isLeaf={isLeaf}
             canDelete={canDel}
+            canCompact={canCompact}
             onEnterWorkflow={() => {
               enterWorkflow(contextMenu.nodeId);
               setContextMenu(null);
@@ -485,6 +495,18 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
             onCancel={() => {
               void cancelNode(contextMenu.nodeId);
               setContextMenu(null);
+            }}
+            onCompact={() => {
+              const parentId = contextMenu.nodeId;
+              setContextMenu(null);
+              if (chatflow.compact_require_confirmation ?? true) {
+                setCompactDialogParentId(parentId);
+                return;
+              }
+              void (async () => {
+                const res = await api.compactChain(chatflow.id, parentId, {});
+                selectNode(res.node_id);
+              })();
             }}
             onDelete={() => {
               if (isLeaf) {
@@ -498,6 +520,16 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
           />
         );
       })()}
+
+      {compactDialogParentId && chatflow?.nodes[compactDialogParentId] && (
+        <CompactConfirmDialog
+          open
+          onClose={() => setCompactDialogParentId(null)}
+          chatflow={chatflow}
+          parentNode={chatflow.nodes[compactDialogParentId]}
+          onCreated={(nodeId) => selectNode(nodeId)}
+        />
+      )}
 
       {paneMenu && (
         <CanvasContextMenu
@@ -743,9 +775,11 @@ function NodeContextMenu({
   status,
   isLeaf,
   canDelete,
+  canCompact,
   onEnterWorkflow,
   onRetry,
   onCancel,
+  onCompact,
   onDelete,
   onClose,
 }: {
@@ -754,9 +788,11 @@ function NodeContextMenu({
   status: string;
   isLeaf: boolean;
   canDelete: boolean;
+  canCompact: boolean;
   onEnterWorkflow: () => void;
   onRetry: () => void;
   onCancel: () => void;
+  onCompact: () => void;
   onDelete: () => void;
   onClose: () => void;
 }) {
@@ -773,6 +809,11 @@ function NodeContextMenu({
   }
   if (status === "running") {
     items.push({ label: t("chatflow.ctx_cancel"), onClick: onCancel });
+  }
+
+  // Compact — hide on compact nodes themselves.
+  if (canCompact) {
+    items.push({ label: t("chatflow.ctx_compact"), onClick: onCompact });
   }
 
   // Delete
