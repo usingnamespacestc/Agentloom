@@ -24,6 +24,10 @@ export interface CompactConfirmDialogProps {
   onClose: () => void;
   chatflow: ChatFlow;
   parentNode: ChatFlowNode;
+  /** Called with the newly-created compact ChatNode id so the caller
+   * can switch the conversation selection onto it — otherwise the
+   * user's next turn would fork beside the compact, not under it. */
+  onCreated?: (nodeId: string) => void;
 }
 
 function refKey(ref: ProviderModelRef | null): string {
@@ -41,6 +45,7 @@ export function CompactConfirmDialog({
   onClose,
   chatflow,
   parentNode,
+  onCreated,
 }: CompactConfirmDialogProps) {
   const { t } = useTranslation();
   const [instruction, setInstruction] = useState("");
@@ -115,7 +120,7 @@ export function CompactConfirmDialog({
         Number.isFinite(targetNum) && Number.isInteger(targetNum) && targetNum > 0
           ? targetNum
           : null;
-      await api.compactChain(chatflow.id, parentNode.id, {
+      const res = await api.compactChain(chatflow.id, parentNode.id, {
         compact_instruction: instruction.trim() || null,
         must_keep: mustKeep.trim(),
         must_drop: mustDrop.trim(),
@@ -123,6 +128,7 @@ export function CompactConfirmDialog({
         target_tokens: targetTokens,
         model: parseRefKey(modelKey),
       });
+      onCreated?.(res.node_id);
       onClose();
     } catch (e) {
       setErrorMessage(e instanceof Error ? e.message : String(e));

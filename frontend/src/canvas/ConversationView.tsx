@@ -247,7 +247,11 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
     }
     setCompactRunning(true);
     try {
-      await api.compactChain(chatflow.id, leafNode.id, {});
+      const res = await api.compactChain(chatflow.id, leafNode.id, {});
+      // Select the new compact node so future turns fork from it
+      // rather than the pre-compact leaf (otherwise the compaction
+      // would just sit as a parallel branch that nothing builds on).
+      selectNode(res.node_id);
     } finally {
       setCompactRunning(false);
     }
@@ -281,6 +285,7 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
           onClose={() => setCompactDialogOpen(false)}
           chatflow={chatflow}
           parentNode={leafNode}
+          onCreated={(nodeId) => selectNode(nodeId)}
         />
       )}
 
