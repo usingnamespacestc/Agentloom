@@ -44,6 +44,40 @@ class WireMessage(BaseModel):
     extras: dict[str, Any] = Field(default_factory=dict)
 
 
+class CompactSnapshot(BaseModel):
+    """The structured output of a :attr:`StepKind.COMPACT` WorkNode.
+
+    Produced by the compact worker's LLM call and frozen onto the
+    WorkNode. Downstream ancestor walks root here: instead of pulling
+    the full pre-compact message trail, consumers read
+    ``summary`` (the compressed history) plus ``preserved_messages``
+    (recent turns kept verbatim).
+    """
+
+    #: Compressed-history prose. Becomes a single user-role message at the
+    #: start of the downstream context.
+    summary: str
+    #: Verbatim tail of the original sequence — kept so the model still has
+    #: the most recent exchanges in full fidelity. Inserted after
+    #: ``summary`` when reconstructing downstream context.
+    preserved_messages: list[WireMessage] = Field(default_factory=list)
+    #: Indices into the pre-compact message list that were folded into
+    #: ``summary`` (half-open interval). ``preserved_messages`` lives at
+    #: ``[end, original_len)``. Recorded for debugging / dry-run display.
+    source_range: tuple[int, int] = (0, 0)
+    #: Number of original messages folded into the summary (== end - start).
+    dropped_count: int = 0
+    #: Char-based token estimate of the pre-compact inputs.
+    original_tokens: int = 0
+    #: Char-based token estimate of ``summary`` + ``preserved_messages``
+    #: after the compact run.
+    compacted_tokens: int = 0
+    #: The free-text instruction the user passed through (manual trigger
+    #: or auto-trigger w/ confirmation). ``None`` for silent WorkFlow
+    #: compacts that had no user interaction.
+    compact_instruction: str | None = None
+
+
 class WorkFlowNode(NodeBase):
     """A single step inside a WorkFlow.
 
@@ -94,6 +128,12 @@ class WorkFlowNode(NodeBase):
     # --- sub_agent_delegation ---
     sub_workflow: "WorkFlow | None" = None
 
+    # --- compact ---
+    #: Set by the engine when a COMPACT node finishes. Downstream ancestor
+    #: walks root at this snapshot instead of the pre-compact message
+    #: chain. ``None`` for pending compact nodes and for non-compact kinds.
+    compact_snapshot: CompactSnapshot | None = None
+
     #: If this node is a redo clone spawned by a judge_post ``retry``
     #: verdict, the id of the node it was cloned from (worker or
     #: delegation). Lets the re-aggregation walk the retry lineage so
@@ -119,6 +159,8 @@ class WorkFlowNode(NodeBase):
                 raise ValueError("llm_call node may not carry a sub_workflow")
             if self.judge_variant or self.judge_verdict:
                 raise ValueError("llm_call node may not carry judge_call fields")
+            if self.compact_snapshot is not None:
+                raise ValueError("llm_call node may not carry compact fields")
         elif self.step_kind == StepKind.TOOL_CALL:
             if self.input_messages or self.output_message or self.usage:
                 raise ValueError("tool_call node may not carry llm_call fields")
@@ -126,6 +168,8 @@ class WorkFlowNode(NodeBase):
                 raise ValueError("tool_call node may not carry a sub_workflow")
             if self.judge_variant or self.judge_verdict:
                 raise ValueError("tool_call node may not carry judge_call fields")
+            if self.compact_snapshot is not None:
+                raise ValueError("tool_call node may not carry compact fields")
         elif self.step_kind == StepKind.JUDGE_CALL:
             if self.tool_name or self.tool_args or self.tool_result:
                 raise ValueError("judge_call node may not carry tool_call fields")
@@ -133,6 +177,8 @@ class WorkFlowNode(NodeBase):
                 raise ValueError("judge_call node may not carry a sub_workflow")
             if self.judge_variant is None:
                 raise ValueError("judge_call node requires judge_variant")
+            if self.compact_snapshot is not None:
+                raise ValueError("judge_call node may not carry compact fields")
         elif self.step_kind == StepKind.SUB_AGENT_DELEGATION:
             if self.tool_name or self.tool_args or self.tool_result:
                 raise ValueError("delegation node may not carry tool_call fields")
@@ -140,6 +186,19 @@ class WorkFlowNode(NodeBase):
                 raise ValueError("delegation node may not carry llm_call fields")
             if self.judge_variant or self.judge_verdict:
                 raise ValueError("delegation node may not carry judge_call fields")
+            if self.compact_snapshot is not None:
+                raise ValueError("delegation node may not carry compact fields")
+        elif self.step_kind == StepKind.COMPACT:
+            # Compact nodes share llm_call's input/output/usage shape
+            # (they're a single LLM invocation under the hood) and
+            # additionally carry ``compact_snapshot`` as the structured
+            # parse of the worker's JSON output.
+            if self.tool_name or self.tool_args or self.tool_result:
+                raise ValueError("compact node may not carry tool_call fields")
+            if self.sub_workflow is not None:
+                raise ValueError("compact node may not carry a sub_workflow")
+            if self.judge_variant or self.judge_verdict:
+                raise ValueError("compact node may not carry judge_call fields")
 
         # ADR-024: role and step_kind are orthogonal but constrained to a
         # whitelist of compatible pairings. ``role=None`` is always valid

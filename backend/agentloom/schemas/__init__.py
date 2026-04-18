@@ -23,7 +23,7 @@ from agentloom.schemas.chatflow import (
     make_chatflow,
 )
 from agentloom.schemas.provider import ModelInfo, ProviderConfig, ProviderKind
-from agentloom.schemas.workflow import WorkFlow, WorkFlowNode
+from agentloom.schemas.workflow import CompactSnapshot, WireMessage, WorkFlow, WorkFlowNode
 from agentloom.schemas.workspace_settings import (
     BUILTIN_DEFAULT_STATES,
     ToolState,
@@ -33,6 +33,7 @@ from agentloom.schemas.workspace_settings import (
 __all__ = [
     "ChatFlow",
     "ChatFlowNode",
+    "CompactSnapshot",
     "DEFAULT_GREETING",
     "EditProvenance",
     "EditableText",
@@ -46,6 +47,7 @@ __all__ = [
     "ToolConstraints",
     "ToolState",
     "BUILTIN_DEFAULT_STATES",
+    "WireMessage",
     "WorkFlow",
     "WorkFlowNode",
     "WorkspaceSettings",

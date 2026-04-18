@@ -60,6 +60,13 @@ class StepKind(str, Enum):
     TOOL_CALL = "tool_call"
     JUDGE_CALL = "judge_call"  # pre / during / post — see §3.5
     SUB_AGENT_DELEGATION = "sub_agent_delegation"
+    #: Context compaction — a single LLM call that summarizes an upstream
+    #: message sequence into a :class:`CompactSnapshot`, which descendants
+    #: use in place of the full ancestor trail. Auto-inserted by the
+    #: engine (Tier 1) when a pending llm_call's estimated context exceeds
+    #: the configured threshold; explicitly placed by users in ChatFlow
+    #: (Tier 2). See compact design in devlog 2026-04-18 夜.
+    COMPACT = "compact"
 
 
 class JudgeVariant(str, Enum):
