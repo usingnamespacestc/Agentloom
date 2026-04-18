@@ -1,44 +1,96 @@
 builtin_id: compact
 name: "Compact"
-description: "Summarize a long ChatFlow prefix into a single system message so subsequent turns fit in context."
+description: >
+  Context compaction worker. Summarizes a message sequence into compact
+  prose so descendants can keep the substance of past exchanges without
+  carrying every raw turn forward. Invoked by the engine (WorkFlow
+  Tier 1, pre-llm_call) or explicitly by the user (ChatFlow Tier 2).
+  The *preserved recent turns* are carved off **before** this plan
+  runs — the engine packs them alongside the summary into a
+  ``CompactSnapshot``. This plan only produces the summary prose.
 params_schema:
-  transcript:
+  messages_to_compact:
     type: string
     required: true
-    description: "Serialized user/assistant turns to be compressed."
-  preserved_facts:
+    description: >
+      Serialized message tail that needs summarizing (the early chunk —
+      recent turns are preserved verbatim and do NOT appear here).
+      Each message is rendered as ``[role] content``.
+  target_tokens:
+    type: int
+    required: true
+    description: >
+      Rough token budget the summary should fit into. The model should
+      aim under this, not push against it.
+  must_keep:
     type: string
     required: false
-    description: "Newline list of facts that must survive verbatim (names, ids, numbers)."
+    description: >
+      Freeform text the user wants preserved verbatim (names, ids,
+      decisions, constraints). Empty when the user did not specify.
+  must_drop:
+    type: string
+    required: false
+    description: >
+      Freeform text the user considers safe to drop. Empty otherwise.
+  compact_instruction:
+    type: string
+    required: false
+    description: >
+      Freeform user guidance for how to compact — focus areas, tone,
+      style. Empty when the engine triggered the compact silently.
 plan:
   description:
-    text: "Compact a long transcript into a concise summary."
+    text: "Compact a message sequence into a summary."
     provenance: pure_agent
   execution_mode: direct
   nodes:
-    - id: "compact_root"
+    - id: "compact_worker"
       parent_ids: []
       step_kind: llm_call
       description:
-        text: "Produce a compact summary preserving listed facts."
+        text: "Produce a compact summary of the supplied messages."
         provenance: pure_agent
       input_messages:
         - role: system
           content: |
-            You are summarizing a conversation prefix so later turns
-            can reason about it without re-reading the raw transcript.
+            You are a context compaction worker. Your job: rewrite a
+            long stretch of prior conversation into a compact summary
+            that downstream LLM calls can read instead of the raw
+            messages.
 
-            Rules:
-            - Preserve every fact in "preserved_facts" verbatim.
-            - Keep proper nouns, ids, numbers, and dates exact.
-            - Drop filler, greetings, and redundant restatements.
-            - Keep the decision points — what was asked, what was
-              answered, what was agreed.
+            Hard rules:
+              - Preserve proper nouns, ids, file paths, numbers, dates,
+                and any explicit decisions verbatim.
+              - Preserve any tool-call results / error messages that
+                later turns may need to reference.
+              - Drop greetings, filler, small-talk, restatements.
+              - Write in neutral third person: "The user asked X. The
+                assistant answered Y." — not first-person.
+              - If the user supplied ``must_keep`` content, weave it
+                in verbatim. If ``must_drop`` content appears, omit it.
+              - Respect the target token budget: aim UNDER
+                ``target_tokens``; never exceed it.
+              - Output the summary prose only — no preamble, no
+                postscript, no JSON, no markdown code fences. The
+                caller will pack your output into a snapshot record.
         - role: user
           content: |
-            Preserved facts (verbatim):
-            {{ preserved_facts }}
+            Target tokens: {{ target_tokens }}
 
-            Transcript to compact:
-            {{ transcript }}
-  root_ids: ["compact_root"]
+            Must-keep (verbatim):
+            {{ must_keep }}
+
+            Must-drop (omit):
+            {{ must_drop }}
+
+            User instruction:
+            {{ compact_instruction }}
+
+            Messages to compact:
+            ---
+            {{ messages_to_compact }}
+            ---
+
+            Write the summary now.
+  root_ids: ["compact_worker"]
