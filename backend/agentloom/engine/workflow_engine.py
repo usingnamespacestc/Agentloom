@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -52,8 +53,11 @@ from agentloom.providers.types import (
 from agentloom.providers.types import ToolUse as ProviderToolUse
 from agentloom.schemas import WorkFlow, WorkFlowNode
 from agentloom.schemas.common import (
+    EditableText,
+    EditProvenance,
     JudgeVariant,
     NodeStatus,
+    ProviderModelRef,
     SharedNote,
     StepKind,
     TokenUsage,
@@ -61,7 +65,7 @@ from agentloom.schemas.common import (
     utcnow,
 )
 from agentloom.schemas.common import ToolUse as SchemaToolUse
-from agentloom.schemas.workflow import WireMessage
+from agentloom.schemas.workflow import CompactSnapshot, WireMessage
 from agentloom.tools.base import ToolContext, ToolRegistry
 
 #: Provider call surface — the engine never instantiates an adapter
@@ -84,6 +88,13 @@ TokenCallback = Callable[[str], Awaitable[None]]
 #: continues with an llm_call or routes straight to judge_post.
 PostNodeHook = Callable[[WorkFlow, WorkFlowNode], None]
 
+#: Resolve a model's context window in tokens. ChatFlowEngine wires
+#: this to a closure that reads ``ModelInfo.context_window`` from the
+#: provider registry. ``None`` on either the callable or its result
+#: means "unknown"; the engine falls back to
+#: :data:`DEFAULT_CONTEXT_WINDOW_TOKENS`.
+ContextWindowLookup = Callable[[ProviderModelRef | None], int | None]
+
 #: Sentinel so we can distinguish ``chatflow_tool_loop_budget=None``
 #: ("chatflow exists and says unlimited") from "no chatflow was passed
 #: at all".
@@ -100,6 +111,145 @@ _UNSET: object = object()
 MAX_TOOL_LOOP_ITERATIONS = 12
 
 
+# --------------------------------------------------------------- compact (Tier 1)
+
+#: Default per-ChatFlow compact trigger threshold. Pre-llm_call the
+#: engine estimates the message-list token footprint (char-based); if
+#: ``estimate / context_window >= TRIGGER_PCT`` a compact WorkNode is
+#: inserted before the call runs. Chatflow settings will override this
+#: per-flow in step 5.
+DEFAULT_COMPACT_TRIGGER_PCT = 0.7
+#: Default target footprint for the compact summary. Fed to the compact
+#: worker as ``target_tokens = context_window * TARGET_PCT``.
+DEFAULT_COMPACT_TARGET_PCT = 0.5
+#: Default number of trailing messages kept verbatim on the downstream
+#: side of a compact. Smaller = more aggressive compaction, larger =
+#: more fidelity. Chatflow settings will override per-flow in step 5.
+DEFAULT_PRESERVE_RECENT_TURNS = 3
+#: Fallback context window (in tokens) used when the model's actual
+#: ``context_window`` is unknown. Matches the frontend's
+#: ``DEFAULT_MAX_CONTEXT_TOKENS`` so UI bar and engine threshold agree.
+DEFAULT_CONTEXT_WINDOW_TOKENS = 32_000
+
+
+class _CompactRequested(Exception):
+    """Raised inside ``_invoke_and_freeze`` when the pending message
+    list exceeds the compact trigger. Caught by ``_run_node`` which
+    un-winds the current node back to ``planned`` so the execute loop
+    picks up the freshly-inserted compact WorkNode on its next pass.
+    """
+
+
+def _estimate_tokens_from_provider_messages(messages: list[Message]) -> int:
+    """Char-based token estimate (chars/4) for a provider-side message
+    list. Matches the shape of the inputs ``_invoke_and_freeze`` has
+    already built, so the trigger fires on exactly what would hit the
+    wire. Good enough for a gate — not a substitute for tiktoken.
+    """
+    chars = 0
+    for m in messages:
+        content = getattr(m, "content", None) or ""
+        chars += len(content)
+        tool_uses = getattr(m, "tool_uses", None)
+        if tool_uses:
+            for tu in tool_uses:
+                chars += len(tu.name)
+                import json as _json
+                chars += len(_json.dumps(tu.arguments, default=str))
+    return chars // 4
+
+
+def _estimate_tokens_from_wire(messages: list[WireMessage]) -> int:
+    """Sibling of :func:`_estimate_tokens_from_provider_messages` for
+    schema-side ``WireMessage`` lists. Used by snapshot accounting."""
+    chars = 0
+    for w in messages:
+        chars += len(w.content or "")
+        for tu in w.tool_uses:
+            chars += len(tu.name)
+            import json as _json
+            chars += len(_json.dumps(tu.arguments, default=str))
+    return chars // 4
+
+
+_COMPACT_FIXTURE_CACHE: tuple[dict[str, Any], dict[str, str]] | None = None
+
+
+def _get_compact_fixture() -> tuple[dict[str, Any], dict[str, str]]:
+    """Return ``(plan_dict, include_fragments)`` for ``compact.yaml``.
+
+    Loaded once at first use and cached. Fails loudly if the fixture
+    is missing because Tier 1 can't function without it — the compact
+    worker has no fallback prompt.
+    """
+    global _COMPACT_FIXTURE_CACHE
+    if _COMPACT_FIXTURE_CACHE is None:
+        from agentloom.templates.loader import fragments_as_texts, load_fixtures
+
+        templates, fragments = load_fixtures()
+        compact = next(
+            (f for f in templates if f.builtin_id == "compact"), None
+        )
+        if compact is None:
+            raise RuntimeError(
+                "compact.yaml fixture missing — required for Tier 1 auto-compact"
+            )
+        _COMPACT_FIXTURE_CACHE = (compact.plan, fragments_as_texts(fragments))
+    return _COMPACT_FIXTURE_CACHE
+
+
+def _compact_description_text() -> EditableText:
+    """Placeholder description for engine-inserted compact nodes. Kept
+    in one spot so the UI and tests share the same string."""
+    return EditableText(
+        text="Compact (auto-inserted)",
+        provenance=EditProvenance.PURE_AGENT,
+    )
+
+
+def _parent_is_fresh_compact(workflow: WorkFlow, node: WorkFlowNode) -> bool:
+    """True iff ``node`` has a direct parent that is a COMPACT WorkNode
+    with a settled snapshot. Used to break the Tier 1 loop: after a
+    compact finishes, the node it was inserted for re-runs exactly
+    once with the summarized context — it must not trigger another
+    compact even if the summary + preserved tail still overflow.
+    """
+    for pid in node.parent_ids:
+        parent = workflow.get(pid)
+        if (
+            parent.step_kind == StepKind.COMPACT
+            and parent.compact_snapshot is not None
+            and parent.compact_snapshot.summary
+        ):
+            return True
+    return False
+
+
+def _render_messages_to_compact(messages: list[Message]) -> str:
+    """Serialize a provider-message list into the ``[role] body`` shape
+    the compact worker's prompt expects.
+    """
+    lines: list[str] = []
+    for m in messages:
+        if isinstance(m, SystemMessage):
+            lines.append(f"[system] {m.content}")
+        elif isinstance(m, UserMessage):
+            lines.append(f"[user] {m.content}")
+        elif isinstance(m, AssistantMessage):
+            body = m.content or ""
+            if m.tool_uses:
+                import json as _json
+                parts = [
+                    f"{tu.name}({_json.dumps(tu.arguments, default=str)})"
+                    for tu in m.tool_uses
+                ]
+                body = (body + "\n" if body else "") + "tool_uses: " + "; ".join(parts)
+            lines.append(f"[assistant] {body}")
+        elif isinstance(m, ToolMessage):
+            lines.append(f"[tool:{m.tool_use_id}] {m.content}")
+    return "\n".join(lines)
+
+
 class WorkflowEngine:
     def __init__(
         self,
@@ -107,11 +257,27 @@ class WorkflowEngine:
         event_bus: EventBus,
         tool_registry: ToolRegistry | None = None,
         tool_context: ToolContext | None = None,
+        *,
+        context_window_lookup: ContextWindowLookup | None = None,
+        compact_trigger_pct: float = DEFAULT_COMPACT_TRIGGER_PCT,
+        compact_target_pct: float = DEFAULT_COMPACT_TARGET_PCT,
+        compact_preserve_recent_turns: int = DEFAULT_PRESERVE_RECENT_TURNS,
+        compact_model: ProviderModelRef | None = None,
     ) -> None:
         self._provider_call = provider_call
         self._bus = event_bus
         self._tools = tool_registry
         self._tool_ctx = tool_context or ToolContext()
+        #: Resolves a model's context_window in tokens. ``None`` means
+        #: "no lookup plumbed in" — the engine treats every model as
+        #: having :data:`DEFAULT_CONTEXT_WINDOW_TOKENS`.
+        self._context_window_lookup = context_window_lookup
+        #: Compact Tier 1 parameters. Chatflow-level overrides flow in
+        #: via the ChatFlowEngine wiring at construction time.
+        self._compact_trigger_pct = compact_trigger_pct
+        self._compact_target_pct = compact_target_pct
+        self._compact_preserve_recent_turns = compact_preserve_recent_turns
+        self._compact_model = compact_model
         #: Per-``execute()`` filter — tool names hidden from the LLM and
         #: refused if invoked. Populated from the chatflow's
         #: ``disabled_tool_names`` list by ChatFlowEngine. Empty
@@ -229,6 +395,11 @@ class WorkflowEngine:
             for n in ready:
                 if n.status == NodeStatus.FAILED:
                     broken.add(n.id)
+                if n.status == NodeStatus.PLANNED:
+                    # Tier 1 compact deferred this node — leave it out
+                    # of ``done`` so the next topological pass picks
+                    # it up again once its new compact parent runs.
+                    continue
                 done.add(n.id)
 
             # Planner-grounding fuse: once enough leaves have resolved,
@@ -343,8 +514,26 @@ class WorkflowEngine:
                 await self._run_judge_call(workflow, node)
             elif node.step_kind == StepKind.SUB_AGENT_DELEGATION:
                 await self._run_sub_agent_delegation(workflow, node)
+            elif node.step_kind == StepKind.COMPACT:
+                await self._run_compact(workflow, node)
             else:  # pragma: no cover — enum exhaustiveness
                 raise ValueError(f"unknown step_kind {node.step_kind}")
+        except _CompactRequested:
+            # Tier 1 pre-call check spliced a compact WorkNode in front
+            # of this one. _insert_compact_worknode already reset the
+            # node to PLANNED and added the compact as a new parent;
+            # we just need to emit a bus event so subscribers know
+            # this run got deferred, then unwind without the
+            # "node.failed" treatment.
+            await self._bus.publish(
+                WorkflowEvent(
+                    workflow_id=workflow.id,
+                    kind="node.compact_deferred",
+                    node_id=node.id,
+                    data={"compact_parent": node.parent_ids[0]},
+                )
+            )
+            return
         except Exception as exc:  # noqa: BLE001 — engine boundary
             node.status = NodeStatus.FAILED
             node.error = f"{type(exc).__name__}: {exc}"
@@ -428,6 +617,27 @@ class WorkflowEngine:
         else:
             model = None
 
+        # Tier 1 compact check — only for ancestor-built contexts and
+        # only for the kinds of calls that would be *growing* context.
+        # Compact calls themselves are exempt (they're the recovery
+        # path; they'd trigger recursion). Judge / planner / worker
+        # nodes that were spawned with explicit ``input_messages`` are
+        # also skipped: their prompt is template-driven and we have no
+        # obvious place to splice in a summary without breaking the
+        # template contract. We also exempt nodes whose direct parent
+        # is a freshly-settled compact — that's the node the compact
+        # was inserted for, and its re-run IS the "compacted version".
+        # Re-triggering here would loop indefinitely on pathologically
+        # long preserved tails.
+        if (
+            node.step_kind != StepKind.COMPACT
+            and node.input_messages is None
+            and not _parent_is_fresh_compact(workflow, node)
+            and self._needs_compact(messages, ref)
+        ):
+            self._insert_compact_worknode(workflow, node, messages, ref)
+            raise _CompactRequested(node.id)
+
         # Expose every tool the registry considers visible under this
         # node's constraints. Empty list means "no tools" — stays
         # backward-compatible with M3 callers that don't configure a
@@ -507,6 +717,150 @@ class WorkflowEngine:
             _assert_tool_loop_budget(workflow, node, self._effective_budget)
             _spawn_tool_loop_children(workflow, node)
 
+    # --------------------------------------------------------------- compact
+
+    def _context_window_for(self, ref: ProviderModelRef | None) -> int:
+        """Resolve the model's context window in tokens, falling back
+        to :data:`DEFAULT_CONTEXT_WINDOW_TOKENS` when the lookup isn't
+        plumbed in or returns ``None``.
+        """
+        if self._context_window_lookup is not None:
+            resolved = self._context_window_lookup(ref)
+            if resolved is not None and resolved > 0:
+                return resolved
+        return DEFAULT_CONTEXT_WINDOW_TOKENS
+
+    def _needs_compact(
+        self,
+        messages: list[Message],
+        ref: ProviderModelRef | None,
+    ) -> bool:
+        """Return True iff the estimated footprint of *messages*
+        crosses the configured fraction of the target model's context
+        window. Pure read — never mutates engine or workflow state.
+        """
+        estimated = _estimate_tokens_from_provider_messages(messages)
+        ctx = self._context_window_for(ref)
+        threshold = int(ctx * self._compact_trigger_pct)
+        return estimated >= threshold
+
+    def _insert_compact_worknode(
+        self,
+        workflow: WorkFlow,
+        node: WorkFlowNode,
+        messages: list[Message],
+        ref: ProviderModelRef | None,
+    ) -> WorkFlowNode:
+        """Splice a COMPACT WorkNode in front of *node* and re-parent
+        *node* onto it.
+
+        - Carves off the last ``compact_preserve_recent_turns`` provider
+          messages as verbatim tail.
+        - Serializes the remaining head into the compact worker's
+          ``messages_to_compact`` param.
+        - Instantiates :file:`compact.yaml` to borrow the rendered
+          prompt, then builds a single ``StepKind.COMPACT`` node with
+          that prompt and a pre-populated snapshot holding the
+          preserved tail + accounting.
+        - ``node.parent_ids`` become ``[compact.id]``; the compact
+          inherits ``node``'s prior parents. The engine will pick up
+          the compact on its next ready pass; when the compact
+          finishes, *node* will run again and build its context from
+          the snapshot.
+        """
+        from agentloom.templates.instantiate import instantiate_fixture
+
+        keep = max(0, min(len(messages), self._compact_preserve_recent_turns))
+        head = messages[:-keep] if keep else messages
+        tail = messages[-keep:] if keep else []
+        head_serialized = _render_messages_to_compact(head)
+        original_tokens = _estimate_tokens_from_provider_messages(messages)
+        ctx = self._context_window_for(ref)
+        target_tokens = max(256, int(ctx * self._compact_target_pct))
+
+        compact_plan, includes = _get_compact_fixture()
+        compact_wf = instantiate_fixture(
+            compact_plan,
+            {
+                "messages_to_compact": head_serialized,
+                "target_tokens": target_tokens,
+                "must_keep": "",
+                "must_drop": "",
+                "compact_instruction": "",
+            },
+            includes=includes,
+        )
+        # The compact plan ships as a single-node WorkFlow; we borrow
+        # its fully-rendered input_messages (system + user prompt).
+        (inner,) = compact_wf.nodes.values()
+        assert inner.input_messages is not None
+        prompt = list(inner.input_messages)
+
+        preserved_wire = _provider_to_wire(tail)
+        snapshot = CompactSnapshot(
+            summary="",  # filled in by _run_compact after the LLM call
+            preserved_messages=preserved_wire,
+            source_range=(0, len(head)),
+            dropped_count=len(head),
+            original_tokens=original_tokens,
+            compacted_tokens=0,
+            compact_instruction=None,
+        )
+
+        compact_model = self._compact_model or node.model_override or ref
+        compact_node = WorkFlowNode(
+            step_kind=StepKind.COMPACT,
+            parent_ids=list(node.parent_ids),
+            description=_compact_description_text(),
+            input_messages=prompt,
+            compact_snapshot=snapshot,
+            model_override=compact_model,
+            resolved_model=compact_model,
+        )
+        workflow.add_node(compact_node)
+        if compact_node.id in workflow.root_ids and compact_node.parent_ids:
+            # add_node appended to root_ids under the assumption of an
+            # empty parent list; revert since we carry real parents.
+            workflow.root_ids.remove(compact_node.id)
+        node.parent_ids = [compact_node.id]
+        # Reset the pending node so execute() re-schedules it after the
+        # compact finishes.
+        node.status = NodeStatus.PLANNED
+        node.started_at = None
+        log.info(
+            "compact inserted: workflow=%s pending_node=%s compact=%s "
+            "original_tokens=%d target_tokens=%d preserved=%d",
+            workflow.id,
+            node.id,
+            compact_node.id,
+            original_tokens,
+            target_tokens,
+            len(tail),
+        )
+        return compact_node
+
+    async def _run_compact(self, workflow: WorkFlow, node: WorkFlowNode) -> None:
+        """Run a COMPACT WorkNode: invoke the provider on the rendered
+        prompt the engine pre-filled and splice the model's summary
+        into ``compact_snapshot``.
+        """
+        await self._invoke_and_freeze(workflow, node, expose_tools=False)
+        assert node.output_message is not None
+        summary = (node.output_message.content or "").strip()
+        if node.compact_snapshot is None:
+            # Shouldn't happen — _insert_compact_worknode always
+            # pre-populates. Be defensive so a malformed node fails
+            # loudly rather than silently producing an empty snapshot.
+            raise RuntimeError(
+                f"compact node {node.id} missing pre-populated snapshot"
+            )
+        compacted_tokens = len(summary) // 4 + _estimate_tokens_from_wire(
+            node.compact_snapshot.preserved_messages
+        )
+        node.compact_snapshot = node.compact_snapshot.model_copy(
+            update={"summary": summary, "compacted_tokens": compacted_tokens}
+        )
+
     async def _run_sub_agent_delegation(
         self, workflow: WorkFlow, node: WorkFlowNode
     ) -> None:
@@ -547,6 +901,11 @@ class WorkflowEngine:
             self._bus,
             self._tools,
             self._tool_ctx,
+            context_window_lookup=self._context_window_lookup,
+            compact_trigger_pct=self._compact_trigger_pct,
+            compact_target_pct=self._compact_target_pct,
+            compact_preserve_recent_turns=self._compact_preserve_recent_turns,
+            compact_model=self._compact_model,
         )
         forward_queue = self._bus.open_subscription(sub.id)
         forward_task = asyncio.create_task(
@@ -1184,11 +1543,46 @@ def _build_context_from_ancestors(workflow: WorkFlow, node: WorkFlowNode) -> lis
       (assistant turn, possibly with tool_uses).
     - Every frozen tool_call contributes a ``tool`` message carrying
       ``tool_use_id = source_tool_use_id`` and the result string.
+    - If a COMPACT ancestor with a settled snapshot exists, everything
+      before (and including) it is replaced by a single user message
+      holding the summary prose plus the snapshot's preserved recent
+      turns. Later ancestors layer on top as usual.
     """
     ancestors = workflow.ancestors(node.id)
+
+    # Find the latest (most-recent-topologically) compact ancestor whose
+    # snapshot is settled. ``ancestors`` is in topological order, so the
+    # last match wins.
+    compact_cutoff_idx: int | None = None
+    for i, aid in enumerate(ancestors):
+        a = workflow.get(aid)
+        if (
+            a.step_kind == StepKind.COMPACT
+            and a.compact_snapshot is not None
+            and a.compact_snapshot.summary
+        ):
+            compact_cutoff_idx = i
+
     messages: list[Message] = []
     seen_input = False
-    for aid in ancestors:
+    start_idx = 0
+
+    if compact_cutoff_idx is not None:
+        snap = workflow.get(ancestors[compact_cutoff_idx]).compact_snapshot
+        assert snap is not None  # loop guarantees
+        messages.append(
+            UserMessage(
+                content=(
+                    "[Prior conversation — summarized to save context]\n\n"
+                    f"{snap.summary}"
+                )
+            )
+        )
+        messages.extend(_wire_to_provider(snap.preserved_messages))
+        seen_input = True  # summary stands in for the original seed
+        start_idx = compact_cutoff_idx + 1
+
+    for aid in ancestors[start_idx:]:
         a = workflow.get(aid)
         if a.step_kind == StepKind.LLM_CALL:
             if not seen_input and a.input_messages:

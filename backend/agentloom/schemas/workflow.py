@@ -55,8 +55,10 @@ class CompactSnapshot(BaseModel):
     """
 
     #: Compressed-history prose. Becomes a single user-role message at the
-    #: start of the downstream context.
-    summary: str
+    #: start of the downstream context. Empty string is the
+    #: pre-execution stub — the engine fills this in from the compact
+    #: worker's LLM output when the node completes.
+    summary: str = ""
     #: Verbatim tail of the original sequence — kept so the model still has
     #: the most recent exchanges in full fidelity. Inserted after
     #: ``summary`` when reconstructing downstream context.
