@@ -186,6 +186,10 @@
   },
   "chatflow_settings": {
     "title": "对话设置",
+    "tab_models": "模型",
+    "tab_execution": "执行",
+    "tab_compact": "压缩",
+    "tab_tools": "工具",
     "default_model": "默认模型",
     "default_model_hint": "本对话中的所有 LLM 调用都会使用该模型，除非节点单独指定了其他模型。",
     "default_judge_model": "评审模型",

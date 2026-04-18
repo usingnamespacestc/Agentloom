@@ -14,6 +14,15 @@ import type { MCPServerState, ProviderSummary, ToolDTO } from "@/lib/api";
 import { useChatFlowStore } from "@/store/chatflowStore";
 import type { ProviderModelRef } from "@/types/schema";
 
+type TabId = "models" | "execution" | "compact" | "tools";
+
+const TABS: Array<{ id: TabId; labelKey: string }> = [
+  { id: "models", labelKey: "chatflow_settings.tab_models" },
+  { id: "execution", labelKey: "chatflow_settings.tab_execution" },
+  { id: "compact", labelKey: "chatflow_settings.tab_compact" },
+  { id: "tools", labelKey: "chatflow_settings.tab_tools" },
+];
+
 interface ChatFlowSettingsProps {
   open: boolean;
   onClose: () => void;
@@ -62,12 +71,7 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
   // none of its registered tool names are in that list.
   const [enabledMcpIds, setEnabledMcpIds] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
-  // The three per-call-type model fallbacks are rarely changed —
-  // day-to-day model picking lives in the composer picker. Collapse
-  // them behind an Advanced disclosure so this modal leads with the
-  // knobs users actually turn. Open on demand to change a ChatFlow's
-  // fallback without disturbing other ChatFlows' composer preferences.
-  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<TabId>("models");
 
   const loadProviders = useCallback(async () => {
     try {
@@ -273,7 +277,7 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
       onClick={onClose}
     >
       <div
-        className="flex w-[520px] flex-col rounded-xl border border-gray-200 bg-white shadow-2xl"
+        className="flex h-[80vh] w-[620px] flex-col rounded-xl border border-gray-200 bg-white shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-gray-200 px-5 py-3">
@@ -289,19 +293,29 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
           </button>
         </div>
 
-        <div className="space-y-4 px-5 py-4">
-          <div className="rounded border border-gray-200">
-            <button
-              type="button"
-              onClick={() => setAdvancedOpen((v) => !v)}
-              className="flex w-full items-center justify-between px-3 py-2 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
-              data-testid="chatflow-settings-advanced-toggle"
-            >
-              <span>{t("chatflow_settings.advanced_models")}</span>
-              <span className="text-gray-400">{advancedOpen ? "\u25BE" : "\u25B8"}</span>
-            </button>
-            {advancedOpen && (
-              <div className="space-y-4 border-t border-gray-200 px-3 py-3">
+        <div className="flex flex-1 overflow-hidden">
+          <nav className="flex w-36 flex-col border-r border-gray-100 bg-gray-50/60 py-2">
+            {TABS.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActiveTab(tab.id)}
+                data-testid={`chatflow-settings-tab-${tab.id}`}
+                className={[
+                  "px-4 py-2 text-left text-xs",
+                  activeTab === tab.id
+                    ? "bg-white font-medium text-blue-600 border-r-2 border-r-blue-500"
+                    : "text-gray-600 hover:bg-gray-100",
+                ].join(" ")}
+              >
+                {t(tab.labelKey)}
+              </button>
+            ))}
+          </nav>
+
+          <div className="flex-1 overflow-auto px-5 py-4">
+            {activeTab === "models" && (
+              <div className="space-y-4">
                 <p className="text-[10px] text-gray-400">
                   {t("chatflow_settings.advanced_models_hint")}
                 </p>
@@ -312,13 +326,11 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
                   options={modelOptions}
                   onChange={setModelKey}
                 />
-
                 {modelOptions.length === 0 && (
                   <p className="rounded border border-dashed border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
                     {t("chatflow_settings.no_models_hint")}
                   </p>
                 )}
-
                 <ModelPicker
                   label={t("chatflow_settings.default_judge_model")}
                   hint={t("chatflow_settings.default_judge_model_hint")}
@@ -327,7 +339,6 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
                   onChange={setJudgeModelKey}
                   inheritOption={t("chatflow_settings.inherit_main_model")}
                 />
-
                 <ModelPicker
                   label={t("chatflow_settings.default_tool_call_model")}
                   hint={t("chatflow_settings.default_tool_call_model_hint")}
@@ -338,88 +349,97 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
                 />
               </div>
             )}
+
+            {activeTab === "execution" && (
+              <div className="space-y-4">
+                <label className="block">
+                  <span className="text-[11px] font-medium text-gray-500">
+                    {t("chatflow_settings.judge_retry_budget")}
+                  </span>
+                  <input
+                    type="number"
+                    min={-1}
+                    step={1}
+                    value={retryBudgetStr}
+                    onChange={(e) => setRetryBudgetStr(e.target.value)}
+                    data-testid="judge-retry-budget-input"
+                    className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+                  />
+                  <p className="mt-1 text-[10px] text-gray-400">
+                    {t("chatflow_settings.judge_retry_budget_hint")}
+                  </p>
+                </label>
+
+                <label className="block">
+                  <span className="text-[11px] font-medium text-gray-500">
+                    {t("chatflow_settings.min_ground_ratio")}
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={1}
+                    value={minGroundRatioPctStr}
+                    onChange={(e) => setMinGroundRatioPctStr(e.target.value)}
+                    data-testid="min-ground-ratio-input"
+                    className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+                  />
+                  <p className="mt-1 text-[10px] text-gray-400">
+                    {t("chatflow_settings.min_ground_ratio_hint")}
+                  </p>
+                </label>
+
+                <label className="block">
+                  <span className="text-[11px] font-medium text-gray-500">
+                    {t("chatflow_settings.ground_ratio_grace_nodes")}
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={groundGraceStr}
+                    onChange={(e) => setGroundGraceStr(e.target.value)}
+                    data-testid="ground-ratio-grace-input"
+                    className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+                  />
+                  <p className="mt-1 text-[10px] text-gray-400">
+                    {t("chatflow_settings.ground_ratio_grace_nodes_hint")}
+                  </p>
+                </label>
+              </div>
+            )}
+
+            {activeTab === "compact" && (
+              <CompactSettingsSection
+                triggerPctStr={compactTriggerPctStr}
+                onTriggerPctChange={setCompactTriggerPctStr}
+                targetPctStr={compactTargetPctStr}
+                onTargetPctChange={setCompactTargetPctStr}
+                preserveTurnsStr={compactPreserveTurnsStr}
+                onPreserveTurnsChange={setCompactPreserveTurnsStr}
+                modelKey={compactModelKey}
+                onModelKeyChange={setCompactModelKey}
+                modelOptions={modelOptions}
+                requireConfirmation={compactRequireConfirmation}
+                onRequireConfirmationChange={setCompactRequireConfirmation}
+              />
+            )}
+
+            {activeTab === "tools" && (
+              <div className="space-y-4">
+                <BuiltinToolsSection
+                  tools={allTools.filter((tt) => !tt.name.startsWith("mcp__"))}
+                  selectedNames={enabledBuiltinNames}
+                  onChange={setEnabledBuiltinNames}
+                />
+                <MCPEnablementSection
+                  servers={mcpServers}
+                  selectedIds={enabledMcpIds}
+                  onChange={setEnabledMcpIds}
+                />
+              </div>
+            )}
           </div>
-
-          <label className="block">
-            <span className="text-[11px] font-medium text-gray-500">
-              {t("chatflow_settings.judge_retry_budget")}
-            </span>
-            <input
-              type="number"
-              min={-1}
-              step={1}
-              value={retryBudgetStr}
-              onChange={(e) => setRetryBudgetStr(e.target.value)}
-              data-testid="judge-retry-budget-input"
-              className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
-            />
-            <p className="mt-1 text-[10px] text-gray-400">
-              {t("chatflow_settings.judge_retry_budget_hint")}
-            </p>
-          </label>
-
-          <label className="block">
-            <span className="text-[11px] font-medium text-gray-500">
-              {t("chatflow_settings.min_ground_ratio")}
-            </span>
-            <input
-              type="number"
-              min={0}
-              max={100}
-              step={1}
-              value={minGroundRatioPctStr}
-              onChange={(e) => setMinGroundRatioPctStr(e.target.value)}
-              data-testid="min-ground-ratio-input"
-              className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
-            />
-            <p className="mt-1 text-[10px] text-gray-400">
-              {t("chatflow_settings.min_ground_ratio_hint")}
-            </p>
-          </label>
-
-          <label className="block">
-            <span className="text-[11px] font-medium text-gray-500">
-              {t("chatflow_settings.ground_ratio_grace_nodes")}
-            </span>
-            <input
-              type="number"
-              min={0}
-              step={1}
-              value={groundGraceStr}
-              onChange={(e) => setGroundGraceStr(e.target.value)}
-              data-testid="ground-ratio-grace-input"
-              className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
-            />
-            <p className="mt-1 text-[10px] text-gray-400">
-              {t("chatflow_settings.ground_ratio_grace_nodes_hint")}
-            </p>
-          </label>
-
-          <CompactSettingsSection
-            triggerPctStr={compactTriggerPctStr}
-            onTriggerPctChange={setCompactTriggerPctStr}
-            targetPctStr={compactTargetPctStr}
-            onTargetPctChange={setCompactTargetPctStr}
-            preserveTurnsStr={compactPreserveTurnsStr}
-            onPreserveTurnsChange={setCompactPreserveTurnsStr}
-            modelKey={compactModelKey}
-            onModelKeyChange={setCompactModelKey}
-            modelOptions={modelOptions}
-            requireConfirmation={compactRequireConfirmation}
-            onRequireConfirmationChange={setCompactRequireConfirmation}
-          />
-
-          <BuiltinToolsSection
-            tools={allTools.filter((tt) => !tt.name.startsWith("mcp__"))}
-            selectedNames={enabledBuiltinNames}
-            onChange={setEnabledBuiltinNames}
-          />
-
-          <MCPEnablementSection
-            servers={mcpServers}
-            selectedIds={enabledMcpIds}
-            onChange={setEnabledMcpIds}
-          />
         </div>
 
         <div className="flex justify-end gap-2 border-t border-gray-100 px-5 py-3">
@@ -593,11 +613,8 @@ function CompactSettingsSection({
 }) {
   const { t } = useTranslation();
   return (
-    <div className="rounded border border-gray-200 p-3">
-      <span className="text-[11px] font-semibold text-gray-600">
-        {t("chatflow_settings.compact_title")}
-      </span>
-      <p className="mt-0.5 text-[10px] text-gray-400">
+    <div>
+      <p className="text-[10px] text-gray-400">
         {t("chatflow_settings.compact_hint")}
       </p>
       <div className="mt-3 space-y-3">

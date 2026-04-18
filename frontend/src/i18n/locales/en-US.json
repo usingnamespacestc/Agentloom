@@ -186,6 +186,10 @@
   },
   "chatflow_settings": {
     "title": "ChatFlow settings",
+    "tab_models": "Models",
+    "tab_execution": "Execution",
+    "tab_compact": "Compaction",
+    "tab_tools": "Tools",
     "default_model": "Default model",
     "default_model_hint": "Used for every LLM call in this chatflow unless a node overrides it.",
     "default_judge_model": "Judge model",
