@@ -194,6 +194,36 @@ export const api = {
       method: "POST",
     }),
 
+  /** Tier 2 manual compact. ``nodeId`` is the parent the compact
+   * should hang off; the engine walks the chain up-to-and-including
+   * that node and produces a new compact ChatNode as its child. */
+  compactChain: (
+    chatflowId: string,
+    nodeId: string,
+    body: {
+      compact_instruction?: string | null;
+      must_keep?: string;
+      must_drop?: string;
+      preserve_recent_turns?: number | null;
+      target_tokens?: number | null;
+      model?: ProviderModelRef | null;
+    },
+  ) =>
+    request<{ node_id: string; status: string }>(
+      `/api/chatflows/${chatflowId}/nodes/${nodeId}/compact`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          compact_instruction: body.compact_instruction ?? null,
+          must_keep: body.must_keep ?? "",
+          must_drop: body.must_drop ?? "",
+          preserve_recent_turns: body.preserve_recent_turns ?? null,
+          target_tokens: body.target_tokens ?? null,
+          model: sanitizeRef(body.model ?? null),
+        }),
+      },
+    ),
+
   patchPositions: (chatflowId: string, positions: { id: string; x: number; y: number }[]) =>
     request<{ ok: boolean }>(`/api/chatflows/${chatflowId}/positions`, {
       method: "PATCH",

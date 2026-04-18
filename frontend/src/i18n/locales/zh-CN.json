@@ -139,6 +139,25 @@
     "thinking": "思考过程",
     "queue_remove": "从队列中移除"
   },
+  "compact_dialog": {
+    "button_label": "压缩",
+    "button_title": "将选中节点及之前的对话链压缩为一个 compact ChatNode",
+    "title": "压缩对话",
+    "hint": "将当前选中节点及之前的完整对话链汇总成一个 compact ChatNode 作为它的子节点。从 compact 节点向下派生的后续轮次看到的是「摘要 + 保留的近期消息」，而不是完整历史。原始内容不会被删除——任何时候选中上游节点都能看到未压缩的历史。",
+    "instruction": "压缩说明（可选）",
+    "instruction_placeholder": "例：保留最终的数据结构决策及其推理过程",
+    "instruction_hint": "传给 compact worker 的自然语言提示。",
+    "must_keep": "必须保留（可选）",
+    "must_drop": "必须舍弃（可选）",
+    "preserve_turns": "保留最近消息数",
+    "preserve_turns_hint": "下游原样保留的最近消息条数。默认沿用 ChatFlow 设置。",
+    "target_tokens": "目标 token 数",
+    "target_tokens_placeholder": "自动",
+    "target_tokens_hint": "摘要体积的手动上限。",
+    "model": "压缩 worker 模型",
+    "model_inherit": "（继承 ChatFlow 默认）",
+    "submit": "开始压缩"
+  },
   "settings": {
     "title": "全局设置",
     "tab_canvas": "画布",

@@ -209,6 +209,27 @@ class PatchPositionsRequest(BaseModel):
     positions: list[NodePosition]
 
 
+class CompactChainRequest(BaseModel):
+    """Body for POST /chatflows/{id}/nodes/{node_id}/compact.
+
+    The node_id in the path is the parent the compact should hang off
+    of — the engine walks the chain up-to-and-including that node and
+    produces a new compact ChatNode as its child.
+    """
+
+    compact_instruction: str | None = None
+    must_keep: str = ""
+    must_drop: str = ""
+    preserve_recent_turns: int | None = None
+    target_tokens: int | None = None
+    model: ProviderModelRef | None = None
+
+
+class CompactChainResponse(BaseModel):
+    node_id: str
+    status: str
+
+
 # ---------------------------------------------------------------- routes
 
 
@@ -728,6 +749,59 @@ async def cancel_running_node(
     await repo.save(chat)
     await session.commit()
     return {"ok": True}
+
+
+@router.post(
+    "/{chatflow_id}/nodes/{node_id}/compact",
+    response_model=CompactChainResponse,
+)
+async def compact_chain(
+    chatflow_id: str,
+    node_id: str,
+    body: CompactChainRequest,
+    request: Request,
+    session_maker: async_sessionmaker[AsyncSession] = Depends(get_session_scope),
+) -> CompactChainResponse:
+    """Run Tier 2 compaction on the chain up to ``node_id``.
+
+    Session handling mirrors ``submit_turn``: DB is released while the
+    compact worker runs so long summarization calls don't hold a
+    connection open.
+    """
+    engine = _get_engine(request)
+
+    async with session_maker() as session:
+        repo = _repo(session)
+        chat = await _attached_chatflow(engine, repo, chatflow_id)
+        if node_id not in chat.nodes:
+            raise HTTPException(
+                404, f"node {node_id} not in chatflow {chatflow_id}"
+            )
+
+    try:
+        compact_node = await engine.compact_chain(
+            chat.id,
+            node_id,
+            compact_instruction=body.compact_instruction,
+            must_keep=body.must_keep,
+            must_drop=body.must_drop,
+            preserve_recent_turns=body.preserve_recent_turns,
+            target_tokens=body.target_tokens,
+            model=body.model,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+    async with session_maker() as session:
+        await _repo(session).save(chat)
+        await session.commit()
+
+    return CompactChainResponse(
+        node_id=compact_node.id,
+        status=compact_node.status.value,
+    )
 
 
 @router.get("/{chatflow_id}/events")

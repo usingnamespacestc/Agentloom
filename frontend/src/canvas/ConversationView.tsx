@@ -39,6 +39,7 @@ import {
 import { usePreferencesStore, type ComposerModelMap } from "@/store/preferencesStore";
 import { api } from "@/lib/api";
 import type { ProviderSummary } from "@/lib/api";
+import { CompactConfirmDialog } from "@/components/CompactConfirmDialog";
 import type {
   ChatFlow,
   ChatFlowNode,
@@ -149,6 +150,8 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
   const composerModels = usePreferencesStore((s) => s.composerModels);
   const [inputText, setInputText] = useState("");
   const [sending, setSending] = useState(false);
+  const [compactDialogOpen, setCompactDialogOpen] = useState(false);
+  const [compactRunning, setCompactRunning] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
 
   const { path, forks } = useMemo(() => {
@@ -233,12 +236,53 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
     return <EmptyBody testid="conversation-empty">{t("chatflow.no_selection")}</EmptyBody>;
   }
 
+  const handleCompactClick = async () => {
+    if (!leafNode || !chatflow || compactRunning) return;
+    // If confirmation is required (default), open the dialog so the
+    // user can fill in instruction/must-keep/must-drop. Otherwise run
+    // compact with whatever the ChatFlow settings already say.
+    if (chatflow.compact_require_confirmation ?? true) {
+      setCompactDialogOpen(true);
+      return;
+    }
+    setCompactRunning(true);
+    try {
+      await api.compactChain(chatflow.id, leafNode.id, {});
+    } finally {
+      setCompactRunning(false);
+    }
+  };
+  // Chains need at least 2 turns before compacting makes sense.
+  const canCompact = !!leafNode && path.length >= 2;
+
   return (
     <>
       <header className="flex items-center justify-between border-b border-gray-100 px-4 py-2">
         <div className="text-sm font-semibold text-gray-800">{t("conversation.panel_title")}</div>
-        <div className="text-[10px] text-gray-400">{path.length}</div>
+        <div className="flex items-center gap-2">
+          {canCompact && (
+            <button
+              type="button"
+              data-testid="compact-button"
+              onClick={() => void handleCompactClick()}
+              disabled={compactRunning}
+              className="rounded border border-teal-300 bg-teal-50 px-2 py-0.5 text-[10px] text-teal-700 hover:bg-teal-100 disabled:opacity-50"
+              title={t("compact_dialog.button_title")}
+            >
+              {compactRunning ? "..." : t("compact_dialog.button_label")}
+            </button>
+          )}
+          <div className="text-[10px] text-gray-400">{path.length}</div>
+        </div>
       </header>
+      {leafNode && (
+        <CompactConfirmDialog
+          open={compactDialogOpen}
+          onClose={() => setCompactDialogOpen(false)}
+          chatflow={chatflow}
+          parentNode={leafNode}
+        />
+      )}
 
       <div
         ref={bodyRef}

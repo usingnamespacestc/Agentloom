@@ -139,6 +139,25 @@
     "thinking": "Thinking",
     "queue_remove": "Remove from queue"
   },
+  "compact_dialog": {
+    "button_label": "Compact",
+    "button_title": "Summarize the chain up to this node into a new compact ChatNode",
+    "title": "Compact conversation",
+    "hint": "Walks the chain up to the currently selected node and produces a new compact ChatNode as its child. Downstream turns forked from the compact see the summary + preserved recent turns instead of the full history. Nothing is deleted — you can always pick an up-chain node to see the raw history.",
+    "instruction": "Compact instruction (optional)",
+    "instruction_placeholder": "e.g. Keep the final schema decisions and the reasoning behind them",
+    "instruction_hint": "Natural-language guidance the summarizer passes through to the compact worker.",
+    "must_keep": "Must keep (optional)",
+    "must_drop": "Must drop (optional)",
+    "preserve_turns": "Preserve recent turns",
+    "preserve_turns_hint": "Trailing messages kept verbatim. Defaults to the ChatFlow setting.",
+    "target_tokens": "Target tokens",
+    "target_tokens_placeholder": "auto",
+    "target_tokens_hint": "Optional override of the summary's target size in tokens.",
+    "model": "Compact worker model",
+    "model_inherit": "(inherit ChatFlow default)",
+    "submit": "Compact"
+  },
   "settings": {
     "title": "Global settings",
     "tab_canvas": "Canvas",
