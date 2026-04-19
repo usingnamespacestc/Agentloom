@@ -56,6 +56,8 @@ from agentloom.engine.recursive_planner_parser import (
 from agentloom import tenancy_runtime
 from agentloom.engine.workflow_engine import (
     DEFAULT_COMPACT_TARGET_PCT,
+    DEFAULT_COMPACT_TRIGGER_PCT,
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
     DEFAULT_PRESERVE_RECENT_TURNS,
     PostNodeHook,
     ProviderCall,
@@ -812,6 +814,74 @@ class ChatFlowEngine:
         await self._save(runtime)
         return compact_node
 
+    #: Fixed overhead (system prompt + template scaffolding around the
+    #: two branch summaries) reserved when budgeting the merge prompt.
+    #: Rough estimate — the merge.yaml system+formatting preamble is
+    #: ~200 chars; we leave extra slack for the model's own response
+    #: headroom. Tweak if the template grows materially.
+    _MERGE_PROMPT_OVERHEAD_TOKENS = 800
+
+    async def _precompact_branch_for_merge(
+        self,
+        wire: list[WireMessage],
+        *,
+        target_tokens: int,
+        model: ProviderModelRef | None,
+        disabled_tool_names: frozenset[str],
+    ) -> str:
+        """Summarize one branch's wire chain via the ``compact`` template.
+
+        Used by :meth:`merge_chain` when a branch would not fit the
+        merge model's per-branch budget. Runs the compact builtin as a
+        throwaway WorkFlow — not attached to any ChatNode and not
+        persisted — and returns just the summary string the merge
+        prompt needs. The compact WorkFlow's own Tier 1 auto-compact is
+        disabled so we never recurse into another pre-compact.
+
+        Raises ``RuntimeError`` if the compact worker returns an empty
+        reply; the caller should surface this as a merge failure rather
+        than proceed with a truncated input.
+        """
+        head_serialized = "\n".join(f"[{m.role}] {m.content}" for m in wire)
+        templated = instantiate_fixture(
+            self._fixture_plans["compact"],
+            {
+                "messages_to_compact": head_serialized,
+                "target_tokens": target_tokens,
+                "must_keep": "",
+                "must_drop": "",
+                "compact_instruction": (
+                    "Summarize this conversation branch so it can be "
+                    "merged with a parallel branch. Preserve decisions, "
+                    "open questions, and concrete facts; drop small talk."
+                ),
+            },
+            includes=self._fixture_includes,
+        )
+        inner = _single_node(templated)
+        if model is not None:
+            inner.model_override = model
+            inner.resolved_model = model
+
+        await self._inner.execute(
+            templated,
+            chatflow_tool_loop_budget=1,
+            chatflow_auto_mode_revise_budget=0,
+            chatflow_min_ground_ratio=None,
+            chatflow_ground_ratio_grace_nodes=20,
+            # No Tier 1 recursion — we're already the pre-compact step.
+            chatflow_compact_trigger_pct=None,
+            disabled_tool_names=disabled_tool_names,
+        )
+        summary = (
+            (inner.output_message.content or "").strip()
+            if inner.output_message
+            else ""
+        )
+        if not summary:
+            raise RuntimeError("pre-compact worker returned empty summary")
+        return summary
+
     async def merge_chain(
         self,
         chatflow_id: str,
@@ -831,6 +901,15 @@ class ChatFlowEngine:
         at a compact node — both branches' history is encoded in the
         merged reply.
 
+        Context-overflow handling: if either branch's wire chain would
+        exceed the per-branch budget (half of the merge model's context
+        window times :data:`DEFAULT_COMPACT_TRIGGER_PCT`, minus a fixed
+        :data:`_MERGE_PROMPT_OVERHEAD_TOKENS`), that branch is first
+        summarized via :meth:`_precompact_branch_for_merge` and the
+        summary string is fed into the merge prompt instead of the raw
+        chain. Recorded on :class:`MergeSnapshot` via
+        ``left_precompacted`` / ``right_precompacted``.
+
         MVP: exactly two source nodes; left/right ordering is the order
         the user picked them in the canvas.
         """
@@ -849,8 +928,91 @@ class ChatFlowEngine:
             if not left_ctx and not right_ctx:
                 raise ValueError("both branches are empty — nothing to merge")
 
+            # Snapshot everything we need before releasing the lock for
+            # the (potentially slow) pre-compact llm_calls. The chatflow
+            # could technically mutate under us while pre-compact runs,
+            # but the wire snapshots are immutable and the source_ids
+            # only need to still exist when we re-enter the lock.
+            merge_model_ref = (
+                model or chatflow.compact_model or chatflow.default_model
+            )
+            trigger_pct = (
+                chatflow.compact_trigger_pct
+                if chatflow.compact_trigger_pct is not None
+                else DEFAULT_COMPACT_TRIGGER_PCT
+            )
+            ws_settings = tenancy_runtime.get_settings(
+                self._inner._tool_ctx.workspace_id
+            )
+            effective_disabled = frozenset(
+                chatflow.disabled_tool_names
+            ) | frozenset(ws_settings.globally_disabled())
+
+        # --- Outside lock: budget + maybe pre-compact each branch. ---
+        from agentloom.engine.provider_context_cache import (
+            lookup as _ctx_lookup,
+        )
+
+        window = _ctx_lookup(merge_model_ref) or DEFAULT_CONTEXT_WINDOW_TOKENS
+        total_budget = int(window * trigger_pct)
+        per_branch_budget = max(
+            512,
+            (total_budget - self._MERGE_PROMPT_OVERHEAD_TOKENS) // 2,
+        )
+
+        left_tokens = _estimate_tokens_from_wire(left_ctx)
+        right_tokens = _estimate_tokens_from_wire(right_ctx)
+        original_tokens = left_tokens + right_tokens
+
+        left_precompacted = False
+        right_precompacted = False
+
+        if left_tokens > per_branch_budget:
+            log.info(
+                "merge pre-compact: left branch %d tokens > %d budget",
+                left_tokens,
+                per_branch_budget,
+            )
+            left_summary = await self._precompact_branch_for_merge(
+                left_ctx,
+                target_tokens=max(
+                    512,
+                    int(per_branch_budget * DEFAULT_COMPACT_TARGET_PCT),
+                ),
+                model=merge_model_ref,
+                disabled_tool_names=effective_disabled,
+            )
+            left_precompacted = True
+        else:
             left_summary = _serialize_wire_chain(left_ctx)
+
+        if right_tokens > per_branch_budget:
+            log.info(
+                "merge pre-compact: right branch %d tokens > %d budget",
+                right_tokens,
+                per_branch_budget,
+            )
+            right_summary = await self._precompact_branch_for_merge(
+                right_ctx,
+                target_tokens=max(
+                    512,
+                    int(per_branch_budget * DEFAULT_COMPACT_TARGET_PCT),
+                ),
+                model=merge_model_ref,
+                disabled_tool_names=effective_disabled,
+            )
+            right_precompacted = True
+        else:
             right_summary = _serialize_wire_chain(right_ctx)
+
+        # --- Back under lock: build the merge ChatNode. ---
+        async with runtime.lock:
+            chatflow = runtime.chatflow
+            if left_id not in chatflow.nodes or right_id not in chatflow.nodes:
+                raise KeyError(
+                    f"source node was removed during pre-compact "
+                    f"(left={left_id!r}, right={right_id!r})"
+                )
 
             templated = instantiate_fixture(
                 self._fixture_plans["merge"],
@@ -864,11 +1026,6 @@ class ChatFlowEngine:
             if model is not None:
                 inner_node.model_override = model
                 inner_node.resolved_model = model
-
-            original_tokens = (
-                _estimate_tokens_from_wire(left_ctx)
-                + _estimate_tokens_from_wire(right_ctx)
-            )
 
             merge_node = ChatFlowNode(
                 parent_ids=[left_id, right_id],
@@ -886,6 +1043,8 @@ class ChatFlowEngine:
                     merge_instruction=merge_instruction,
                     original_tokens=original_tokens,
                     merged_tokens=0,
+                    left_precompacted=left_precompacted,
+                    right_precompacted=right_precompacted,
                 ),
             )
             chatflow.add_node(merge_node)
@@ -936,8 +1095,12 @@ class ChatFlowEngine:
                 chatflow_auto_mode_revise_budget=chatflow.auto_mode_revise_budget,
                 chatflow_min_ground_ratio=None,  # single-shot merger
                 chatflow_ground_ratio_grace_nodes=20,
-                # Tier 1 auto-compact is off for the merge worker — it's
-                # a single llm_call by definition, nothing to compact.
+                # Tier 1 auto-compact is off for the merge worker — the
+                # pre-compact step above (_precompact_branch_for_merge)
+                # already guaranteed each branch fits its budget. A
+                # second Tier 1 trigger here would be redundant and
+                # would fire on a prompt that isn't shaped like a
+                # conversation (it's templated as two big text blobs).
                 chatflow_compact_trigger_pct=None,
                 disabled_tool_names=effective_disabled,
             )

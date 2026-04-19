@@ -58,6 +58,8 @@ const REQUIRED_KEYS = [
   "conversation.merge_instruction_label",
   "conversation.merge_sources_label",
   "conversation.merge_stats",
+  "conversation.merge_precompact_badge",
+  "conversation.merge_precompact_hint",
 ];
 
 describe("i18n", () => {

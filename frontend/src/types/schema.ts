@@ -286,6 +286,12 @@ export interface MergeSnapshot {
   merge_instruction: string | null;
   original_tokens: number;
   merged_tokens: number;
+  /** True if that branch overflowed the merge model's per-branch budget
+   * and was summarized via the ``compact`` builtin before being fed into
+   * the merge prompt. Surfaced on the MergeMessageBubble so the user
+   * knows the merge saw a compacted view of that side, not the raw wire. */
+  left_precompacted?: boolean;
+  right_precompacted?: boolean;
 }
 
 export interface ChatFlowNode extends NodeBaseFields {

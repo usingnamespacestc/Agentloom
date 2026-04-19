@@ -156,7 +156,9 @@
     "merge_summary_pending": "(merge worker still running…)",
     "merge_instruction_label": "Merge instruction",
     "merge_sources_label": "Sources",
-    "merge_stats": "{{original}} → {{merged}} tokens · {{sources}} sources"
+    "merge_stats": "{{original}} → {{merged}} tokens · {{sources}} sources",
+    "merge_precompact_badge": "pre-compact",
+    "merge_precompact_hint": "This branch was too large to fit the merge model's context window, so it was summarized via the compact template before being fed into the merge prompt."
   },
   "compact_dialog": {
     "button_label": "Compact",

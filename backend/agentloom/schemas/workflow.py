@@ -97,9 +97,18 @@ class MergeSnapshot(BaseModel):
     #: Optional free-text hint passed through to the merge worker.
     merge_instruction: str | None = None
     #: Char-based token estimate of the pre-merge inputs (left + right contexts).
+    #: Captures the true branch sizes BEFORE any pre-compact step — so
+    #: ``original_tokens >> merged_tokens`` is the real compression factor.
     original_tokens: int = 0
     #: Char-based token estimate of the merged reply.
     merged_tokens: int = 0
+    #: Per-branch flags: set to ``True`` when that branch was too large
+    #: to fit the merge model's context window and had to be summarized
+    #: via the ``compact`` builtin template before being fed into the
+    #: merge prompt. The MergeMessageBubble surfaces this so the user
+    #: knows the merge saw a compacted view, not the raw branch.
+    left_precompacted: bool = False
+    right_precompacted: bool = False
 
 
 class WorkFlowNode(NodeBase):

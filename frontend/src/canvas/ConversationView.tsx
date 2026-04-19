@@ -952,7 +952,25 @@ function MergeMessageBubble({
           <span className="font-medium">
             {t("conversation.merge_sources_label")}:
           </span>{" "}
-          {snap.source_ids.map((id) => id.slice(0, 8)).join(" + ")}
+          {snap.source_ids.map((id, i) => {
+            const precompacted =
+              (i === 0 && snap.left_precompacted) ||
+              (i === 1 && snap.right_precompacted);
+            return (
+              <span key={id}>
+                {i > 0 && " + "}
+                {id.slice(0, 8)}
+                {precompacted && (
+                  <span
+                    title={t("conversation.merge_precompact_hint")}
+                    className="ml-1 inline-flex items-center rounded bg-violet-200/70 px-1 text-[9px] font-semibold text-violet-800"
+                  >
+                    {t("conversation.merge_precompact_badge")}
+                  </span>
+                )}
+              </span>
+            );
+          })}
         </div>
         {instr && (
           <div className="mb-1 text-[11px] text-violet-700/80">
