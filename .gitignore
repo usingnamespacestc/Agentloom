@@ -207,8 +207,10 @@ marimo/_lsp/
 __marimo__/
 
 # Local-only design docs and test code (not committed)
-/docs/
+/docs/*
 /tests/
+# Exception: devlog is shipped with the repo (linked from README)
+!/docs/devlog.md
 
 # Env / secrets
 .env

@@ -1259,3 +1259,148 @@ Descendants 读 context 时，遇到 compact ancestor 就从 `summary + preserve
 
 Tier 0 作为独立后续，单独改 ToolRegistry 返回值截断。
 
+## 2026-04-18（续）— Compaction Tier 1 + Tier 2 落地
+
+按前一节蓝图分六步合入。落地顺序与代码位置：
+
+1. **Schema**（`schemas/common.py` + `schemas/workflow.py`）
+   - `StepKind.COMPACT = "compact"` 新增枚举值
+   - `CompactSnapshot` BaseModel，字段对齐设计稿
+   - `ChatFlowNode.compact_snapshot: CompactSnapshot | None`（Tier 2 标记位）
+
+2. **compact.yaml 模板**（`templates/fixtures/compact.yaml`，后迁入 `en-US/zh-CN/`）
+   - 单 `llm_call` worker，参数签名对应 `_needs_compact` 的上下文字段
+   - dogfood 理念：引擎只负责"何时触发"，"如何压缩"交给模板
+
+3. **Tier 1（WorkFlow 层）**（`engine/workflow_engine.py`）
+   - `_needs_compact()`：字符级估算 `sum(len(m.content))/4`，阈值由 `chatflow_compact_trigger_pct × context_window` 决定
+   - `_insert_compact_worknode()`：在当前 WorkNode 前插入 `COMPACT` 节点；原节点 parent_ids 指向 compact；状态回退 planned
+   - 通过 `_CompactRequested` 异常冒泡回 `execute()` 主循环 re-pick
+   - `_build_chat_context` 识别 compact 边界，遇到 compact ancestor 就用 `summary + preserved_messages` 替换更上游历史
+
+4. **Tier 2（ChatFlow 层）**（`engine/chatflow_engine.py` / `api/chatflows.py`）
+   - `ChatFlowEngine.compact_chain(chatflow_id, parent_id, preserve_recent_turns=..., compact_instruction=...)`
+   - 在 `parent_id` 下生成一个 compact ChatNode（user_message 可选=compact_instruction；agent_response=summary）
+   - REST：`POST /api/chatflows/{id}/nodes/{parent_id}/compact`
+   - 消息面板：`ConversationView.visiblePath` 扫描 path，找到最靠下的 compact ChatNode 并把可见范围截断到它为止（前置历史由 summary 承载）
+
+5. **设置面板**（`components/ChatFlowSettings.tsx` + `schemas/chatflow.py`）
+   - 新增 `compact_trigger_pct / compact_target_pct / compact_model / preserve_recent_turns / require_confirmation` 字段
+   - UI 双向绑定：输入框支持 `k / M` 后缀（`Accept k/M suffixes in compact target-tokens input`）
+   - 后端 Pydantic validator 保证 `compact_trigger_pct + compact_target_pct ≤ 1.0`（避免不收敛）
+
+6. **确认弹窗 + 手动触发**（`components/CompactChainDialog.tsx`）
+   - 右键菜单"Compact from here" + 对话框选项（compact_instruction, preserve_recent_turns）
+   - 触发后自动选中新生成的 compact ChatNode，方便用户核对摘要
+
+### 验证中发现的 3 条 bug（已修）
+
+- **Summary 级联增长**：`_build_compact_chatnode` 之前用带 preamble 的 `_build_chat_context`，第二次 compact 会把"[Prior conversation — summarized]" 当成真实消息再次压缩，summary 越写越长。修法：`_build_chat_context(..., include_summary_preamble=False)` 给 compact worker 用，summary 只在下游渲染时注入。
+- **无限 compact 循环**：聚合压缩率设太激进时（`trigger_pct=0.0001`），compact 节点刚生成立即又被下一个 turn 触发自己再 compact 自己。修法：`_spawn_turn_node` 检测 `parent_ids[0]` 已是 compact ChatNode 时跳过本轮 auto-compact（见 `project_agentloom_compact_loop_fuse.md`）。
+- **32K fallback 把真实 131K 模型误判为超限**：`context_window` 以前全走 fallback 32000。新增 `engine/provider_context_cache.py`，第一次见某个 `provider:model` 时从 provider metadata 读真实值；Ark 131072 tokens / Anthropic 200K / OpenAI 分档，都能正确识别。
+
+### Tier 1 + Tier 2 双轨触发
+
+最终在 ChatFlow 层也加了一个"chatnode_compact_trigger_pct"（默认 0.6），而非只靠 Tier 1：
+- Tier 1 作用在单个 WorkFlow 内部，但一条长对话的不同 ChatNode 可能都没超单次 llm_call 阈值，累计起来却早该压了
+- Tier 2 的 auto-compact 走 `_spawn_turn_node` → 插入 compact ChatNode → 用 PendingTurn 把用户消息转发到 compact 之后
+- 两档互补：WorkFlow 内部的中间产物由 Tier 1 兜底；用户视角的对话链由 Tier 2 兜底
+
+## 2026-04-19 — Fixture 语言切换 + node_context skill + execution_mode 枚举重命名
+
+### Fixture 语言切换
+
+用户希望模板能按 `WorkspaceSettings.language` 切换 zh-CN / en-US。改动：
+
+- `templates/fixtures/` → `templates/fixtures/en-US/` + `templates/fixtures/zh-CN/`
+- `builtin_id` 不再全局唯一，而是 `(lang, builtin_id)` 组合
+- `resolve_template(builtin_id, language=...)` 在 `templates/loader.py` 内做查找
+- 所有 12 个内置模板（plan / planner / planner_judge / judge_pre/during/post / worker / worker_judge / compact / title_gen / merge / _critique_base）翻译为 zh-CN 版本
+
+### `get_node_context` skill
+
+Judge 等下游节点有时需要拉上游 WorkNode 的完整数据，但当时没有"按需读取"的入口。修法：
+
+- `tools/node_context.py`：`get_node_context(node_id, [field])` 内置工具
+- `db/models/node_index.py` + migration `0010_node_index.py`：为 ChatNode/WorkNode 建立反向索引表，`ChatFlowRepository` 在写路径维护
+- `main.py` lifespan：应用启动时回填旧行（legacy chatflows 没有 node_index 条目）
+
+### execution_mode 枚举重命名
+
+旧值 `"deterministic"` / `"plan_first"` / `"free"` 改为 `"native_react"` / `"semi_auto"` / `"auto_plan"`（更贴近用户视角）。
+
+- migration `0011_execution_mode_rename.py`：扫所有 WorkflowRow / ChatFlowRow JSONB 列，in-place 改字符串值
+- 前端 `ExecutionModeSlider.tsx` 同步新枚举
+- E2E 验证：后端重启后 GET 确实返回新枚举（用户手工重启 uvicorn 确认）
+
+## 2026-04-19 夜 — Merge ChatNode 上线（MVP = 手动两节点合并）
+
+### 背景
+
+Compact 解决的是"同一条链太长了"。Merge 解决的是**两条 fork 出去的并行对话各自有价值，想把它们的结论汇合成一个继续往下走的起点**。典型用法：用户从同一节点 fork 两个分支尝试不同策略，双方都得出部分结论后希望后续基于"两者的合集"继续对话，而不是来回切分支。
+
+### 架构复用（和 Compact 90% 对齐）
+
+- `StepKind.MERGE`，`MergeSnapshot { source_ids, merge_instruction, original_tokens, merged_tokens }`
+- `ChatFlowNode.merge_snapshot` + Pydantic validator 保证与 `compact_snapshot` 互斥
+- `merge.yaml` 内置模板（单 llm_call，签名 `{left_summary, right_summary}`）
+- `ChatFlowEngine.merge_chain(chatflow_id, left_id, right_id, merge_instruction?, model?)` 镜像 `compact_chain`
+- REST `POST /api/chatflows/{id}/merge`
+
+### 与 Compact 的关键差异：Context 停止规则
+
+Compact 是**替换式**——`_build_chat_context` 找到最近的 compact ancestor，从它开始把上游替换成 `summary + preserved_messages`。
+Merge 是**硬停式**——merge ChatNode 的 `agent_response` 本身就是合成后的回复，上游已无需渲染：
+
+```python
+# _build_chat_context 内
+while current is not None:
+    chain.append(current)
+    node = chatflow.nodes[current]
+    if node.merge_snapshot is not None:
+        break  # 走到 merge 就停，merge 自己是最后一条
+    current = node.parent_ids[0] if node.parent_ids else None
+```
+
+`_build_tagged_chat_context_for_compact` 也加了同样的 break，避免下一轮 compact 读到 merge 以上的旧内容。
+
+### 交互设计：VSCode compare 式双步握手
+
+用户规格："先右键一个文件（在这里是节点）选择 select to merge，选中的第一个节点应该有 css 动画表明它被选中。再右键另一个节点 select to merge，然后开始执行操作。如果在两步中间进行了拖动页面之外的操作则视为取消 merge。"
+
+实现落点：
+
+- `chatflowStore.pendingMergeFirstId: NodeId | null`，三个 action：`beginPendingMerge` / `cancelPendingMerge` / `commitMergeWith`
+- `ChatFlowNodeCard` 根据 `isPendingMergeFirst` 叠一层 `ring-4 ring-violet-400 animate-pulse`（紫色脉动环）
+- `ChatFlowCanvas` 把 `cancelPendingMerge` 串到：
+  - 空白处点击 / 节点点击 / 节点拖动开始
+  - Escape 键
+  - 除了 "Merge with pending" / "Cancel pending merge" 之外的所有右键菜单项
+- 右键菜单根据 `mergeState ∈ { no-pending, first-pending-self, first-pending-other }` 动态展示不同项
+
+### ConversationView merge bubble
+
+紫色主题的消息气泡，显示：source_ids（截短 8 位）、merge_instruction、合成后的 assistant 回复、token stats。与 compact bubble 结构对齐，使用 `data-testid={conversation-node-{id}-merge}` 便于未来 E2E 抓取。
+
+### 测试
+
+`tests/backend/integration/test_chatflow_merge.py` 8 条：
+
+- 上下文停止规则（pre-merge 不可见；下游只看到合成回复）
+- 端到端 merge_chain（两个分支 → merge → 第三轮 turn 只看到 MERGED_REPLY_TAG）
+- 自合并拒绝（ValueError）
+- 未知节点 404
+- MergeSnapshot / CompactSnapshot 互斥 validator
+- REST round-trip（POST merge → GET chatflow 验证 merge_snapshot 完整）
+- 自合并路由返回 409
+- 未知节点路由返回 404
+
+全部 385 条后端测试 + 55 条前端测试通过。
+
+### 未做 / 后续
+
+- N 路合并（3+ 节点）：当前 MVP 限定两个，`source_ids: list` schema 已留好扩展空间
+- 合并预览：点击 pending 节点显示"如果和 X 合并会产生什么"的 diff 视图
+- Merge 触发自动 title_gen：和 compact 一样，让 title 能体现 merge 后的主题
+
+
