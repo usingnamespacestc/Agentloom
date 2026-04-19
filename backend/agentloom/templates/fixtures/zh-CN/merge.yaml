@@ -1,0 +1,38 @@
+builtin_id: merge
+name: "Merge"
+description: "把两条 ChatNode 子树合并为同一条后续回复。"
+params_schema:
+  left_summary:
+    type: string
+    required: true
+  right_summary:
+    type: string
+    required: true
+plan:
+  description:
+    text: "合并两条 ChatFlow 分支"
+    provenance: pure_agent
+  execution_mode: native_react
+  nodes:
+    - id: "merge_root"
+      parent_ids: []
+      step_kind: llm_call
+      description:
+        text: "产出一条同时从两条分支连贯延续的 user_message。"
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            你正在把两条对话分支合并为一条。产出一条单独的 assistant
+            消息，让它把两条讨论线索协调起来，同时不丢失任何一侧的
+            关键事实。若两条分支有分歧，请明确点出分歧。
+        - role: user
+          content: |
+            左分支摘要
+            ----------
+            {{ left_summary }}
+
+            右分支摘要
+            ----------
+            {{ right_summary }}
+  root_ids: ["merge_root"]

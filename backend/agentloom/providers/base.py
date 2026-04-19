@@ -60,6 +60,7 @@ class ProviderAdapter(ABC):
         on_token: TokenCallback | None = None,
         json_mode: str | None = None,
         json_schema: dict[str, Any] | None = None,
+        forced_tool_name: str | None = None,
     ) -> ChatResponse:
         """Call the chat completions endpoint and return a typed response.
 
@@ -73,6 +74,15 @@ class ProviderAdapter(ABC):
         ``"object"`` (free-form JSON object), or ``"none"`` / ``None``
         (prompt-only). The adapter translates this to whatever its wire
         protocol expects (OpenAI-compat: ``response_format``).
+
+        ``forced_tool_name`` pins the model to a specific tool via the
+        provider's tool_choice mechanism. When set, the model MUST call
+        that tool rather than reply in free text. Used by the judge path
+        to guarantee the verdict tool is invoked instead of being
+        silently skipped in favor of an unstructured content reply.
+        Adapters translate this to the provider-specific payload shape:
+        OpenAI-compat uses ``tool_choice={"type":"function","function":{"name":...}}``;
+        Anthropic uses ``tool_choice={"type":"tool","name":...}``.
         """
 
     @abstractmethod

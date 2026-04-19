@@ -1,0 +1,109 @@
+builtin_id: compact
+name: "Compact"
+description: >
+  上下文压缩 worker。把一段消息序列改写成紧凑的摘要，让下游
+  节点无需携带全部原始对话就能保留往来要旨。由引擎触发
+  （WorkFlow Tier 1，llm_call 之前）或由用户显式触发（ChatFlow
+  Tier 2）。*要保留的最近若干轮*在本 plan 运行**之前**就被切下来了
+  ——引擎会把它们与摘要一起打包进 ``CompactSnapshot``。本 plan
+  只负责产出摘要散文。
+params_schema:
+  messages_to_compact:
+    type: string
+    required: true
+    description: >
+      需要摘要的消息尾段（较早的那一段——最近要保留的若干轮按
+      原样保存，不会出现在这里）。每条消息渲染为
+      ``[node:<id> | role] content``，其中 ``<id>`` 是该消息所在
+      的 ChatNode / WorkNode id，供摘要引用。
+  target_tokens:
+    type: int
+    required: true
+    description: >
+      摘要应符合的粗略 token 预算。模型应瞄准*低于*这个数，而不是
+      贴着上限写。
+  must_keep:
+    type: string
+    required: false
+    description: >
+      用户想逐字保留的自由文本（姓名、id、决策、约束）。若用户
+      未指定则为空。
+  must_drop:
+    type: string
+    required: false
+    description: >
+      用户认为可以放心丢弃的自由文本。否则为空。
+  compact_instruction:
+    type: string
+    required: false
+    description: >
+      用户对如何压缩的自由指示——重点区域、语气、风格。引擎静默
+      触发时为空。
+plan:
+  description:
+    text: "把一段消息序列压缩成摘要。"
+    provenance: pure_agent
+  execution_mode: native_react
+  nodes:
+    - id: "compact_worker"
+      parent_ids: []
+      step_kind: llm_call
+      description:
+        text: "为给定的消息产出紧凑摘要。"
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            你是上下文压缩 worker。任务：把一大段先前对话改写成**尽
+            量简略**的摘要，让下游 LLM 调用只读摘要就能继续工作；
+            需要原文细节时可以通过 ``get_node_context`` 技能按节点
+            id 回查。
+
+            输出格式（必须严格遵守）：
+
+            1. 第一行固定写一句提示，告知读者如何按需取回原始内
+               容，例如：
+                 如需完整内容，可调用 get_node_context(node_id=<id>)
+                 查看对应节点。
+
+            2. 其后每一段只讲一件事，**尽量短**——一句到两句话，
+               去掉闲笔、客套、反复重述、不再影响后续判断的细节。
+               每段末尾用半角括号列出该段内容来源的节点 id，形如
+               ``(节点: n_abc, n_def)``。若该段覆盖多条消息，就列
+               出所有相关节点 id；若只来自一个节点，就列一个。
+
+            硬性规则：
+              - 专有名词、id、文件路径、数字、日期、明确作出的决策，
+                以及后续轮次可能引用的工具调用结果 / 错误消息，要原
+                样保留——但尽量只保留*结论*与*关键事实*，过程性描
+                述可以省掉，让读者自己按节点 id 回查。
+              - 用中立的第三人称书写："用户提出了 X。助手回答 Y。"
+                ——不要用第一人称。
+              - 若用户提供了 ``must_keep``，逐字嵌入。若出现
+                ``must_drop`` 的内容，省略。
+              - 尊重 token 预算：瞄准*低于* ``target_tokens``；绝对
+                不能超。越能省越好——细节可以外链到节点 id。
+              - 每段后面的节点 id 必须真实出现在原文 ``[node:<id>]``
+                前缀里；不要编造。找不到准确来源时用 ``(节点: ?)``。
+              - 只输出摘要正文（首行提示 + 若干段）——不要再额外加
+                开场白、结语、JSON、markdown 代码围栏。
+        - role: user
+          content: |
+            目标 tokens：{{ target_tokens }}
+
+            必保（逐字）：
+            {{ must_keep }}
+
+            必删（省略）：
+            {{ must_drop }}
+
+            用户指示：
+            {{ compact_instruction }}
+
+            待压缩消息（每行以 ``[node:<id> | role]`` 开头）：
+            ---
+            {{ messages_to_compact }}
+            ---
+
+            现在写出摘要。
+  root_ids: ["compact_worker"]

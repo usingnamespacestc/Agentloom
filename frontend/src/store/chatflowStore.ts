@@ -89,6 +89,15 @@ export interface ChatFlowStoreState {
   branchMemory: Record<NodeId, NodeId>;
 
   /**
+   * First node picked for a VSCode-compare-style merge. While set, the
+   * canvas pulses that node and the context menu on every other node
+   * offers "Merge with {pendingMergeFirstId}". Any non-pan interaction
+   * (node click, drag, another menu item, Escape, pane click) clears
+   * this back to null. Finalizing the merge also clears it.
+   */
+  pendingMergeFirstId: NodeId | null;
+
+  /**
    * Stack of drill-in frames (§3.4.3). Empty = chatflow view; first
    * frame is always a ChatNode entry; later frames are nested
    * sub-WorkFlows reached through ``sub_agent_delegation`` WorkNodes.
@@ -156,6 +165,8 @@ export interface ChatFlowStoreState {
     compact_preserve_recent_turns?: number;
     compact_model?: ProviderModelRef | null;
     compact_require_confirmation?: boolean;
+    chatnode_compact_trigger_pct?: number | null;
+    chatnode_compact_target_pct?: number;
   }) => Promise<void>;
 
   /** Which edge is currently hovered on the ChatFlow canvas — drives
@@ -242,6 +253,15 @@ export interface ChatFlowStoreState {
   /** Re-fetch the current chatflow from the server. */
   refreshChatFlow: () => Promise<void>;
 
+  /** Stash ``nodeId`` as the first of two source nodes in a pending
+   * merge. No-op / toggle-off when called with the same id twice. */
+  beginPendingMerge: (nodeId: NodeId) => void;
+  /** Clear any pending-merge state. Safe to call when nothing is pending. */
+  cancelPendingMerge: () => void;
+  /** Fire the merge API for (pendingMergeFirstId, secondId) and clear
+   * the pending state on success. Throws if no pending first node. */
+  commitMergeWith: (secondId: NodeId) => Promise<void>;
+
   /** Apply a single SSE event to the current chatflow payload. */
   applyEvent: (event: WorkFlowEvent) => void;
   /** Override the SSE factory (for tests). */
@@ -283,6 +303,9 @@ const INITIAL: Omit<
   | "retryNode"
   | "cancelNode"
   | "refreshChatFlow"
+  | "beginPendingMerge"
+  | "cancelPendingMerge"
+  | "commitMergeWith"
   | "applyEvent"
   | "setSSEFactory"
   | "reset"
@@ -297,6 +320,7 @@ const INITIAL: Omit<
   _optimisticIds: new Set<string>(),
   selectedNodeId: null,
   branchMemory: {},
+  pendingMergeFirstId: null,
   drillStack: [],
   workflowSelectedNodeId: null,
   workflowBranchMemory: {},
@@ -391,6 +415,45 @@ function countChildren(
 
 type SetFn = (partial: Partial<ChatFlowStoreState>) => void;
 type GetFn = () => ChatFlowStoreState;
+
+let _refreshInFlight: Promise<void> | null = null;
+let _refreshRequested = false;
+
+async function _doRefreshOnce(get: GetFn, set: SetFn): Promise<void> {
+  const chat = get().chatflow;
+  if (!chat) return;
+  try {
+    const fresh = await api.getChatFlow(chat.id);
+    if (get().chatflow?.id !== fresh.id) return;
+    const selected = get().selectedNodeId;
+    set({ chatflow: fresh, _optimisticIds: new Set() });
+    if (selected && !fresh.nodes[selected]) {
+      const leaf = autoLeafForChatFlow(fresh);
+      if (leaf) get().selectNode(leaf);
+    }
+  } catch {
+    // Refresh failed — stale state is acceptable, next SSE event will retry.
+  }
+}
+
+function runCoalescedRefresh(get: GetFn, set: SetFn): Promise<void> {
+  if (_refreshInFlight) {
+    _refreshRequested = true;
+    return _refreshInFlight;
+  }
+  const run = async () => {
+    try {
+      do {
+        _refreshRequested = false;
+        await _doRefreshOnce(get, set);
+      } while (_refreshRequested);
+    } finally {
+      _refreshInFlight = null;
+    }
+  };
+  _refreshInFlight = run();
+  return _refreshInFlight;
+}
 
 function removeOptimistic(get: GetFn, set: SetFn, optId: string): void {
   const latest = get().chatflow;
@@ -526,6 +589,15 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
       && patch.compact_require_confirmation !== undefined
     ) {
       updated.compact_require_confirmation = patch.compact_require_confirmation;
+    }
+    if ("chatnode_compact_trigger_pct" in patch) {
+      updated.chatnode_compact_trigger_pct = patch.chatnode_compact_trigger_pct ?? null;
+    }
+    if (
+      "chatnode_compact_target_pct" in patch
+      && patch.chatnode_compact_target_pct !== undefined
+    ) {
+      updated.chatnode_compact_target_pct = patch.chatnode_compact_target_pct;
     }
     set({ chatflow: updated as typeof cf });
     // Refresh sidebar list too (title may have changed).
@@ -776,6 +848,8 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
       workflow: { id: `wf-${optimisticId}`, root_ids: [], nodes: {} },
       pending_queue: [],
       compact_snapshot: null,
+      entry_prompt_tokens: null,
+      output_response_tokens: null,
     };
     const nextOptIds = new Set(get()._optimisticIds);
     nextOptIds.add(optimisticId);
@@ -871,26 +945,53 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     await get().refreshChatFlow();
   },
 
-  async refreshChatFlow() {
-    const chat = get().chatflow;
-    if (!chat) return;
-    try {
-      const fresh = await api.getChatFlow(chat.id);
-      const selected = get().selectedNodeId;
-
-      // Clear all optimistic nodes — the server state is now
-      // authoritative. Real nodes that replaced them are in ``fresh``.
-      set({ chatflow: fresh, _optimisticIds: new Set() });
-
-      // If the selected node no longer exists (optimistic ID or
-      // deleted node), jump to the latest real leaf.
-      if (selected && !fresh.nodes[selected]) {
-        const leaf = autoLeafForChatFlow(fresh);
-        if (leaf) get().selectNode(leaf);
-      }
-    } catch {
-      // Refresh failed — stale state is acceptable, SSE will reconcile.
+  beginPendingMerge(nodeId) {
+    const current = get().pendingMergeFirstId;
+    if (current === nodeId) {
+      // Re-picking the same node cancels — matches VSCode compare where
+      // the second right-click of the same file un-selects it.
+      set({ pendingMergeFirstId: null });
+      return;
     }
+    set({ pendingMergeFirstId: nodeId });
+  },
+
+  cancelPendingMerge() {
+    if (get().pendingMergeFirstId !== null) {
+      set({ pendingMergeFirstId: null });
+    }
+  },
+
+  async commitMergeWith(secondId) {
+    const chat = get().chatflow;
+    const firstId = get().pendingMergeFirstId;
+    if (!chat) throw new Error("no chatflow loaded");
+    if (firstId === null) throw new Error("no pending first merge node");
+    if (firstId === secondId) throw new Error("cannot merge a node with itself");
+    // Optimistic cancel first — whatever the server returns, the
+    // pending handshake is done and should not leak to the next
+    // interaction.
+    set({ pendingMergeFirstId: null });
+    const res = await api.mergeChain(chat.id, {
+      left_id: firstId,
+      right_id: secondId,
+    });
+    await get().refreshChatFlow();
+    get().selectNode(res.node_id);
+  },
+
+  async refreshChatFlow() {
+    // SSE fires many ``chat.workflow.node.*`` events in quick
+    // succession during a retry or turn run. Each event used to
+    // trigger a fresh ``api.getChatFlow`` fetch; in flight the fetches
+    // would race and sometimes commit an older snapshot on top of a
+    // newer one — leaving the UI stuck on "only judge_pre" until the
+    // user manually refreshed. Coalesce: at most one fetch in flight
+    // at a time, and chain exactly one follow-up if more calls arrive.
+    // The returned promise resolves only after the whole chain
+    // completes, so callers awaiting this after a mutation still see
+    // the post-mutation state.
+    return runCoalescedRefresh(get, set);
   },
 
   applyEvent(event) {

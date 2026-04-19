@@ -162,6 +162,26 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
     );
   }, [chatflow, selectedNodeId]);
 
+  // Mirror _build_chat_context on the backend: when a compact OR merge
+  // ChatNode exists on the path, downstream turns only see that node's
+  // summary — not the pre-compact / pre-merge ancestors. Start rendering
+  // at the deepest such node so what the user reads matches what the
+  // next turn will actually consume.
+  const visiblePath = useMemo(() => {
+    if (!chatflow || path.length === 0) return path;
+    let cutoffIdx = -1;
+    for (let i = path.length - 1; i >= 0; i--) {
+      const n = chatflow.nodes[path[i]];
+      if (n?.compact_snapshot != null || n?.merge_snapshot != null) {
+        cutoffIdx = i;
+        break;
+      }
+    }
+    return cutoffIdx >= 0 ? path.slice(cutoffIdx) : path;
+  }, [chatflow, path]);
+  const hiddenBeforeCompact =
+    path.length - visiblePath.length;
+
   const forkAt = useMemo(() => {
     const m = new Map<NodeId, (typeof forks)[number]>();
     for (const f of forks) m.set(f.nodeId, f);
@@ -178,7 +198,7 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
     if (bodyRef.current) {
       bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
     }
-  }, [path]);
+  }, [visiblePath]);
 
   const handleSend = useCallback(async () => {
     const text = inputText.trim();
@@ -276,7 +296,7 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
               {compactRunning ? "..." : t("compact_dialog.button_label")}
             </button>
           )}
-          <div className="text-[10px] text-gray-400">{path.length}</div>
+          <div className="text-[10px] text-gray-400">{visiblePath.length}</div>
         </div>
       </header>
       {leafNode && (
@@ -294,7 +314,19 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
         data-testid="conversation-body"
         className="flex-1 space-y-5 overflow-auto px-4 py-4"
       >
-        {path.map((nid) => {
+        {hiddenBeforeCompact > 0 && (
+          <div
+            data-testid="compact-truncation-notice"
+            className="flex items-center gap-2 text-[11px] text-gray-400"
+          >
+            <div className="h-px flex-1 bg-gray-200" />
+            <span>
+              {t("conversation.compact_truncated", { count: hiddenBeforeCompact })}
+            </span>
+            <div className="h-px flex-1 bg-gray-200" />
+          </div>
+        )}
+        {visiblePath.map((nid) => {
           const node = chatflow.nodes[nid];
           if (!node) return null;
           const fork = forkAt.get(nid);
@@ -719,6 +751,28 @@ function ChatMessageBubble({
   const isRunning = node.status === "running";
   const isFailed = node.status === "failed";
   const thinking = collectThinking(node);
+  const compact = node.compact_snapshot;
+  const merge = node.merge_snapshot;
+
+  if (compact) {
+    return (
+      <CompactMessageBubble
+        node={node}
+        isSelected={isSelected}
+        onSelect={onSelect}
+      />
+    );
+  }
+
+  if (merge) {
+    return (
+      <MergeMessageBubble
+        node={node}
+        isSelected={isSelected}
+        onSelect={onSelect}
+      />
+    );
+  }
 
   return (
     <div
@@ -768,6 +822,165 @@ function ChatMessageBubble({
         startedAt={node.started_at}
         finishedAt={node.finished_at}
         copyText={agentText || null}
+      />
+    </div>
+  );
+}
+
+function CompactMessageBubble({
+  node,
+  isSelected,
+  onSelect,
+}: {
+  node: ChatFlowNode;
+  isSelected: boolean;
+  onSelect: () => void;
+}) {
+  const { t } = useTranslation();
+  const showNodeId = usePreferencesStore((s) => s.showNodeId);
+  const snap = node.compact_snapshot!;
+  // Backend stamps the summary prose on agent_response.text; snap.summary
+  // mirrors it once the worker finishes. Fall back to snap.summary so we
+  // render something as soon as the compact worker writes the snapshot.
+  const summary = node.agent_response.text || snap.summary;
+  const isRunning = node.status === "running";
+  const instr = snap.compact_instruction;
+  const stats = t("conversation.compact_stats", {
+    original: snap.original_tokens,
+    compacted: snap.compacted_tokens,
+    dropped: snap.dropped_count,
+  });
+
+  return (
+    <div
+      data-testid={`conversation-node-${node.id}`}
+      onClick={onSelect}
+      className={[
+        "group relative cursor-pointer pl-3 transition-colors",
+        isSelected
+          ? "border-l-2 border-teal-500"
+          : "border-l-2 border-transparent hover:border-teal-200",
+      ].join(" ")}
+    >
+      <div
+        data-testid={`conversation-node-${node.id}-compact`}
+        className="rounded-md border border-teal-200 bg-teal-50/70 px-3 py-2"
+      >
+        <div className="mb-1 flex items-center justify-between gap-2 text-[11px] font-semibold text-teal-700">
+          <span className="inline-flex items-center gap-1">
+            <span aria-hidden>⟲</span>
+            {t("conversation.compact_summary_label")}
+          </span>
+          <span className="font-normal text-[10px] text-teal-600/80">{stats}</span>
+        </div>
+        {instr && (
+          <div className="mb-1 text-[11px] text-teal-700/80">
+            <span className="font-medium">
+              {t("conversation.compact_instruction_label")}:
+            </span>{" "}
+            {instr}
+          </div>
+        )}
+        {summary ? (
+          <div className="prose prose-sm max-w-none text-[13px] leading-relaxed text-gray-800 break-words">
+            <Markdown>{summary}</Markdown>
+          </div>
+        ) : isRunning ? (
+          <div className="flex items-center gap-1.5 text-[12px] text-teal-600">
+            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-teal-400" />
+            {t("conversation.compact_summary_pending")}
+          </div>
+        ) : (
+          <div className="text-[12px] italic text-gray-400">—</div>
+        )}
+      </div>
+      <MetaFooter
+        nodeId={showNodeId ? node.id : null}
+        usage={aggregateWorkflowUsage(node)}
+        startedAt={node.started_at}
+        finishedAt={node.finished_at}
+        copyText={summary || null}
+      />
+    </div>
+  );
+}
+
+function MergeMessageBubble({
+  node,
+  isSelected,
+  onSelect,
+}: {
+  node: ChatFlowNode;
+  isSelected: boolean;
+  onSelect: () => void;
+}) {
+  const { t } = useTranslation();
+  const showNodeId = usePreferencesStore((s) => s.showNodeId);
+  const snap = node.merge_snapshot!;
+  const merged = node.agent_response.text;
+  const isRunning = node.status === "running";
+  const instr = snap.merge_instruction;
+  const stats = t("conversation.merge_stats", {
+    original: snap.original_tokens,
+    merged: snap.merged_tokens,
+    sources: snap.source_ids.length,
+  });
+
+  return (
+    <div
+      data-testid={`conversation-node-${node.id}`}
+      onClick={onSelect}
+      className={[
+        "group relative cursor-pointer pl-3 transition-colors",
+        isSelected
+          ? "border-l-2 border-violet-500"
+          : "border-l-2 border-transparent hover:border-violet-200",
+      ].join(" ")}
+    >
+      <div
+        data-testid={`conversation-node-${node.id}-merge`}
+        className="rounded-md border border-violet-200 bg-violet-50/70 px-3 py-2"
+      >
+        <div className="mb-1 flex items-center justify-between gap-2 text-[11px] font-semibold text-violet-700">
+          <span className="inline-flex items-center gap-1">
+            <span aria-hidden>⨝</span>
+            {t("conversation.merge_summary_label")}
+          </span>
+          <span className="font-normal text-[10px] text-violet-600/80">{stats}</span>
+        </div>
+        <div className="mb-1 text-[11px] text-violet-700/80 break-words">
+          <span className="font-medium">
+            {t("conversation.merge_sources_label")}:
+          </span>{" "}
+          {snap.source_ids.map((id) => id.slice(0, 8)).join(" + ")}
+        </div>
+        {instr && (
+          <div className="mb-1 text-[11px] text-violet-700/80">
+            <span className="font-medium">
+              {t("conversation.merge_instruction_label")}:
+            </span>{" "}
+            {instr}
+          </div>
+        )}
+        {merged ? (
+          <div className="prose prose-sm max-w-none text-[13px] leading-relaxed text-gray-800 break-words">
+            <Markdown>{merged}</Markdown>
+          </div>
+        ) : isRunning ? (
+          <div className="flex items-center gap-1.5 text-[12px] text-violet-600">
+            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-violet-400" />
+            {t("conversation.merge_summary_pending")}
+          </div>
+        ) : (
+          <div className="text-[12px] italic text-gray-400">—</div>
+        )}
+      </div>
+      <MetaFooter
+        nodeId={showNodeId ? node.id : null}
+        usage={aggregateWorkflowUsage(node)}
+        startedAt={node.started_at}
+        finishedAt={node.finished_at}
+        copyText={merged || null}
       />
     </div>
   );

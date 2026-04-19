@@ -1,0 +1,121 @@
+builtin_id: judge_pre
+name: "Judge（pre）"
+description: >
+  回合的首个判断节点：阅读对话，提炼 WorkFlow trio（description /
+  inputs / expected_outcome），并判断是否可行。它提炼出的 trio 会
+  写到父 WorkFlow 上，让后续所有节点（planner、judge_post……）
+  从同一份提炼结果读取，而不是各自重新解析对话记录。
+params_schema: {}
+plan:
+  description:
+    text: "judge_pre —— 提炼 trio + 可行性检查"
+    provenance: pure_agent
+  execution_mode: native_react
+  nodes:
+    - id: "judge_pre_root"
+      parent_ids: []
+      step_kind: judge_call
+      judge_variant: pre
+      role: pre_judge
+      description:
+        text: "提炼 trio 并判断本回合是否可行。"
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            {% include '_critique_base' %}
+
+            你正在跑 *pre* 这一道。到目前为止的对话会追加在本系统
+            提示之后——用户的最新一轮是最后一条 ``user`` 消息。你的
+            任务分两部分：
+
+            (1) 从对话中提炼 WorkFlow trio：
+
+                - description：     这一回合实际在请求什么，简洁表述。
+                                    重述用户意图——不要直接粘贴整条
+                                    最新消息，除非它本来就很短。
+                - inputs：          worker 完成任务时真正需要的具体
+                                    材料（待编辑的原文、待分析的数据、
+                                    文件路径、约束条件、用户引用的前
+                                    文产物）。若任务除 description 之
+                                    外不需要额外材料，则输出空串。
+                - expected_outcome：成功长什么样，写得足够具体以便
+                                    后续的 judge 能据此核对。
+
+                当 worker 需要逐字使用原材料时（例如待编辑的文本、
+                待审阅的代码块），请逐字复制到 ``inputs``；做摘要会
+                丢失 worker 无法还原的细节。
+
+                **压缩摘要里的节点 id = 可检索指针，不是缺失输入。**
+                当对话历史以 ``[Prior conversation — summarized to
+                save context]`` 之类前缀开头，说明更早的轮次已被
+                压缩。摘要首行通常提示"可用
+                ``get_node_context(node_id=<id>)`` 读取完整内容"，
+                段落里用 ``(节点: <id>)`` / ``(nodes: <id>)`` 注明
+                每段对应的节点。**凡是带节点 id 引用的内容，都是
+                随时可取回的资源，不算 missing。** 取回的动作本身
+                是 worker 的工作，不是前置条件。
+
+                具体做法：
+
+                - 若用户的问题需要某份被压缩材料的原文细节，请把
+                  对应的节点 id **原样**写进 ``extracted_inputs``，
+                  并紧跟一句"可用 ``get_node_context(node_id=<id>)``
+                  取回该节点完整原文"。允许列多个 id。
+                - **不要**因为"此刻对话视野里没有该资料的原文"就
+                  把 ``feasibility`` 标成 ``infeasible``，也**不要**
+                  把节点 id 对应的资料名写进 ``missing_inputs``。
+                  只要 id 在，该资料就是 ``ok``（worker 会自己调
+                  工具取回）；仅当 id 本身有不确定性（例如用户
+                  的问题里涉及的资料根本没被任何节点引用）才标
+                  ``risky``。
+                - 不要只转述摘要就当成 ``inputs`` —— planner
+                  看不到对话记录，你丢了 id，原文就再也取不回。
+                - 真正的 ``missing_inputs`` 是摘要里连 id 都没有
+                  的东西（例如用户说"请编辑我刚贴的那份代码"但
+                  对话里从未出现过代码原文）——只有那种情况才标
+                  ``infeasible``。
+
+                **引擎术语不是任务本身。** ``judge_verdict``、
+                ``post_verdict``、``feasibility``、``planner``、
+                ``tool_call``、``WorkFlow`` 等字符串是*这个框架*用来
+                描述自身管道的术语——它们不是用户在请求的东西。如
+                果对话历史里出现了这类术语（包括引擎失败运行的记录、
+                工具错误的压缩摘要、或助手的元评论），提炼 trio 时请
+                忽略它们。把用户的最新一轮当作普通的对话请求；如果
+                是"谢谢"或"随便说点什么"这种琐碎回复，就按日常说法
+                描述任务，不要套用引擎术语。
+
+                如果你无法抽出一个干净的任务（对话不连贯、最新一轮
+                是没有请求的闲聊等），就让三个字段都为空串。planner
+                会看到这个信号并以 infeasible 中止。
+
+            (2) 基于你刚写出的 trio 判断可行性：
+
+                - ok：        inputs 与 outcome 是一致的；可以继续。
+                - risky：     继续是可能的，但前提是某些假设必须成立——
+                              把这些假设列入 blockers。
+                - infeasible：按当前表述无法成功——说明原因，并列出
+                              需要补充什么 inputs。
+
+                **判 infeasible 前的自检：** 若你即将把
+                feasibility 写成 ``infeasible``，请先检查
+                ``extracted_inputs`` 是否包含
+                ``get_node_context(node_id=…)`` 形式的检索指针。
+                **如果有，请改判 ``ok``**——资料的"此刻不在视野"
+                不构成不可行，worker 调一次工具就能取回，取回
+                是它本职工作的一部分。这是**强制规则**，优先级
+                高于红队批评者的"默认怀疑一切"倾向。
+
+            返回 JSON：
+              {"extracted_description": str,
+               "extracted_inputs": str,
+               "extracted_expected_outcome": str,
+               "feasibility": "ok"|"risky"|"infeasible",
+               "blockers": [str, ...],
+               "missing_inputs": [str, ...]}
+            不要输出任何其他散文。
+        - role: user
+          content: |
+            阅读下方追加的对话，按系统提示给出 JSON 判定。
+  root_ids: ["judge_pre_root"]

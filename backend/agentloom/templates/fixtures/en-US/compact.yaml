@@ -15,7 +15,9 @@ params_schema:
     description: >
       Serialized message tail that needs summarizing (the early chunk —
       recent turns are preserved verbatim and do NOT appear here).
-      Each message is rendered as ``[role] content``.
+      Each message is rendered as ``[node:<id> | role] content``, where
+      ``<id>`` is the ChatNode / WorkNode id the message came from so
+      the summary can cite it.
   target_tokens:
     type: int
     required: true
@@ -43,7 +45,7 @@ plan:
   description:
     text: "Compact a message sequence into a summary."
     provenance: pure_agent
-  execution_mode: direct
+  execution_mode: native_react
   nodes:
     - id: "compact_worker"
       parent_ids: []
@@ -55,25 +57,47 @@ plan:
         - role: system
           content: |
             You are a context compaction worker. Your job: rewrite a
-            long stretch of prior conversation into a compact summary
-            that downstream LLM calls can read instead of the raw
-            messages.
+            long stretch of prior conversation into a **very terse**
+            summary so downstream LLM calls can read the summary alone
+            and still make progress; when they need the raw content
+            they can call the ``get_node_context`` skill with the cited
+            node id to pull it back.
+
+            Output format (obey strictly):
+
+            1. First line is a fixed pointer telling the reader how to
+               fetch full content on demand, e.g.:
+                 For full content, call get_node_context(node_id=<id>)
+                 to inspect the cited node.
+
+            2. Every following paragraph covers exactly one thing and
+               is **as short as possible** — one or two sentences, no
+               filler, no pleasantries, no restatements, no process
+               narration that won't affect later decisions. Each
+               paragraph ends with a parenthesized list of the node
+               ids it came from, e.g. ``(nodes: n_abc, n_def)``. If the
+               paragraph spans multiple messages, list every relevant
+               id; if it came from one node, list one.
 
             Hard rules:
               - Preserve proper nouns, ids, file paths, numbers, dates,
-                and any explicit decisions verbatim.
-              - Preserve any tool-call results / error messages that
-                later turns may need to reference.
-              - Drop greetings, filler, small-talk, restatements.
+                explicit decisions, and any tool-call results / error
+                messages later turns may need — but keep only the
+                *conclusions* and *key facts*; drop process detail and
+                let the reader chase the node id when needed.
               - Write in neutral third person: "The user asked X. The
                 assistant answered Y." — not first-person.
               - If the user supplied ``must_keep`` content, weave it
                 in verbatim. If ``must_drop`` content appears, omit it.
               - Respect the target token budget: aim UNDER
-                ``target_tokens``; never exceed it.
-              - Output the summary prose only — no preamble, no
-                postscript, no JSON, no markdown code fences. The
-                caller will pack your output into a snapshot record.
+                ``target_tokens``; never exceed it. Terser is better —
+                details can live behind the node id.
+              - Every cited node id must actually appear in a
+                ``[node:<id>]`` prefix in the input. Do not invent ids.
+                Use ``(nodes: ?)`` when no precise source fits.
+              - Output the summary body only (pointer line + paragraphs)
+                — no extra preamble, no postscript, no JSON, no markdown
+                code fences.
         - role: user
           content: |
             Target tokens: {{ target_tokens }}
@@ -87,7 +111,7 @@ plan:
             User instruction:
             {{ compact_instruction }}
 
-            Messages to compact:
+            Messages to compact (each line starts with ``[node:<id> | role]``):
             ---
             {{ messages_to_compact }}
             ---

@@ -1,0 +1,81 @@
+builtin_id: worker_judge
+name: "Worker judge"
+description: >
+  在 worker 的草稿被提交前对其进行评审。返回 `during` 判定——
+  `continue`（产出可接受，推进到 post_judge）、`revise`（再辩论一
+  轮；worker 会带着批评重跑）或 `halt`（作为不可救升交给 post_judge）。
+params_schema:
+  description:
+    type: string
+    required: true
+    description: "worker 的 brief —— planner 要它做什么。"
+  inputs:
+    type: string
+    required: false
+  expected_outcome:
+    type: string
+    required: true
+  worker_output:
+    type: string
+    required: true
+    description: "worker 最近一次草稿的原文。"
+  round:
+    type: string
+    required: true
+    description: "从 1 开始的辩论轮次。"
+  round_budget:
+    type: string
+    required: true
+plan:
+  description:
+    text: "worker_judge —— 评审 worker 草稿"
+    provenance: pure_agent
+  execution_mode: native_react
+  nodes:
+    - id: "worker_judge_root"
+      parent_ids: []
+      step_kind: judge_call
+      judge_variant: during
+      role: worker_judge
+      description:
+        text: "判断 worker 的草稿是否足以提交。"
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            {% include '_critique_base' %}
+
+            你是 worker_judge。worker 刚刚为一个 atomic 任务产出了草
+            稿。在下列中选择其一：
+
+            - "continue"：产出满足 expected outcome，无阻塞问题。推进
+              到 post_judge。
+            - "revise"：  产出存在可修复的缺口。逐条列为 critiques。
+              worker 会带着这些批评重试。
+            - "halt"：    按当前 brief 无法成功（例如 worker 明确声明
+              缺少 planner 本应提供的输入）。升交到 post_judge。
+
+            硬性规则：
+            - 将产出与 expected_outcome 具体比对——而不是按你对"好回
+              答"的直觉来判。
+            - 收敛压力：本轮是第 {{ round }} 轮，最多 {{ round_budget }}
+              轮。到了后期，只要产出不是"明显错的"就该接受；nit 不
+              算阻塞。
+
+            返回 JSON：
+              {"during_verdict": "continue"|"revise"|"halt",
+               "critiques": [{"issue": str, "severity": "blocker"|"concern"|"nit",
+                              "evidence": str}, ...]}
+            不要输出其他散文。
+        - role: user
+          content: |
+            Worker brief
+            ------------
+            Description: {{ description }}
+            Inputs: {{ inputs }}
+            Expected outcome: {{ expected_outcome }}
+
+            Worker 草稿（第 {{ round }} / {{ round_budget }} 轮）
+            ----------------------------------------------------
+            {{ worker_output }}
+  root_ids: ["worker_judge_root"]

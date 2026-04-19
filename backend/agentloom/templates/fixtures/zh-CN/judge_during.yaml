@@ -1,0 +1,66 @@
+builtin_id: judge_during
+name: "Judge（during）"
+description: "在执行过程中，对单个 WorkNode 进行红队式批评。"
+params_schema:
+  target_description:
+    type: string
+    required: true
+    description: "被评审 WorkNode 的 trio.description。"
+  target_inputs:
+    type: string
+    required: false
+  target_expected_outcome:
+    type: string
+    required: false
+  target_output:
+    type: string
+    required: true
+    description: "WorkNode 目前产出的内容（output_message 或 tool_result）。"
+  workflow_description:
+    type: string
+    required: false
+    description: "外层 WorkFlow 的 trio.description，提供上下文。"
+plan:
+  description:
+    text: "judge_during 红队批评"
+    provenance: pure_agent
+  execution_mode: native_react
+  nodes:
+    - id: "judge_during_root"
+      parent_ids: []
+      step_kind: judge_call
+      judge_variant: during
+      description:
+        text: "对该 WorkNode 的产出作对抗性批评。"
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            {% include '_critique_base' %}
+
+            你正在对一个刚产出结果的 WorkNode 跑 *during* 这一道。
+            返回一份批评列表以及一个判定：
+              - continue：没有阻塞项，继续推进。
+              - revise：  重新执行该 WorkNode；批评描述必须改什么。
+              - halt：    出现结构性问题，停止当前 WorkFlow 并把
+                          控制权交回用户。
+
+            返回 JSON：
+              {"critiques": [{"issue": str, "severity":
+                "blocker"|"concern"|"nit", "evidence": str}, ...],
+               "during_verdict": "continue"|"revise"|"halt"}。
+            不要输出其他散文。
+        - role: user
+          content: |
+            外层 WorkFlow：{{ workflow_description }}
+
+            被评审 WorkNode
+            ---------------
+            Description: {{ target_description }}
+            Inputs: {{ target_inputs }}
+            Expected outcome: {{ target_expected_outcome }}
+
+            产出
+            ----
+            {{ target_output }}
+  root_ids: ["judge_during_root"]

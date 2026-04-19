@@ -51,7 +51,7 @@ export const WORK_NODE_ROLES = [
 
 export type WorkNodeRole = (typeof WORK_NODE_ROLES)[number];
 
-export const EXECUTION_MODES = ["direct", "semi_auto", "auto"] as const;
+export const EXECUTION_MODES = ["native_react", "semi_auto", "auto_plan"] as const;
 export type ExecutionMode = (typeof EXECUTION_MODES)[number];
 
 export interface Critique {
@@ -218,6 +218,10 @@ export interface WorkFlow {
   id: NodeId;
   nodes: Record<NodeId, WorkFlowNode>;
   root_ids: NodeId[];
+  /** Execution mode stamped at spawn time — survives later changes to
+   * the ChatFlow's ``default_execution_mode`` so past ChatNodes keep
+   * their original visual identity. */
+  execution_mode?: ExecutionMode;
   /** Judge model stamped at submit time from the composer / ChatFlow
    * default. Source of truth for which model actually ran the inner
    * judges (``default_judge_model`` on ChatFlow is only the default
@@ -270,6 +274,20 @@ export interface CompactSnapshot {
   compact_instruction: string | null;
 }
 
+/**
+ * Mirror of ``agentloom.schemas.workflow.MergeSnapshot``.
+ * Populated on a ChatNode whose ``parent_ids`` carry a user-initiated
+ * branch merge. The node's ``agent_response.text`` IS the synthesized
+ * reply; this snapshot only records the sources + accounting metrics
+ * so the downstream context walk can stop here.
+ */
+export interface MergeSnapshot {
+  source_ids: NodeId[];
+  merge_instruction: string | null;
+  original_tokens: number;
+  merged_tokens: number;
+}
+
 export interface ChatFlowNode extends NodeBaseFields {
   user_message: EditableText | null;
   agent_response: EditableText;
@@ -279,6 +297,24 @@ export interface ChatFlowNode extends NodeBaseFields {
    * this ChatNode is a compact point: ``agent_response.text`` holds
    * the summary prose and downstream context builds root here. */
   compact_snapshot: CompactSnapshot | null;
+  /** Branch-merge marker. Non-null on a ChatNode that folds two
+   * ancestor branches into a single synthesized reply; ``parent_ids``
+   * has length ≥2 in that case. Mutually exclusive with
+   * ``compact_snapshot``. */
+  merge_snapshot?: MergeSnapshot | null;
+  /** Tokens in this node's chain context at spawn (``_build_chat_context``
+   * output + this turn's user message). Stamped once by the engine; the
+   * canvas TokenBar reads this for monotonic context-growth display.
+   * ``null`` on legacy nodes — UI falls back to the old first/last-worknode
+   * heuristic in that case. */
+  entry_prompt_tokens: number | null;
+  /** Tokens in ``agent_response.text`` — what this turn will contribute
+   * to every descendant's chain context. Stamped once when the turn
+   * finalises. ``null`` while the turn is still running, on failed
+   * turns before a response was written, and on legacy nodes. The
+   * canvas adds this to ``entry_prompt_tokens`` so the card shows the
+   * next turn's entry size, not this turn's. */
+  output_response_tokens: number | null;
 }
 
 /** Lightweight summary returned by GET /api/chatflows (list). */
@@ -354,6 +390,19 @@ export interface ChatFlow {
   compact_model: ProviderModelRef | null;
   /** Whether explicit UI-driven compacts open a confirmation dialog. */
   compact_require_confirmation: boolean;
+  /**
+   * ChatFlow-layer auto-compact trigger (dual-track — runs in addition
+   * to the WorkFlow Tier 1 trigger above). Evaluated at ChatNode spawn:
+   * when the prospective chain context crosses this fraction of the
+   * turn model's context window, the engine inserts a compact ChatNode
+   * before the new turn. ``null`` disables the layer. Default 0.6.
+   */
+  chatnode_compact_trigger_pct: number | null;
+  /**
+   * Target footprint for ChatNode-level compact summaries, as a fraction
+   * of the turn model's context window. Default 0.4.
+   */
+  chatnode_compact_target_pct: number;
   sticky_notes?: Record<string, StickyNote>;
   created_at: string;
 }

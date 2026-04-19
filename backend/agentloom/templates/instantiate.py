@@ -49,6 +49,10 @@ BUILTIN_WORKSPACE_ID = "__builtin__"
 
 _PARAM_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 _INCLUDE_RE = re.compile(r"\{%\s*include\s+'([^']+)'\s*%\}")
+_IF_RE = re.compile(
+    r"\{%\s*if\s+([A-Za-z_][A-Za-z0-9_]*)\s*%\}(.*?)\{%\s*endif\s*%\}",
+    re.DOTALL,
+)
 
 
 class TemplateError(Exception):
@@ -74,27 +78,48 @@ async def resolve_template(
     *,
     workspace_id: str,
     builtin_id: str,
+    language: str | None = None,
 ) -> WorkflowTemplateRow:
     """Load the row for *builtin_id*, preferring the user's workspace
     over the shipped fixture.
 
-    Raises :class:`TemplateNotFoundError` if neither row exists.
+    User-workspace overrides use the canonical (unsuffixed) ``builtin_id``;
+    shipped ``__builtin__`` rows are language-suffixed as
+    ``<builtin_id>@<language>``. Lookup order:
+
+    1. User workspace row with id == ``builtin_id`` (unsuffixed).
+    2. ``__builtin__`` row with id == ``<builtin_id>@<language>`` when
+       *language* is provided.
+    3. ``__builtin__`` row with id == ``<builtin_id>@en-US`` as a final
+       fallback so untranslated fixtures still resolve.
+
+    Raises :class:`TemplateNotFoundError` if nothing matches.
     """
-    stmt = select(WorkflowTemplateRow).where(
-        WorkflowTemplateRow.builtin_id == builtin_id,
-        WorkflowTemplateRow.workspace_id.in_([workspace_id, BUILTIN_WORKSPACE_ID]),
+    from agentloom.templates.loader import DEFAULT_LANGUAGE, suffixed_builtin_id
+
+    candidate_ids: list[tuple[str, str]] = [(workspace_id, builtin_id)]
+    lang = language or DEFAULT_LANGUAGE
+    candidate_ids.append(
+        (BUILTIN_WORKSPACE_ID, suffixed_builtin_id(builtin_id, lang))
     )
-    rows = (await session.execute(stmt)).scalars().all()
-    if not rows:
-        raise TemplateNotFoundError(
-            f"no template with builtin_id={builtin_id!r} in workspace "
-            f"{workspace_id!r} or {BUILTIN_WORKSPACE_ID!r}"
+    if lang != DEFAULT_LANGUAGE:
+        candidate_ids.append(
+            (BUILTIN_WORKSPACE_ID, suffixed_builtin_id(builtin_id, DEFAULT_LANGUAGE))
         )
-    # Prefer the user workspace row when both exist.
-    for row in rows:
-        if row.workspace_id == workspace_id:
+
+    for ws_id, key in candidate_ids:
+        stmt = select(WorkflowTemplateRow).where(
+            WorkflowTemplateRow.workspace_id == ws_id,
+            WorkflowTemplateRow.builtin_id == key,
+        )
+        row = (await session.execute(stmt)).scalar_one_or_none()
+        if row is not None:
             return row
-    return rows[0]
+
+    raise TemplateNotFoundError(
+        f"no template with builtin_id={builtin_id!r} (language={lang!r}) "
+        f"in workspace {workspace_id!r} or {BUILTIN_WORKSPACE_ID!r}"
+    )
 
 
 def _substitute_string(
@@ -130,6 +155,26 @@ def _substitute_string(
     while prev != text:
         prev = text
         text = _INCLUDE_RE.sub(expand_include, text)
+
+    # ``{% if var %}...{% endif %}`` — drops the body when ``params[var]``
+    # is missing, None, an empty string, or otherwise falsy. Used by the
+    # judge templates to elide trio lines judge_pre didn't extract, and
+    # to elide optional sections like judge_post's ``layer_notes``. No
+    # else / elif — keep the engine tiny.
+    def expand_if(match: re.Match[str]) -> str:
+        name = match.group(1)
+        body = match.group(2)
+        value = params.get(name)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return ""
+        if not value:
+            return ""
+        return body
+
+    prev = None
+    while prev != text:
+        prev = text
+        text = _IF_RE.sub(expand_if, text)
 
     missing: list[str] = []
 

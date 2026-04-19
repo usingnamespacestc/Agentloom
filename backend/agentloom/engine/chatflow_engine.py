@@ -60,6 +60,7 @@ from agentloom.engine.workflow_engine import (
     PostNodeHook,
     ProviderCall,
     WorkflowEngine,
+    _count_text_tokens,
     _estimate_tokens_from_wire,
 )
 from agentloom.schemas.common import JudgeVariant, JudgeVerdict, WorkNodeRole
@@ -67,6 +68,7 @@ from agentloom.schemas import (
     ChatFlow,
     ChatFlowNode,
     CompactSnapshot,
+    MergeSnapshot,
     PendingTurn,
     StepKind,
     WorkFlow,
@@ -79,6 +81,7 @@ from agentloom.schemas.common import (
     NodeId,
     NodeStatus,
     ProviderModelRef,
+    StepKind,
     utcnow,
 )
 from agentloom.schemas.workflow import WireMessage
@@ -88,17 +91,6 @@ from agentloom.tools.base import ToolContext, ToolRegistry
 
 log = logging.getLogger(__name__)
 
-
-#: Placeholder values for the WorkFlow trio's ``inputs`` and
-#: ``expected_outcome`` at the moment a turn first lands. We don't yet
-#: know what the user *really* expects — judge_pre is exactly the pass
-#: that interrogates that — so we seed both with stable stock strings
-#: and let the planner overwrite the real values for downstream nodes
-#: (worker briefs, sub-WorkFlow trios). Memory recall + skills/MCP
-#: injection will eventually replace these — see the
-#: agentloom_judge_params_pragma memo.
-_STOCK_INPUTS = "(prior conversation context — see messages below)"
-_STOCK_EXPECTED_OUTCOME = "Helpful, accurate response to the user's request"
 
 #: How many times we re-spawn a crashed judge_call (provider error,
 #: malformed transport, etc.) before giving up and bubbling the
@@ -166,13 +158,13 @@ def derive_switches_from_mode(mode: ExecutionMode) -> ExecutionSwitches:
     the four switches. These are defaults — individual WorkFlows may
     override any switch after creation.
 
-    - ``direct``: pure ReAct. No plan, no judges. Existing M4/M6 shape.
+    - ``native_react``: pure ReAct. No plan, no judges. Existing M4/M6 shape.
     - ``semi_auto``: plan on, judge_pre on, judge_post on, judge_during
       off (opt-in — adversarial critic is expensive and only helps when
       the user wants it).
-    - ``auto``: all four on. Halt conditions (§3.4.1) gate progression.
+    - ``auto_plan``: all four on. Halt conditions (§3.4.1) gate progression.
     """
-    if mode == ExecutionMode.DIRECT:
+    if mode == ExecutionMode.NATIVE_REACT:
         return ExecutionSwitches(
             plan=False, judge_pre=False, judge_during=False, judge_post=False
         )
@@ -180,7 +172,7 @@ def derive_switches_from_mode(mode: ExecutionMode) -> ExecutionSwitches:
         return ExecutionSwitches(
             plan=True, judge_pre=True, judge_during=False, judge_post=True
         )
-    # auto
+    # auto_plan
     return ExecutionSwitches(
         plan=True, judge_pre=True, judge_during=True, judge_post=True
     )
@@ -256,26 +248,64 @@ class ChatFlowEngine:
         self._tools = tool_registry
         self._tool_ctx = tool_context
         self._save_callback = save_callback
+        from agentloom.engine.provider_context_cache import lookup as _ctx_lookup
+
         self._inner = WorkflowEngine(
             provider_call,
             event_bus,
             tool_registry=tool_registry,
             tool_context=tool_context,
+            context_window_lookup=_ctx_lookup,
         )
         self._runtimes: dict[str, ChatFlowRuntime] = {}
         self._registry_lock = asyncio.Lock()
 
-        # Load builtin workflow templates from disk (sync). The engine
-        # uses these to materialize judge_pre / judge_post inside
-        # ``_spawn_turn_node`` without needing an AsyncSession. Per the
-        # judge-params pragma memory, the params we feed are naive
-        # stock strings until NodeBaseFields gains a real ``inputs``
-        # field; revisit then.
-        templates, fragments = load_fixtures()
-        self._fixture_plans: dict[str, dict[str, Any]] = {
-            fx.builtin_id: fx.plan for fx in templates
-        }
-        self._fixture_includes: dict[str, str] = fragments_as_texts(fragments)
+        # Load builtin workflow templates from disk (sync), one set per
+        # shipped language. The engine materializes planner / judge_pre /
+        # judge_post / worker / compact inside ``_spawn_turn_node`` and
+        # friends without an AsyncSession, and the current workspace
+        # language selects which in-memory variant to use. Untranslated
+        # fixtures in a non-default language fall back to the en-US plan
+        # inside ``load_fixtures``.
+        from agentloom.templates.loader import (
+            DEFAULT_LANGUAGE,
+            list_available_languages,
+        )
+
+        self._fixture_plans_by_lang: dict[str, dict[str, dict[str, Any]]] = {}
+        self._fixture_includes_by_lang: dict[str, dict[str, str]] = {}
+        for lang in list_available_languages() or [DEFAULT_LANGUAGE]:
+            templates, fragments = load_fixtures(language=lang)
+            self._fixture_plans_by_lang[lang] = {
+                fx.builtin_id: fx.plan for fx in templates
+            }
+            self._fixture_includes_by_lang[lang] = fragments_as_texts(fragments)
+        self._default_fixture_language = DEFAULT_LANGUAGE
+
+    @property
+    def _current_fixture_language(self) -> str:
+        """Resolve the workspace's configured prompt language, falling
+        back to the shipped default if the cache hasn't been primed or
+        the configured language has no fixtures loaded."""
+        from agentloom import tenancy_runtime
+        from agentloom.db.models.tenancy import DEFAULT_WORKSPACE_ID
+
+        lang = tenancy_runtime.get_settings(DEFAULT_WORKSPACE_ID).language
+        if lang in self._fixture_plans_by_lang:
+            return lang
+        return self._default_fixture_language
+
+    @property
+    def _fixture_plans(self) -> dict[str, dict[str, Any]]:
+        """Active-language template plans keyed by ``builtin_id``.
+        Existing callsites index by bare builtin_id — this property
+        transparently picks the right per-language map."""
+        return self._fixture_plans_by_lang[self._current_fixture_language]
+
+    @property
+    def _fixture_includes(self) -> dict[str, str]:
+        """Active-language include-fragment texts keyed by fragment name."""
+        return self._fixture_includes_by_lang[self._current_fixture_language]
 
     # ------------------------------------------------------------------ registry
 
@@ -464,6 +494,134 @@ class ChatFlowEngine:
             await self._publish_queue_updated(runtime, node_id)
         await self._save(runtime)
 
+    def _build_compact_chatnode(
+        self,
+        chatflow: ChatFlow,
+        *,
+        parent_id: str,
+        preserve_recent_turns: int,
+        target_tokens: int | None,
+        model: ProviderModelRef | None,
+        compact_instruction: str | None,
+        must_keep: str = "",
+        must_drop: str = "",
+    ) -> ChatFlowNode:
+        """Construct an unattached compact ChatFlowNode over ``parent_id``.
+
+        Shared between Tier 2 manual compaction (``compact_chain``) and
+        the ChatFlow-layer auto-compact trigger (``_spawn_turn_node``).
+        The caller is responsible for adding the returned node to the
+        chatflow and either launching or inlining its inner workflow.
+
+        Raises ``ValueError`` if the chain rooted at ``parent_id`` has
+        no prior turns to compact or if ``preserve_recent_turns`` is
+        large enough to leave nothing to summarize.
+        """
+        # Pull real messages only — no synthetic "[Prior conversation —
+        # summarized...]" preamble. If a prior compact exists on the
+        # chain we feed its summary in separately as a prelude so the
+        # worker can reference what was already condensed without
+        # having to summarize-the-summary. This is the fix for the
+        # cascade bug where preserve_recent_turns let the prior summary
+        # message leak into the new compact's preserved tail, and the
+        # next trigger would then fold it back into head_wire.
+        tagged_full_real = _build_tagged_chat_context_for_compact(
+            chatflow, parent_id
+        )
+        if not tagged_full_real:
+            raise ValueError(
+                f"chain rooted at {parent_id!r} has no prior turns to compact"
+            )
+
+        previous_summary = ""
+        previous_summary_node_id: str | None = None
+        current: str | None = parent_id
+        while current is not None:
+            node = chatflow.nodes[current]
+            snap = node.compact_snapshot
+            if snap is not None and snap.summary:
+                previous_summary = snap.summary
+                previous_summary_node_id = node.id
+                break
+            current = node.parent_ids[0] if node.parent_ids else None
+
+        keep = max(0, min(len(tagged_full_real), preserve_recent_turns))
+        head_tagged = tagged_full_real[:-keep] if keep else tagged_full_real
+        tail_wire = (
+            [m for _, m in tagged_full_real[-keep:]] if keep else []
+        )
+        head_wire = [m for _, m in head_tagged]
+        full_real_wire = [m for _, m in tagged_full_real]
+
+        if not head_tagged and not previous_summary:
+            raise ValueError(
+                "nothing to compact — preserve_recent_turns ≥ total turns"
+            )
+
+        head_parts: list[str] = []
+        if previous_summary:
+            tag = previous_summary_node_id or "?"
+            head_parts.append(
+                f"[node:{tag} | previously summarized context]\n{previous_summary}"
+            )
+        head_parts.extend(
+            f"[node:{nid or '?'} | {m.role}] {m.content}"
+            for nid, m in head_tagged
+        )
+        head_serialized = "\n".join(head_parts)
+
+        resolved_target = (
+            target_tokens
+            if target_tokens is not None
+            else max(512, int(4096 * DEFAULT_COMPACT_TARGET_PCT))
+        )
+
+        templated = instantiate_fixture(
+            self._fixture_plans["compact"],
+            {
+                "messages_to_compact": head_serialized,
+                "target_tokens": resolved_target,
+                "must_keep": must_keep,
+                "must_drop": must_drop,
+                "compact_instruction": compact_instruction or "",
+            },
+            includes=self._fixture_includes,
+        )
+
+        inner_node = _single_node(templated)
+        if model is not None:
+            inner_node.model_override = model
+            inner_node.resolved_model = model
+
+        head_real_tokens = _estimate_tokens_from_wire(head_wire)
+        prev_summary_tokens = (
+            _count_text_tokens(previous_summary) if previous_summary else 0
+        )
+        original_tokens = head_real_tokens + prev_summary_tokens
+        entry_tokens = _estimate_tokens_from_wire(full_real_wire) + prev_summary_tokens
+
+        return ChatFlowNode(
+            parent_ids=[parent_id],
+            user_message=(
+                EditableText.by_user(compact_instruction)
+                if compact_instruction
+                else None
+            ),
+            agent_response=EditableText.by_agent(""),
+            workflow=templated,
+            status=NodeStatus.PLANNED,
+            entry_prompt_tokens=entry_tokens,
+            compact_snapshot=CompactSnapshot(
+                summary="",
+                preserved_messages=list(tail_wire),
+                source_range=(0, len(head_wire)),
+                dropped_count=len(head_wire),
+                original_tokens=original_tokens,
+                compacted_tokens=0,
+                compact_instruction=compact_instruction,
+            ),
+        )
+
     async def compact_chain(
         self,
         chatflow_id: str,
@@ -501,83 +659,15 @@ class ChatFlowEngine:
             chatflow = runtime.chatflow
             if parent_id not in chatflow.nodes:
                 raise KeyError(f"parent {parent_id!r} not in chatflow {chatflow_id!r}")
-            parent = chatflow.get(parent_id)
-            # Collect the full wire history INCLUDING the parent turn —
-            # everything visible to a child forked at ``parent_id``
-            # today. ``_build_chat_context`` wants ``parent_ids``, so
-            # pass [parent_id] to include parent.
-            full_wire = _build_chat_context(chatflow, [parent_id])
-
-            if not full_wire:
-                raise ValueError(
-                    f"chain rooted at {parent_id!r} has no prior turns to compact"
-                )
-
-            keep = max(0, min(len(full_wire), preserve))
-            head_wire = full_wire[:-keep] if keep else full_wire
-            tail_wire = full_wire[-keep:] if keep else []
-
-            if not head_wire:
-                raise ValueError(
-                    "nothing to compact — preserve_recent_turns ≥ total turns"
-                )
-
-            head_serialized = "\n".join(
-                f"[{m.role}] {m.content}" for m in head_wire
-            )
-            # Pick a reasonable default target — half the configured
-            # model's context, or 2048 tokens if no hint at all.
-            resolved_target = (
-                target_tokens
-                if target_tokens is not None
-                else max(512, int(4096 * DEFAULT_COMPACT_TARGET_PCT))
-            )
-
-            templated = instantiate_fixture(
-                self._fixture_plans["compact"],
-                {
-                    "messages_to_compact": head_serialized,
-                    "target_tokens": resolved_target,
-                    "must_keep": must_keep,
-                    "must_drop": must_drop,
-                    "compact_instruction": compact_instruction or "",
-                },
-                includes=self._fixture_includes,
-            )
-
-            # Pin the compact's model through the inner WorkFlow, same as
-            # turn-node spawning does: stamp on the compact llm_call's
-            # model_override. Without it the worker picks whatever the
-            # provider adapter falls back to.
-            inner_node = _single_node(templated)
-            if model is not None:
-                inner_node.model_override = model
-                inner_node.resolved_model = model
-            # ``_single_node`` mutates in place — instantiate_fixture
-            # built a one-node workflow so the override lands on the
-            # only node automatically.
-
-            original_tokens = _estimate_tokens_from_wire(head_wire)
-
-            compact_node = ChatFlowNode(
-                parent_ids=[parent_id],
-                user_message=(
-                    EditableText.by_user(compact_instruction)
-                    if compact_instruction
-                    else None
-                ),
-                agent_response=EditableText.by_agent(""),
-                workflow=templated,
-                status=NodeStatus.PLANNED,
-                compact_snapshot=CompactSnapshot(
-                    summary="",
-                    preserved_messages=list(tail_wire),
-                    source_range=(0, len(head_wire)),
-                    dropped_count=len(head_wire),
-                    original_tokens=original_tokens,
-                    compacted_tokens=0,
-                    compact_instruction=compact_instruction,
-                ),
+            compact_node = self._build_compact_chatnode(
+                chatflow,
+                parent_id=parent_id,
+                preserve_recent_turns=preserve,
+                target_tokens=target_tokens,
+                model=model,
+                compact_instruction=compact_instruction,
+                must_keep=must_keep,
+                must_drop=must_drop,
             )
             chatflow.add_node(compact_node)
             compact_id = compact_node.id
@@ -663,7 +753,34 @@ class ChatFlowEngine:
                 )
                 compact_node.finished_at = utcnow()
             else:
-                compacted_tokens = len(summary) // 4 + _estimate_tokens_from_wire(
+                # Hard-cap the summary at ``chatnode_compact_target_pct``
+                # of the resolved model's context window. Preserves the
+                # ``trigger_pct + target_pct ≤ 1.0`` invariant even when
+                # the summarizer ignores its target_tokens guidance.
+                from agentloom.engine.workflow_engine import (
+                    _truncate_text_to_tokens,
+                )
+
+                resolved_for_cap = (
+                    compact_node.resolved_model
+                    or inner_llm.resolved_model
+                    or inner_llm.model_override
+                )
+                ctx_for_cap = self._inner._context_window_for(resolved_for_cap)
+                target_cap = max(
+                    256,
+                    int(ctx_for_cap * chatflow.chatnode_compact_target_pct),
+                )
+                summary_tokens = _count_text_tokens(summary)
+                if summary_tokens > target_cap:
+                    log.warning(
+                        "compact ChatNode %s summary %d tokens > target %d — truncating",
+                        compact_id,
+                        summary_tokens,
+                        target_cap,
+                    )
+                    summary = _truncate_text_to_tokens(summary, target_cap)
+                compacted_tokens = _count_text_tokens(summary) + _estimate_tokens_from_wire(
                     compact_node.compact_snapshot.preserved_messages
                     if compact_node.compact_snapshot
                     else []
@@ -694,6 +811,184 @@ class ChatFlowEngine:
         )
         await self._save(runtime)
         return compact_node
+
+    async def merge_chain(
+        self,
+        chatflow_id: str,
+        *,
+        left_id: str,
+        right_id: str,
+        merge_instruction: str | None = None,
+        model: ProviderModelRef | None = None,
+    ) -> ChatFlowNode:
+        """Fold two ChatNode branches into a single synthesized reply.
+
+        Mirrors :meth:`compact_chain` in shape: we build a new ChatNode
+        with ``parent_ids=[left_id, right_id]``, run the ``merge``
+        builtin template as its inner workflow, and stamp the worker's
+        output onto ``agent_response`` + :class:`MergeSnapshot`. The
+        downstream context walk stops at this node just like it stops
+        at a compact node — both branches' history is encoded in the
+        merged reply.
+
+        MVP: exactly two source nodes; left/right ordering is the order
+        the user picked them in the canvas.
+        """
+        runtime = self._require_runtime(chatflow_id)
+        async with runtime.lock:
+            chatflow = runtime.chatflow
+            if left_id == right_id:
+                raise ValueError("cannot merge a node with itself")
+            if left_id not in chatflow.nodes:
+                raise KeyError(f"left {left_id!r} not in chatflow {chatflow_id!r}")
+            if right_id not in chatflow.nodes:
+                raise KeyError(f"right {right_id!r} not in chatflow {chatflow_id!r}")
+
+            left_ctx = _build_chat_context(chatflow, [left_id])
+            right_ctx = _build_chat_context(chatflow, [right_id])
+            if not left_ctx and not right_ctx:
+                raise ValueError("both branches are empty — nothing to merge")
+
+            left_summary = _serialize_wire_chain(left_ctx)
+            right_summary = _serialize_wire_chain(right_ctx)
+
+            templated = instantiate_fixture(
+                self._fixture_plans["merge"],
+                {
+                    "left_summary": left_summary,
+                    "right_summary": right_summary,
+                },
+                includes=self._fixture_includes,
+            )
+            inner_node = _single_node(templated)
+            if model is not None:
+                inner_node.model_override = model
+                inner_node.resolved_model = model
+
+            original_tokens = (
+                _estimate_tokens_from_wire(left_ctx)
+                + _estimate_tokens_from_wire(right_ctx)
+            )
+
+            merge_node = ChatFlowNode(
+                parent_ids=[left_id, right_id],
+                user_message=(
+                    EditableText.by_user(merge_instruction)
+                    if merge_instruction
+                    else None
+                ),
+                agent_response=EditableText.by_agent(""),
+                workflow=templated,
+                status=NodeStatus.PLANNED,
+                entry_prompt_tokens=original_tokens,
+                merge_snapshot=MergeSnapshot(
+                    source_ids=[left_id, right_id],
+                    merge_instruction=merge_instruction,
+                    original_tokens=original_tokens,
+                    merged_tokens=0,
+                ),
+            )
+            chatflow.add_node(merge_node)
+            merge_id = merge_node.id
+
+        await self._bus.publish(
+            WorkflowEvent(
+                workflow_id=chatflow_id,
+                kind="chat.node.created",
+                node_id=merge_id,
+                data={
+                    "parent_ids": [left_id, right_id],
+                    "merge": True,
+                },
+            )
+        )
+        await self._bus.publish(
+            WorkflowEvent(
+                workflow_id=chatflow_id,
+                kind="chat.node.status",
+                node_id=merge_id,
+                data={"status": NodeStatus.RUNNING.value},
+            )
+        )
+
+        async with runtime.lock:
+            merge_node = chatflow.get(merge_id)
+            merge_node.status = NodeStatus.RUNNING
+            merge_node.started_at = utcnow()
+
+        inner_wf_id = merge_node.workflow.id
+        relay_queue = self._bus.open_subscription(inner_wf_id)
+        relay_task = asyncio.create_task(
+            self._relay_inner_events(
+                chatflow.id, merge_id, inner_wf_id, relay_queue
+            )
+        )
+
+        runtime_error: str | None = None
+        ws_settings = tenancy_runtime.get_settings(self._inner._tool_ctx.workspace_id)
+        effective_disabled = (
+            frozenset(chatflow.disabled_tool_names) | frozenset(ws_settings.globally_disabled())
+        )
+        try:
+            await self._inner.execute(
+                merge_node.workflow,
+                chatflow_tool_loop_budget=chatflow.tool_loop_budget,
+                chatflow_auto_mode_revise_budget=chatflow.auto_mode_revise_budget,
+                chatflow_min_ground_ratio=None,  # single-shot merger
+                chatflow_ground_ratio_grace_nodes=20,
+                # Tier 1 auto-compact is off for the merge worker — it's
+                # a single llm_call by definition, nothing to compact.
+                chatflow_compact_trigger_pct=None,
+                disabled_tool_names=effective_disabled,
+            )
+        except Exception as exc:  # noqa: BLE001 — engine boundary
+            log.exception("merge ChatNode %s inner workflow raised", merge_id)
+            runtime_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            await self._bus.close(inner_wf_id)
+            try:
+                await relay_task
+            except Exception:
+                pass
+
+        async with runtime.lock:
+            merge_node = chatflow.get(merge_id)
+            inner_llm = _single_node(merge_node.workflow)
+            merged_reply = (
+                (inner_llm.output_message.content or "").strip()
+                if inner_llm.output_message
+                else ""
+            )
+            if runtime_error is not None or not merged_reply:
+                merge_node.status = NodeStatus.FAILED
+                merge_node.error = (
+                    runtime_error or "merge worker returned empty reply"
+                )
+                merge_node.finished_at = utcnow()
+            else:
+                merged_tokens = _count_text_tokens(merged_reply)
+                if merge_node.merge_snapshot is not None:
+                    merge_node.merge_snapshot = merge_node.merge_snapshot.model_copy(
+                        update={"merged_tokens": merged_tokens}
+                    )
+                merge_node.agent_response = EditableText.by_agent(merged_reply)
+                merge_node.output_response_tokens = merged_tokens
+                merge_node.status = NodeStatus.SUCCEEDED
+                merge_node.finished_at = utcnow()
+
+        await self._bus.publish(
+            WorkflowEvent(
+                workflow_id=chatflow_id,
+                kind="chat.node.status",
+                node_id=merge_id,
+                data={
+                    "status": merge_node.status.value,
+                    **({"error": merge_node.error} if merge_node.error else {}),
+                },
+            )
+        )
+        await self._save(runtime)
+        return merge_node
 
     async def delete_node_cascade(
         self, chatflow_id: str, node_id: str
@@ -951,10 +1246,16 @@ class ChatFlowEngine:
                 spawn_model=pending.spawn_model,
                 judge_spawn_model=pending.judge_spawn_model,
                 tool_call_spawn_model=pending.tool_call_spawn_model,
+                originating_pending=pending,
             )
             await self._publish_node_created(runtime, node.id)
+            await self._publish_queue_updated(runtime, node.id)
             self._launch_execute(
-                runtime, node.id, consumed_pending_id=pending.id
+                runtime,
+                node.id,
+                consumed_pending_id=None
+                if node.compact_snapshot is not None
+                else pending.id,
             )
             return
 
@@ -970,6 +1271,7 @@ class ChatFlowEngine:
                 spawn_model=pending.spawn_model,
                 judge_spawn_model=pending.judge_spawn_model,
                 tool_call_spawn_model=pending.tool_call_spawn_model,
+                originating_pending=pending,
             )
             await self._publish_node_created(runtime, node.id)
             self._launch_execute(
@@ -1017,11 +1319,18 @@ class ChatFlowEngine:
             spawn_model=pending.spawn_model,
             judge_spawn_model=pending.judge_spawn_model,
             tool_call_spawn_model=pending.tool_call_spawn_model,
+            originating_pending=pending,
         )
         await self._publish_node_created(runtime, child.id)
         await self._publish_queue_updated(runtime, node_id)
         await self._publish_queue_updated(runtime, child.id)
-        self._launch_execute(runtime, child.id, consumed_pending_id=pending.id)
+        self._launch_execute(
+            runtime,
+            child.id,
+            consumed_pending_id=None
+            if child.compact_snapshot is not None
+            else pending.id,
+        )
 
     def _spawn_turn_node(
         self,
@@ -1033,6 +1342,7 @@ class ChatFlowEngine:
         spawn_model: ProviderModelRef | None = None,
         judge_spawn_model: ProviderModelRef | None = None,
         tool_call_spawn_model: ProviderModelRef | None = None,
+        originating_pending: PendingTurn | None = None,
     ) -> ChatFlowNode:
         """Create a PLANNED ChatFlowNode and attach it to the chatflow.
 
@@ -1048,10 +1358,29 @@ class ChatFlowEngine:
           nodes hanging around when judge_pre vetoes — and lets
           judge_post own all user-facing prose regardless of which
           path halted.
+
+        Dual-track auto-compact: before returning the turn node the
+        method consults ``chatflow.chatnode_compact_trigger_pct``. When
+        the prospective context (``entry_tokens``) crosses the threshold
+        the turn is NOT spawned directly. Instead a compact ChatNode is
+        created over ``parent_ids[0]`` and the user's turn is forwarded
+        onto the compact node's ``pending_queue`` so the regular drain
+        path picks it up after compaction finishes. The returned node
+        is the compact node; callers detect this via
+        ``result.compact_snapshot is not None`` and skip ``consumed_pending_id``
+        because the pending is not yet consumed. ``originating_pending``
+        lets the caller forward an existing :class:`PendingTurn` id/metadata
+        onto the compact queue so any future registered against the
+        original id still resolves when the real turn eventually runs.
         """
         chatflow = runtime.chatflow
         context_wire = _build_chat_context(chatflow, parent_ids)
         context_wire.append(WireMessage(role="user", content=user_message_text))
+        # Snapshot what this turn's judge_pre (or llm_call, in direct mode)
+        # will see as its prompt. The card's TokenBar reads this so growth
+        # is monotonic along the chain regardless of how the inner WorkFlow
+        # evolves mid-run.
+        entry_tokens = _estimate_tokens_from_wire(context_wire)
 
         # Pin this node's model. If the composer explicitly chose one
         # (``spawn_model``), honor it; otherwise inherit from the primary
@@ -1065,6 +1394,47 @@ class ChatFlowEngine:
             else _chat_inherited_model(chatflow, parent_ids)
         )
 
+        trigger_pct = chatflow.chatnode_compact_trigger_pct
+        # Fuse: if the immediate parent is itself a compact ChatNode we
+        # just came out of compaction on the drain path. A second
+        # compact would summarize the prior summary — if the prior pass
+        # didn't bring us under trigger the next one won't either, and
+        # we'd loop forever. Let the turn proceed uncompacted instead.
+        parent_is_fresh_compact = (
+            bool(parent_ids)
+            and parent_ids[0] in chatflow.nodes
+            and chatflow.nodes[parent_ids[0]].compact_snapshot is not None
+        )
+        if trigger_pct is not None and parent_ids and not parent_is_fresh_compact:
+            ctx = self._inner._context_window_for(resolved)
+            if entry_tokens >= int(ctx * trigger_pct):
+                forwarded = originating_pending or PendingTurn(
+                    text=user_message_text,
+                    spawn_model=spawn_model,
+                    judge_spawn_model=judge_spawn_model,
+                    tool_call_spawn_model=tool_call_spawn_model,
+                )
+                try:
+                    compact_node = self._build_compact_chatnode(
+                        chatflow,
+                        parent_id=parent_ids[0],
+                        preserve_recent_turns=chatflow.compact_preserve_recent_turns,
+                        target_tokens=max(
+                            256, int(ctx * chatflow.chatnode_compact_target_pct)
+                        ),
+                        model=chatflow.compact_model or resolved,
+                        compact_instruction=None,
+                    )
+                except ValueError:
+                    # preserve_recent_turns consumed the whole chain —
+                    # nothing to summarize; fall through to the normal
+                    # spawn path so the turn proceeds uncompacted.
+                    compact_node = None
+                if compact_node is not None:
+                    compact_node.pending_queue = [forwarded, *pending_queue]
+                    chatflow.add_node(compact_node)
+                    return compact_node
+
         mode = chatflow.default_execution_mode
         switches = derive_switches_from_mode(mode)
         inner = WorkFlow(
@@ -1073,14 +1443,14 @@ class ChatFlowEngine:
             judge_pre_enabled=switches.judge_pre,
             judge_during_enabled=switches.judge_during,
             judge_post_enabled=switches.judge_post,
-            # Seed the WorkFlow trio so judges and the planner all read
-            # from the same source. ``inputs`` and ``expected_outcome``
-            # are stock placeholders for now (see _STOCK_*); the planner
-            # writes real values onto worker / sub-WorkFlow trios as it
-            # decomposes. The user's prompt becomes ``description``.
-            description=EditableText.by_user(user_message_text),
-            inputs=EditableText.by_agent(_STOCK_INPUTS),
-            expected_outcome=EditableText.by_agent(_STOCK_EXPECTED_OUTCOME),
+            # Trio starts empty. judge_pre is the first node that runs;
+            # it reads the conversation and writes the distilled trio
+            # back onto this WorkFlow (see ``_after_judge_pre``). The
+            # planner then reads the judge_pre-authored trio; downstream
+            # children get per-subtask trios the planner authors.
+            description=None,
+            inputs=None,
+            expected_outcome=None,
             debate_round_budget=chatflow.debate_round_budget,
             judge_retry_budget=chatflow.judge_retry_budget,
             # Snapshot per-call-type overrides at spawn time so this
@@ -1126,6 +1496,7 @@ class ChatFlowEngine:
             workflow=inner,
             pending_queue=list(pending_queue),
             resolved_model=resolved,
+            entry_prompt_tokens=entry_tokens,
         )
         chatflow.add_node(chat_node)
         return chat_node
@@ -1136,12 +1507,13 @@ class ChatFlowEngine:
     # standalone WorkFlow, lift its single judge_call node into the inner
     # WorkFlow, then append the real conversation context after the
     # template-rendered system+user pair so the judge sees the actual
-    # exchange — not just the trio.
+    # exchange.
     #
-    # Per the judge-params pragma memory: we feed naive stock strings
-    # for ``inputs`` and ``expected_outcome`` because NodeBaseFields
-    # doesn't yet carry them as first-class fields. When the schema
-    # rework lands, switch to the real values.
+    # judge_pre additionally distills the WorkFlow trio from the
+    # conversation — its output carries ``extracted_{description,inputs,
+    # expected_outcome}`` which ``_after_judge_pre`` writes onto the
+    # parent WorkFlow before spawning the planner. judge_post reads the
+    # now-populated trio via ``_trio_params``.
 
     def _spawn_judge_pre(
         self,
@@ -1151,7 +1523,7 @@ class ChatFlowEngine:
     ) -> WorkFlowNode:
         templated = instantiate_fixture(
             self._fixture_plans["judge_pre"],
-            _trio_params(inner),
+            {},
             includes=self._fixture_includes,
         )
         node = _single_node(templated)
@@ -1338,9 +1710,9 @@ class ChatFlowEngine:
         parent WorkFlow. judge_pre seeded at the root with no chat
         context — the trio is all the sub-WorkFlow gets, deliberately.
         """
-        switches = derive_switches_from_mode(ExecutionMode.AUTO)
+        switches = derive_switches_from_mode(ExecutionMode.AUTO_PLAN)
         sub = WorkFlow(
-            execution_mode=ExecutionMode.AUTO,
+            execution_mode=ExecutionMode.AUTO_PLAN,
             plan_enabled=switches.plan,
             judge_pre_enabled=switches.judge_pre,
             judge_during_enabled=switches.judge_during,
@@ -1583,8 +1955,17 @@ class ChatFlowEngine:
         resolved_model: ProviderModelRef | None,
     ) -> None:
         """Branch on judge_pre's verdict: happy path spawns an llm_call,
-        halt path goes straight to judge_post in halt-summary mode."""
+        halt path goes straight to judge_post in halt-summary mode.
+
+        Before branching we also copy judge_pre's extracted trio onto
+        the parent WorkFlow so the planner (and every downstream
+        template that reads the trio via ``_trio_params``) sees the
+        judge_pre-distilled values rather than the ``None`` they were
+        seeded with in ``_spawn_turn_node``.
+        """
         verdict = judge_pre_node.judge_verdict
+        if verdict is not None:
+            _apply_judge_pre_trio(workflow, verdict)
         halt = verdict is None or _judge_pre_should_halt(verdict)
 
         if halt:
@@ -1613,7 +1994,7 @@ class ChatFlowEngine:
             return
 
         # Happy path: judge_pre cleared the run.
-        if workflow.execution_mode == ExecutionMode.AUTO:
+        if workflow.execution_mode == ExecutionMode.AUTO_PLAN:
             # Auto mode runs the recursive-planner pipeline:
             #   judge_pre → planner → planner_judge → worker
             #             → worker_judge → judge_post
@@ -1728,6 +2109,53 @@ class ChatFlowEngine:
 
         # Continue + atomic: materialize the worker.
         if decision == "continue" and plan.mode == "atomic" and plan.atomic is not None:
+            # Hard-block phantom tool names. If the planner picked
+            # ``step_kind: tool_call`` with a ``tool_name`` that isn't
+            # registered, spawning the worker is a guaranteed burn: the
+            # worker will propagate the hallucinated name into its own
+            # tool_use output, the registry will reject it, and we
+            # burn a round to learn something we already know. Bounce
+            # back into revise with a concrete list of real tools so
+            # the planner can self-correct. At budget, halt to the
+            # exit judge so the user sees a useful error.
+            if (
+                plan.atomic.step_kind == StepKind.TOOL_CALL
+                and plan.atomic.tool_name
+                and self._tools is not None
+                and not self._tools.has(plan.atomic.tool_name)
+            ):
+                known = sorted(t.name for t in self._tools.all())
+                known_repr = ", ".join(known) if known else "(none)"
+                critique = (
+                    f"Your atomic brief referenced tool_name="
+                    f"{plan.atomic.tool_name!r}, which is not a "
+                    f"registered tool. Available tools: {known_repr}. "
+                    "Either pick an actual tool name (or leave "
+                    "tool_name null so the worker chooses at run time), "
+                    'or change step_kind to "llm_call" if the task '
+                    "does not require a specific tool."
+                )
+                if (
+                    _round_index_for(workflow, planner_node)
+                    < workflow.debate_round_budget
+                ):
+                    self._spawn_planner(
+                        workflow,
+                        planner_judge_node,
+                        resolved_model=resolved_model,
+                        prior_plan=planner_node.output_message.content,
+                        critique=critique,
+                    )
+                    return
+                self._halt_to_post_judge(
+                    workflow,
+                    parent_node=planner_judge_node,
+                    upstream_kind="planner_judge_halt",
+                    upstream_summary=critique,
+                    user_message_text=user_message_text,
+                    context_wire=context_wire,
+                )
+                return
             self._spawn_worker(
                 workflow,
                 planner_judge_node,
@@ -2417,18 +2845,32 @@ class ChatFlowEngine:
         effective_disabled = (
             frozenset(chatflow.disabled_tool_names) | frozenset(ws_settings.globally_disabled())
         )
+        # Compact ChatNodes (auto-inserted by the dual-track trigger OR
+        # queued by an explicit user compact) run the single-shot compact
+        # worker. Disable Tier 1 inside them — the worker already IS a
+        # compaction — and skip the judge post-node hook (only relevant
+        # for turn nodes in semi_auto / auto mode).
+        is_compact_node = chat_node.compact_snapshot is not None
         try:
             await self._inner.execute(
                 chat_node.workflow,
                 chatflow_tool_loop_budget=chatflow.tool_loop_budget,
                 chatflow_auto_mode_revise_budget=chatflow.auto_mode_revise_budget,
-                chatflow_min_ground_ratio=chatflow.min_ground_ratio,
+                chatflow_min_ground_ratio=(
+                    None if is_compact_node else chatflow.min_ground_ratio
+                ),
                 chatflow_ground_ratio_grace_nodes=chatflow.ground_ratio_grace_nodes,
-                chatflow_compact_trigger_pct=chatflow.compact_trigger_pct,
+                chatflow_compact_trigger_pct=(
+                    None if is_compact_node else chatflow.compact_trigger_pct
+                ),
                 chatflow_compact_target_pct=chatflow.compact_target_pct,
                 chatflow_compact_preserve_recent_turns=chatflow.compact_preserve_recent_turns,
                 chatflow_compact_model=chatflow.compact_model,
-                post_node_hook=self._build_post_node_hook(chat_node, chatflow),
+                post_node_hook=(
+                    None
+                    if is_compact_node
+                    else self._build_post_node_hook(chat_node, chatflow)
+                ),
                 disabled_tool_names=effective_disabled,
             )
         except Exception as exc:  # noqa: BLE001 — engine boundary
@@ -2455,7 +2897,39 @@ class ChatFlowEngine:
             pending_prompt = chat_node.workflow.pending_user_prompt
             judge_post_text = _judge_post_response_text(chat_node.workflow)
             terminal = _terminal_llm_call(chat_node.workflow)
-            if runtime_error is not None:
+            if is_compact_node:
+                # Compact ChatNode finalization mirrors the tail of
+                # ``compact_chain``: fold the llm_call output into
+                # ``compact_snapshot.summary`` so downstream
+                # ``_build_chat_context`` treats this node as the cutoff.
+                summary_text = (
+                    (terminal.output_message.content or "").strip()
+                    if terminal is not None and terminal.output_message is not None
+                    else ""
+                )
+                if runtime_error is not None or not summary_text:
+                    chat_node.status = NodeStatus.FAILED
+                    chat_node.error = (
+                        runtime_error
+                        or "compact worker returned empty summary"
+                    )
+                else:
+                    snap = chat_node.compact_snapshot
+                    compacted_tokens = len(summary_text) // 4 + (
+                        _estimate_tokens_from_wire(snap.preserved_messages)
+                        if snap is not None
+                        else 0
+                    )
+                    if snap is not None:
+                        chat_node.compact_snapshot = snap.model_copy(
+                            update={
+                                "summary": summary_text,
+                                "compacted_tokens": compacted_tokens,
+                            }
+                        )
+                    chat_node.agent_response = EditableText.by_agent(summary_text)
+                    chat_node.status = NodeStatus.SUCCEEDED
+            elif runtime_error is not None:
                 chat_node.status = NodeStatus.FAILED
                 chat_node.error = runtime_error
             elif pending_prompt is not None:
@@ -2503,6 +2977,13 @@ class ChatFlowEngine:
                     terminal.error
                     or f"inner terminal status={terminal.status.value}"
                 )
+            # Freeze the output token count once agent_response is final.
+            # Every descendant will pay this many tokens to include this
+            # turn in its chain context (via _build_chat_context), so the
+            # canvas adds it to entry_prompt_tokens to show what the
+            # *next* turn will consume — not what this turn did.
+            response_text = chat_node.agent_response.text if chat_node.agent_response else ""
+            chat_node.output_response_tokens = _count_text_tokens(response_text)
             chat_node.finished_at = utcnow()
 
             if consumed_pending_id is not None:
@@ -2683,6 +3164,27 @@ def _cascade_fail_workflow(workflow: WorkFlow) -> list[str]:
         if wn.sub_workflow is not None:
             cascaded.extend(_cascade_fail_workflow(wn.sub_workflow))
     return cascaded
+
+
+def _apply_judge_pre_trio(workflow: WorkFlow, verdict: JudgeVerdict) -> None:
+    """Copy judge_pre's distilled trio onto ``workflow`` so every
+    downstream node that reads via ``_trio_params`` sees the judge_pre
+    authoring.
+
+    Called *before* branching on feasibility so that even halt paths
+    have a trio on the WorkFlow for judge_post / the UI to show. Any
+    field the judge returned as ``None`` or empty string is left
+    untouched on the WorkFlow (so re-running judge_pre won't
+    accidentally clobber an earlier good extraction with a blank).
+    """
+    def _set(attr: str, value: str | None) -> None:
+        if value is None or not value.strip():
+            return
+        setattr(workflow, attr, EditableText.by_agent(value))
+
+    _set("description", verdict.extracted_description)
+    _set("inputs", verdict.extracted_inputs)
+    _set("expected_outcome", verdict.extracted_expected_outcome)
 
 
 def _judge_pre_should_halt(verdict: JudgeVerdict) -> bool:
@@ -3290,22 +3792,39 @@ def _judge_crash_unrecoverable(workflow: WorkFlow) -> str | None:
 
 
 def _judge_post_response_text(workflow: WorkFlow) -> str | None:
-    """If the WorkFlow's judge_post produced a ``merged_response`` (the
-    decompose-accept aggregation case), return it so the ChatNode's
-    ``agent_response`` can use it as the layer's effective reply.
+    """Return the user-facing reply produced by the terminal judge_post,
+    if any, so the ChatNode's ``agent_response`` can use it as the
+    layer's effective reply.
 
-    Returns ``None`` for atomic happy-paths (where the worker's draft
-    is the reply) and for halt paths (where ``pending_user_prompt`` is
-    already set via ``judge_post_needs_user_input``).
+    Priority for an ``accept`` verdict:
+
+    - ``merged_response`` (decompose-accept aggregation).
+    - ``user_message`` (atomic-accept override). The judge_post prompt
+      nominally tells atomic-accept not to write ``user_message`` and
+      to let the worker's draft reach the user verbatim, but in
+      practice judges sometimes overwrite when the worker's draft is
+      unusable (tool-loop artifacts, raw planner JSON leaks). The judge
+      is the universal exit gate — trust its final word over a suspect
+      terminal llm_call.
+
+    Returns ``None`` for atomic accepts where the judge left both
+    fields empty (worker's draft is the reply) and for halt paths
+    (``pending_user_prompt`` is already set via
+    ``judge_post_needs_user_input``).
     """
     for n in reversed(list(workflow.nodes.values())):
         if (
-            n.step_kind == StepKind.JUDGE_CALL
-            and n.judge_variant == JudgeVariant.POST
-            and n.judge_verdict is not None
-            and n.judge_verdict.merged_response
+            n.step_kind != StepKind.JUDGE_CALL
+            or n.judge_variant != JudgeVariant.POST
+            or n.judge_verdict is None
         ):
-            return n.judge_verdict.merged_response
+            continue
+        v = n.judge_verdict
+        if v.post_verdict != "accept":
+            # retry / fail are surfaced through pending_user_prompt;
+            # the caller uses that instead.
+            return None
+        return v.merged_response or v.user_message or None
     return None
 
 
@@ -3600,7 +4119,12 @@ def _latest_leaf(chatflow: ChatFlow) -> str | None:
     return leaves[-1].id
 
 
-def _build_chat_context(chatflow: ChatFlow, parent_ids: list[str]) -> list[WireMessage]:
+def _build_chat_context(
+    chatflow: ChatFlow,
+    parent_ids: list[str],
+    *,
+    include_summary_preamble: bool = True,
+) -> list[WireMessage]:
     """Build the user/assistant message history from the ancestor chain.
 
     We walk ancestors topologically and, for each frozen ChatFlowNode
@@ -3614,15 +4138,27 @@ def _build_chat_context(chatflow: ChatFlow, parent_ids: list[str]) -> list[WireM
     snapshot's preserved tail. The latest compact wins when the chain
     carries more than one — the older one has already been folded
     into the newer one's input so we skip it.
+
+    ``include_summary_preamble=False`` omits the synthetic summary
+    message so only *real* messages are returned (prev-compact's
+    preserved tail + any turns after the cutoff). Used by
+    :meth:`ChatFlowEngine._build_compact_chatnode` so the next compact
+    doesn't fold the prior summary back into its own head_wire.
     """
     if not parent_ids:
         return []
-    # Single-parent chain for now — multi-parent merges arrive post-MVP.
+    # Primary-parent walk: follow parent_ids[0] up. A merge ChatNode is
+    # a hard stop — its ``agent_response`` already encodes both source
+    # branches, so the walk includes the merge node itself and then
+    # stops (same stop-rule as a compact snapshot, but applied at the
+    # chain-walk layer rather than as a summary-preamble swap).
     chain: list[str] = []
     current: str | None = parent_ids[0]
     while current is not None:
         chain.append(current)
         node = chatflow.nodes[current]
+        if node.merge_snapshot is not None:
+            break
         current = node.parent_ids[0] if node.parent_ids else None
     chain.reverse()
 
@@ -3640,15 +4176,16 @@ def _build_chat_context(chatflow: ChatFlow, parent_ids: list[str]) -> list[WireM
     if compact_cutoff_idx is not None:
         snap = chatflow.nodes[chain[compact_cutoff_idx]].compact_snapshot
         assert snap is not None  # loop guarantees
-        messages.append(
-            WireMessage(
-                role="user",
-                content=(
-                    "[Prior conversation — summarized to save context]\n\n"
-                    f"{snap.summary}"
-                ),
+        if include_summary_preamble:
+            messages.append(
+                WireMessage(
+                    role="user",
+                    content=(
+                        "[Prior conversation — summarized to save context]\n\n"
+                        f"{snap.summary}"
+                    ),
+                )
             )
-        )
         messages.extend(snap.preserved_messages)
         start_idx = compact_cutoff_idx + 1
 
@@ -3672,3 +4209,75 @@ def _build_chat_context(chatflow: ChatFlow, parent_ids: list[str]) -> list[WireM
             WireMessage(role="assistant", content=node.agent_response.text)
         )
     return messages
+
+
+def _serialize_wire_chain(msgs: list[WireMessage]) -> str:
+    """Flatten a chat-context WireMessage list into a newline-separated
+    ``[role] content`` string. Used as the ``left_summary`` / ``right_summary``
+    input to the merge builtin template — gives the LLM a readable
+    transcript of a single branch without needing multi-turn role
+    fidelity (the merger only produces one assistant turn downstream).
+    """
+    if not msgs:
+        return "(empty branch)"
+    return "\n\n".join(f"[{m.role}] {m.content}" for m in msgs)
+
+
+def _build_tagged_chat_context_for_compact(
+    chatflow: ChatFlow, parent_id: str
+) -> list[tuple[str | None, WireMessage]]:
+    """Return ``(chatnode_id, WireMessage)`` pairs for the real-message
+    chain rooted at ``parent_id`` — the same set :func:`_build_chat_context`
+    produces when called with ``include_summary_preamble=False``, but
+    with the originating ChatNode id attached so the compact worker can
+    cite them in its summary.
+
+    Preserved-tail messages from a prior compact snapshot are tagged
+    with the compact ChatNode's id (they lived there after the prior
+    compaction) rather than with whichever pre-compact ChatNode they
+    originally came from — that lineage is gone by the time the snapshot
+    ships. Non-frozen nodes on the chain are skipped (in-progress
+    branches don't enter compaction input).
+    """
+    chain: list[str] = []
+    current: str | None = parent_id
+    while current is not None:
+        chain.append(current)
+        node = chatflow.nodes[current]
+        # Merge ChatNodes are a hard stop — same rule as _build_chat_context.
+        if node.merge_snapshot is not None:
+            break
+        current = node.parent_ids[0] if node.parent_ids else None
+    chain.reverse()
+
+    compact_cutoff_idx: int | None = None
+    for i, nid in enumerate(chain):
+        node = chatflow.nodes[nid]
+        snap = node.compact_snapshot
+        if snap is not None and snap.summary:
+            compact_cutoff_idx = i
+
+    tagged: list[tuple[str | None, WireMessage]] = []
+    start_idx = 0
+    if compact_cutoff_idx is not None:
+        cutoff_id = chain[compact_cutoff_idx]
+        snap = chatflow.nodes[cutoff_id].compact_snapshot
+        assert snap is not None
+        for m in snap.preserved_messages:
+            tagged.append((cutoff_id, m))
+        start_idx = compact_cutoff_idx + 1
+
+    for nid in chain[start_idx:]:
+        node = chatflow.nodes[nid]
+        if not node.is_frozen:
+            continue
+        if node.compact_snapshot is not None:
+            continue
+        if node.user_message is not None:
+            tagged.append(
+                (nid, WireMessage(role="user", content=node.user_message.text))
+            )
+        tagged.append(
+            (nid, WireMessage(role="assistant", content=node.agent_response.text))
+        )
+    return tagged

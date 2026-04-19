@@ -21,7 +21,11 @@ from agentloom.db.repositories.workspace_settings import (
     WorkspaceNotFoundError,
     WorkspaceSettingsRepository,
 )
-from agentloom.schemas.workspace_settings import ToolState, WorkspaceSettings
+from agentloom.schemas.workspace_settings import (
+    ToolState,
+    WorkspaceLanguage,
+    WorkspaceSettings,
+)
 
 router = APIRouter(prefix="/api/workspace/settings", tags=["workspace"])
 
@@ -32,6 +36,7 @@ def _repo(session: AsyncSession) -> WorkspaceSettingsRepository:
 
 class PatchWorkspaceSettingsRequest(BaseModel):
     tool_states: dict[str, ToolState] | None = None
+    language: WorkspaceLanguage | None = None
 
 
 @router.get("")
@@ -58,6 +63,8 @@ async def patch_workspace_settings(
     provided = body.model_fields_set
     if "tool_states" in provided and body.tool_states is not None:
         current.tool_states = body.tool_states
+    if "language" in provided and body.language is not None:
+        current.language = body.language
 
     await repo.save(current)
     await session.commit()

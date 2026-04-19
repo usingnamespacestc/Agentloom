@@ -16,6 +16,7 @@ from agentloom.db.models.chatflow import ChatFlowRow, ChatFlowShare
 from agentloom.db.models.dashed_node_lock import DashedNodeLock
 from agentloom.db.models.folder import FolderRow
 from agentloom.db.models.mcp_server import MCPServerRow
+from agentloom.db.models.node_index import NodeIndexRow
 from agentloom.db.models.provider import ProviderRow
 from agentloom.db.models.tenancy import User, Workspace
 from agentloom.db.models.workflow import WorkflowRow
@@ -29,6 +30,7 @@ __all__ = [
     "DashedNodeLock",
     "FolderRow",
     "MCPServerRow",
+    "NodeIndexRow",
     "ProviderRow",
     "User",
     "WorkflowRow",

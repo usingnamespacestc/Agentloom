@@ -1,6 +1,6 @@
 builtin_id: title_gen
 name: "Title"
-description: "Generate a short human-readable title for a new ChatFlow from its first turn."
+description: "根据首轮对话为新建的 ChatFlow 生成一条简短的人类可读标题。"
 params_schema:
   first_user_message:
     type: string
@@ -10,28 +10,27 @@ params_schema:
     required: false
 plan:
   description:
-    text: "Generate a ChatFlow title."
+    text: "生成一个 ChatFlow 标题。"
     provenance: pure_agent
-  execution_mode: direct
+  execution_mode: native_react
   nodes:
     - id: "title_root"
       parent_ids: []
       step_kind: llm_call
       description:
-        text: "Name this conversation in ≤6 words."
+        text: "用不超过 12 个汉字为此对话命名。"
         provenance: pure_agent
       input_messages:
         - role: system
           content: |
-            Produce a title of at most six words summarizing what
-            the conversation is about. No quotes, no punctuation at
-            the end, no prefixes like "Title:". Return the title and
-            nothing else.
+            产出一条不超过 12 个汉字的标题，概括本次对话主题。不要
+            引号、末尾不要标点、不要"标题："之类前缀。只返回标题，
+            不要任何其他内容。
         - role: user
           content: |
-            First user message:
+            用户首条消息：
             {{ first_user_message }}
 
-            First agent response:
+            Agent 首条回复：
             {{ first_agent_response }}
   root_ids: ["title_root"]

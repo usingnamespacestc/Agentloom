@@ -96,6 +96,8 @@ export const api = {
       compact_preserve_recent_turns?: number;
       compact_model?: ProviderModelRef | null;
       compact_require_confirmation?: boolean;
+      chatnode_compact_trigger_pct?: number | null;
+      chatnode_compact_target_pct?: number;
     },
   ) =>
     request<{ ok: boolean }>(`/api/chatflows/${id}`, {
@@ -219,6 +221,30 @@ export const api = {
           must_drop: body.must_drop ?? "",
           preserve_recent_turns: body.preserve_recent_turns ?? null,
           target_tokens: body.target_tokens ?? null,
+          model: sanitizeRef(body.model ?? null),
+        }),
+      },
+    ),
+
+  /** Manual branch merge. Folds two ChatNode branches into a single
+   * synthesized reply; the new node's parent_ids are [left_id, right_id]. */
+  mergeChain: (
+    chatflowId: string,
+    body: {
+      left_id: string;
+      right_id: string;
+      merge_instruction?: string | null;
+      model?: ProviderModelRef | null;
+    },
+  ) =>
+    request<{ node_id: string; status: string }>(
+      `/api/chatflows/${chatflowId}/merge`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          left_id: body.left_id,
+          right_id: body.right_id,
+          merge_instruction: body.merge_instruction ?? null,
           model: sanitizeRef(body.model ?? null),
         }),
       },
@@ -349,6 +375,7 @@ export const api = {
 
   patchWorkspaceSettings: (patch: {
     tool_states?: Record<string, ToolState>;
+    language?: WorkspaceLanguage;
   }) =>
     request<WorkspaceSettingsDTO>("/api/workspace/settings", {
       method: "PATCH",
@@ -369,8 +396,11 @@ export interface ToolDTO {
 
 export type ToolState = "default_allow" | "available" | "disabled";
 
+export type WorkspaceLanguage = "en-US" | "zh-CN";
+
 export interface WorkspaceSettingsDTO {
   tool_states: Record<string, ToolState>;
+  language: WorkspaceLanguage;
 }
 
 // ---- mcp types ----

@@ -65,7 +65,7 @@ plan:
   description:
     text: "judge_post universal exit gate"
     provenance: pure_agent
-  execution_mode: direct
+  execution_mode: native_react
   nodes:
     - id: "judge_post_root"
       parent_ids: []
@@ -284,9 +284,10 @@ plan:
           content: |
             WorkFlow trio
             -------------
-            Description: {{ workflow_description }}
-            Inputs: {{ workflow_inputs }}
-            Expected outcome: {{ workflow_expected_outcome }}
+            {% if workflow_description %}Description: {{ workflow_description }}
+            {% endif %}{% if workflow_inputs %}Inputs: {{ workflow_inputs }}
+            {% endif %}{% if workflow_expected_outcome %}Expected outcome: {{ workflow_expected_outcome }}
+            {% endif %}
 
             WorkNode catalog
             ----------------

@@ -32,7 +32,7 @@ plan:
   description:
     text: "worker_judge — review the worker's draft"
     provenance: pure_agent
-  execution_mode: direct
+  execution_mode: native_react
   nodes:
     - id: "worker_judge_root"
       parent_ids: []

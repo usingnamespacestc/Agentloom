@@ -12,7 +12,7 @@ plan:
   description:
     text: "Merge two ChatFlow branches"
     provenance: pure_agent
-  execution_mode: direct
+  execution_mode: native_react
   nodes:
     - id: "merge_root"
       parent_ids: []

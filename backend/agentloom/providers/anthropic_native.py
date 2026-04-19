@@ -291,6 +291,7 @@ class AnthropicNativeAdapter(ProviderAdapter):
         on_token: TokenCallback | None = None,  # noqa: ARG002 — streaming TBD
         json_mode: str | None = None,  # noqa: ARG002 — Anthropic uses tool_use for structured output
         json_schema: dict[str, Any] | None = None,  # noqa: ARG002
+        forced_tool_name: str | None = None,
     ) -> ChatResponse:
         system_blocks, body = self._split_system(messages)
         payload: dict[str, Any] = {
@@ -319,6 +320,17 @@ class AnthropicNativeAdapter(ProviderAdapter):
         wire_tools = self._to_wire_tools(tools)
         if wire_tools is not None:
             payload["tools"] = wire_tools
+        # Anthropic's tool_choice shape differs from OpenAI's. Spec:
+        # ``{"type": "tool", "name": "<tool_name>"}``. As with the
+        # OpenAI-compat adapter, we only emit it when the named tool is
+        # actually exposed — otherwise the API would 400.
+        if forced_tool_name is not None and wire_tools:
+            tool_names = {t.get("name") for t in wire_tools}
+            if forced_tool_name in tool_names:
+                payload["tool_choice"] = {
+                    "type": "tool",
+                    "name": forced_tool_name,
+                }
         if extra:
             payload.update(extra)
 

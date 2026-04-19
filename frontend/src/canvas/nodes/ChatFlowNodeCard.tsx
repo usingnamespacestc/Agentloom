@@ -81,10 +81,16 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
     maxContextTokens,
   } = data as ChatFlowNodeData;
   const isMerge = node.parent_ids.length >= 2;
+  const isMergeSettled = node.merge_snapshot != null;
   const isGreetingRoot = node.user_message === null;
   const hasWorkflow = Object.keys(node.workflow.nodes).length > 0;
   const isDashed = node.status === "planned" || node.status === "running";
   const isAwaitingUser = !!node.workflow.pending_user_prompt;
+  const isCompact = node.compact_snapshot != null;
+  const executionMode = node.workflow.execution_mode;
+  const isPendingMergeFirst = useChatFlowStore(
+    (s) => s.pendingMergeFirstId === node.id,
+  );
 
   // Live preview: pick the longest streaming delta among any running
   // WorkNode under this ChatNode (handles parallel siblings + nested
@@ -120,27 +126,43 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
   return (
     <div
       data-testid={`chatflow-node-${node.id}`}
+      data-compact={isCompact ? "1" : undefined}
       className={[
         "group/card relative rounded-lg border shadow-sm w-52 p-2.5 text-xs",
-        isAwaitingUser
-          ? "bg-amber-50 border-l-[3px] border-l-amber-500"
-          : isRoot
-            ? "bg-blue-50 border-l-[3px] border-l-blue-400"
-            : isLeaf
-              ? "bg-green-50"
-              : "bg-white",
+        isCompact
+          ? "bg-teal-50 border-l-[3px] border-l-teal-500"
+          : isAwaitingUser
+            ? "bg-amber-50 border-l-[3px] border-l-amber-500"
+            : isRoot
+              ? "bg-blue-50 border-l-[3px] border-l-blue-400"
+              : isLeaf
+                ? "bg-green-50"
+                : "bg-white",
         isSelected
           ? "border-blue-500 ring-2 ring-blue-200"
-          : isAwaitingUser
-            ? "border-amber-300"
-            : isRoot
-              ? "border-blue-200"
-              : isLeaf
-                ? "border-green-200"
-                : "border-gray-300",
+          : isCompact
+            ? "border-teal-300"
+            : isAwaitingUser
+              ? "border-amber-300"
+              : isRoot
+                ? "border-blue-200"
+                : isLeaf
+                  ? "border-green-200"
+                  : "border-gray-300",
         isMerge ? "border-purple-400" : "",
         isDashed ? "border-dashed" : "",
+        executionMode === "auto_plan"
+          ? "outline outline-2 outline-violet-400 outline-offset-2"
+          : executionMode === "native_react"
+            ? "outline outline-1 outline-sky-300 outline-offset-2"
+            : "",
+        isPendingMergeFirst
+          ? "ring-4 ring-violet-400 animate-pulse"
+          : "",
       ].join(" ")}
+      data-pending-merge-first={isPendingMergeFirst ? "1" : undefined}
+      data-merge={isMergeSettled ? "1" : undefined}
+      title={t(`chatflow_settings.execution_mode_${executionMode}_hint`)}
     >
       {!isRoot && <Handle type="target" position={Position.Left} />}
 
@@ -159,6 +181,15 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
 
       <div className="flex items-center justify-between mb-1.5">
         <StatusBadge status={node.status} />
+        {isCompact && (
+          <span
+            title={t("chatflow.compact_badge_hint")}
+            className="inline-flex items-center gap-0.5 rounded bg-teal-200/80 px-1 py-0.5 text-[10px] font-semibold text-teal-900"
+          >
+            <span aria-hidden>⟲</span>
+            {t("chatflow.compact_badge")}
+          </span>
+        )}
         {isAwaitingUser && (
           <span
             title={t("chatflow.awaiting_user_hint")}
@@ -168,7 +199,17 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
           </span>
         )}
         {isMerge && (
-          <span className="text-[10px] text-purple-600 font-medium">⨯{node.parent_ids.length}</span>
+          <span
+            className="text-[10px] text-purple-600 font-medium"
+            title={
+              isMergeSettled
+                ? t("chatflow.merge_badge_hint")
+                : undefined
+            }
+          >
+            {isMergeSettled ? "⨝" : "⨯"}
+            {node.parent_ids.length}
+          </span>
         )}
         {node.pending_queue?.length > 0 && (
           <span className="text-[10px] text-blue-500 font-medium">
@@ -177,7 +218,23 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
         )}
       </div>
 
-      {isGreetingRoot ? (
+      {isCompact ? (
+        <div className="mb-1.5">
+          <div className="text-[10px] text-teal-700 mb-0.5">{t("chatflow.compact_summary")}</div>
+          <div className="prose prose-sm max-w-none text-xs text-gray-900 break-words leading-snug">
+            {node.agent_response.text ? (
+              <Markdown>{truncate(node.agent_response.text)}</Markdown>
+            ) : node.status === "running" ? (
+              <span className="inline-flex items-center gap-1 text-teal-600">
+                <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-teal-400" />
+                compacting…
+              </span>
+            ) : (
+              <span className="italic text-gray-400">—</span>
+            )}
+          </div>
+        </div>
+      ) : isGreetingRoot ? (
         <div className="mb-1.5">
           <div className="text-[10px] text-gray-500 mb-0.5">{t("chatflow.agent")}</div>
           <div className="prose prose-sm max-w-none text-xs text-gray-900 break-words leading-snug">

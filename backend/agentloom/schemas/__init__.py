@@ -23,7 +23,13 @@ from agentloom.schemas.chatflow import (
     make_chatflow,
 )
 from agentloom.schemas.provider import ModelInfo, ProviderConfig, ProviderKind
-from agentloom.schemas.workflow import CompactSnapshot, WireMessage, WorkFlow, WorkFlowNode
+from agentloom.schemas.workflow import (
+    CompactSnapshot,
+    MergeSnapshot,
+    WireMessage,
+    WorkFlow,
+    WorkFlowNode,
+)
 from agentloom.schemas.workspace_settings import (
     BUILTIN_DEFAULT_STATES,
     ToolState,
@@ -34,6 +40,7 @@ __all__ = [
     "ChatFlow",
     "ChatFlowNode",
     "CompactSnapshot",
+    "MergeSnapshot",
     "DEFAULT_GREETING",
     "EditProvenance",
     "EditableText",

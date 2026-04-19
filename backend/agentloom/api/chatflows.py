@@ -130,6 +130,12 @@ async def _attached_chatflow(
         chat = await repo.get(chatflow_id)
     except ChatFlowNotFoundError as exc:
         raise HTTPException(404, f"chatflow {chatflow_id} not found") from exc
+    # Warm the provider-context-window cache so the engine's
+    # `_context_window_for` hook returns real windows (ark's 131072
+    # rather than the 32k fallback). The repo already has a session.
+    from agentloom.engine.provider_context_cache import refresh as _ctx_refresh
+
+    await _ctx_refresh(ProviderRepository(repo.session, workspace_id=DEFAULT_WORKSPACE_ID))
     runtime = await engine.attach(chat)
     return runtime.chatflow
 
@@ -226,6 +232,25 @@ class CompactChainRequest(BaseModel):
 
 
 class CompactChainResponse(BaseModel):
+    node_id: str
+    status: str
+
+
+class MergeChainRequest(BaseModel):
+    """Body for POST /chatflows/{id}/merge.
+
+    MVP: exactly two source ChatNode ids — ``left_id`` and ``right_id``.
+    Either ordering is fine; the left/right naming is only a UI cue for
+    the merge prompt.
+    """
+
+    left_id: str
+    right_id: str
+    merge_instruction: str | None = None
+    model: ProviderModelRef | None = None
+
+
+class MergeChainResponse(BaseModel):
     node_id: str
     status: str
 
@@ -327,6 +352,13 @@ class PatchChatFlowRequest(BaseModel):
     min_ground_ratio: float | None = None
     ground_ratio_grace_nodes: int | None = None
     disabled_tool_names: list[str] | None = None
+    compact_trigger_pct: float | None = None
+    compact_target_pct: float | None = None
+    compact_preserve_recent_turns: int | None = None
+    compact_model: ProviderModelRef | None = None
+    compact_require_confirmation: bool | None = None
+    chatnode_compact_trigger_pct: float | None = None
+    chatnode_compact_target_pct: float | None = None
 
 
 @router.patch("/{chatflow_id}")
@@ -361,6 +393,17 @@ async def patch_chatflow(
         kwargs["ground_ratio_grace_nodes"] = body.ground_ratio_grace_nodes
     if "disabled_tool_names" in provided:
         kwargs["disabled_tool_names"] = body.disabled_tool_names
+    for fld in (
+        "compact_trigger_pct",
+        "compact_target_pct",
+        "compact_preserve_recent_turns",
+        "compact_model",
+        "compact_require_confirmation",
+        "chatnode_compact_trigger_pct",
+        "chatnode_compact_target_pct",
+    ):
+        if fld in provided:
+            kwargs[fld] = getattr(body, fld)
     if not kwargs:
         return {"ok": True}
     try:
@@ -402,6 +445,26 @@ async def patch_chatflow(
             rt_chat.ground_ratio_grace_nodes = body.ground_ratio_grace_nodes
         if "disabled_tool_names" in provided and body.disabled_tool_names is not None:
             rt_chat.disabled_tool_names = body.disabled_tool_names
+        for fld in (
+            "compact_trigger_pct",
+            "compact_target_pct",
+            "compact_preserve_recent_turns",
+            "compact_model",
+            "compact_require_confirmation",
+            "chatnode_compact_trigger_pct",
+            "chatnode_compact_target_pct",
+        ):
+            if fld in provided:
+                val = getattr(body, fld)
+                # None is meaningful for *_trigger_pct (= disable tier);
+                # for the other fields skip None so a missing value
+                # doesn't clobber a defaulted one.
+                if (
+                    val is None
+                    and fld not in ("compact_trigger_pct", "chatnode_compact_trigger_pct", "compact_model")
+                ):
+                    continue
+                setattr(rt_chat, fld, val)
 
     return {"ok": True}
 
@@ -801,6 +864,58 @@ async def compact_chain(
     return CompactChainResponse(
         node_id=compact_node.id,
         status=compact_node.status.value,
+    )
+
+
+@router.post(
+    "/{chatflow_id}/merge",
+    response_model=MergeChainResponse,
+)
+async def merge_chain(
+    chatflow_id: str,
+    body: MergeChainRequest,
+    request: Request,
+    session_maker: async_sessionmaker[AsyncSession] = Depends(get_session_scope),
+) -> MergeChainResponse:
+    """Fold two ChatNode branches into one merge ChatNode.
+
+    Session handling mirrors ``compact_chain``: DB is released while the
+    merge worker runs so the LLM call doesn't hold a connection open.
+    """
+    engine = _get_engine(request)
+
+    async with session_maker() as session:
+        repo = _repo(session)
+        chat = await _attached_chatflow(engine, repo, chatflow_id)
+        if body.left_id not in chat.nodes:
+            raise HTTPException(
+                404, f"node {body.left_id} not in chatflow {chatflow_id}"
+            )
+        if body.right_id not in chat.nodes:
+            raise HTTPException(
+                404, f"node {body.right_id} not in chatflow {chatflow_id}"
+            )
+
+    try:
+        merge_node = await engine.merge_chain(
+            chat.id,
+            left_id=body.left_id,
+            right_id=body.right_id,
+            merge_instruction=body.merge_instruction,
+            model=body.model,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+    async with session_maker() as session:
+        await _repo(session).save(chat)
+        await session.commit()
+
+    return MergeChainResponse(
+        node_id=merge_node.id,
+        status=merge_node.status.value,
     )
 
 

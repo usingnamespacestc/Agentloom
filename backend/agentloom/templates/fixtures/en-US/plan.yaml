@@ -26,7 +26,7 @@ plan:
   description:
     text: "Plan for: {{ goal }}"
     provenance: pure_agent
-  execution_mode: direct
+  execution_mode: native_react
   plan_enabled: false
   judge_pre_enabled: false
   judge_during_enabled: false

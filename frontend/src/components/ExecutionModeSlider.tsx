@@ -11,18 +11,18 @@ import { useTranslation } from "react-i18next";
 import { useChatFlowStore } from "@/store/chatflowStore";
 import { EXECUTION_MODES, type ExecutionMode } from "@/types/schema";
 
-/** Per-mode color for the active segment. Gray → amber → violet
+/** Per-mode color for the active segment. Sky → amber → violet
  * suggests escalating autonomy / risk. */
 const ACTIVE_STYLE: Record<ExecutionMode, string> = {
-  direct: "bg-gray-200 text-gray-900 ring-1 ring-gray-300",
+  native_react: "bg-sky-200 text-sky-900 ring-1 ring-sky-400",
   semi_auto: "bg-amber-200 text-amber-900 ring-1 ring-amber-400",
-  auto: "bg-violet-200 text-violet-900 ring-1 ring-violet-400",
+  auto_plan: "bg-violet-200 text-violet-900 ring-1 ring-violet-400",
 };
 
 const DOT_STYLE: Record<ExecutionMode, string> = {
-  direct: "bg-gray-400",
+  native_react: "bg-sky-500",
   semi_auto: "bg-amber-500",
-  auto: "bg-violet-500",
+  auto_plan: "bg-violet-500",
 };
 
 export function ExecutionModeSlider() {

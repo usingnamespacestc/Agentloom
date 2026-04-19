@@ -6,9 +6,13 @@ frozen nodes cannot be modified on save).
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from typing import Any, Iterable
+
+from sqlalchemy import delete, exists, select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from agentloom.db.models.chatflow import ChatFlowRow
+from agentloom.db.models.node_index import NodeIndexRow
 from agentloom.db.repositories.base import WorkspaceScopedRepository
 from agentloom.schemas import ChatFlow
 from agentloom.schemas.common import (
@@ -34,6 +38,7 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         )
         self.session.add(row)
         await self.session.flush()
+        await self._rebuild_node_index(chatflow)
         return row
 
     async def get(self, chatflow_id: str) -> ChatFlow:
@@ -45,7 +50,7 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         row = (await self.session.execute(stmt)).scalar_one_or_none()
         if row is None:
             raise ChatFlowNotFoundError(chatflow_id)
-        return ChatFlow.model_validate(row.payload)
+        return ChatFlow.model_validate(_clamp_legacy_compact(row.payload))
 
     async def save(self, chatflow: ChatFlow) -> None:
         """Overwrite an existing row. Rejects any mutation of a node
@@ -60,7 +65,7 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         if row is None:
             raise ChatFlowNotFoundError(chatflow.id)
 
-        prior = ChatFlow.model_validate(row.payload)
+        prior = ChatFlow.model_validate(_clamp_legacy_compact(row.payload))
         _assert_frozen_chatflow_nodes_unchanged(prior, chatflow)
 
         row.title = chatflow.title
@@ -68,6 +73,7 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         row.tags = chatflow.tags or None
         row.payload = chatflow.model_dump(mode="json")
         await self.session.flush()
+        await self._rebuild_node_index(chatflow)
 
     async def list_ids(self) -> list[str]:
         stmt = (
@@ -121,6 +127,13 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         min_ground_ratio: float | None = ...,  # type: ignore[assignment]
         ground_ratio_grace_nodes: int | None = ...,  # type: ignore[assignment]
         disabled_tool_names: list[str] | None = ...,  # type: ignore[assignment]
+        compact_trigger_pct: float | None = ...,  # type: ignore[assignment]
+        compact_target_pct: float | None = ...,  # type: ignore[assignment]
+        compact_preserve_recent_turns: int | None = ...,  # type: ignore[assignment]
+        compact_model: ProviderModelRef | None = ...,  # type: ignore[assignment]
+        compact_require_confirmation: bool | None = ...,  # type: ignore[assignment]
+        chatnode_compact_trigger_pct: float | None = ...,  # type: ignore[assignment]
+        chatnode_compact_target_pct: float | None = ...,  # type: ignore[assignment]
     ) -> None:
         """Update metadata fields. Pass ``...`` (default) to skip a field.
 
@@ -180,6 +193,26 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         if disabled_tool_names is not ...:
             if disabled_tool_names is not None:
                 payload["disabled_tool_names"] = list(disabled_tool_names)
+        if compact_trigger_pct is not ...:
+            payload["compact_trigger_pct"] = compact_trigger_pct
+        if compact_target_pct is not ...:
+            if compact_target_pct is not None:
+                payload["compact_target_pct"] = compact_target_pct
+        if compact_preserve_recent_turns is not ...:
+            if compact_preserve_recent_turns is not None:
+                payload["compact_preserve_recent_turns"] = compact_preserve_recent_turns
+        if compact_model is not ...:
+            payload["compact_model"] = (
+                compact_model.model_dump(mode="json") if compact_model else None
+            )
+        if compact_require_confirmation is not ...:
+            if compact_require_confirmation is not None:
+                payload["compact_require_confirmation"] = compact_require_confirmation
+        if chatnode_compact_trigger_pct is not ...:
+            payload["chatnode_compact_trigger_pct"] = chatnode_compact_trigger_pct
+        if chatnode_compact_target_pct is not ...:
+            if chatnode_compact_target_pct is not None:
+                payload["chatnode_compact_target_pct"] = chatnode_compact_target_pct
         row.payload = payload
         await self.session.flush()
 
@@ -207,6 +240,126 @@ class ChatFlowRepository(WorkspaceScopedRepository):
             raise ChatFlowNotFoundError(chatflow_id)
         await self.session.delete(row)
         await self.session.flush()
+
+    async def _rebuild_node_index(self, chatflow: ChatFlow) -> None:
+        """Drop every ``node_index`` row for this chatflow and reinsert
+        one row per ChatNode and per nested WorkNode. Called after every
+        ``create`` / ``save`` so the index stays in lockstep with the
+        stored payload.
+
+        Full-rebuild (rather than diff) because ChatFlow mutations can
+        add, remove, or move nodes anywhere in the tree — and the payload
+        is JSONB, so a structural diff from SQL would be just as
+        expensive as re-extraction from the loaded Pydantic model.
+        """
+        await self.session.execute(
+            delete(NodeIndexRow).where(NodeIndexRow.chatflow_id == chatflow.id)
+        )
+        for node_id, kind in _iter_indexed_nodes(chatflow):
+            self.session.add(
+                NodeIndexRow(
+                    node_id=node_id,
+                    chatflow_id=chatflow.id,
+                    workspace_id=self.workspace_id,
+                    kind=kind,
+                )
+            )
+        await self.session.flush()
+
+
+def _iter_indexed_nodes(chatflow: ChatFlow) -> Iterable[tuple[str, str]]:
+    """Yield ``(node_id, kind)`` for every ChatNode and every WorkNode
+    in the ChatFlow, including those nested inside sub-workflows.
+
+    ``kind`` is ``"chatnode"`` for top-level ChatFlowNode entries and
+    ``"worknode"`` for every WorkFlowNode reached via any ChatNode's
+    attached workflow (and recursively through
+    ``WorkFlowNode.sub_workflow``).
+    """
+    for chat_node_id, chat_node in chatflow.nodes.items():
+        yield chat_node_id, "chatnode"
+        workflow = chat_node.workflow
+        if workflow is not None:
+            yield from _iter_worknodes(workflow)
+
+
+def _iter_worknodes(workflow: Any) -> Iterable[tuple[str, str]]:
+    for wn_id, wn in workflow.nodes.items():
+        yield wn_id, "worknode"
+        sub = getattr(wn, "sub_workflow", None)
+        if sub is not None:
+            yield from _iter_worknodes(sub)
+
+
+async def backfill_missing_node_index(
+    session_maker: async_sessionmaker[Any],
+) -> int:
+    """Populate ``node_index`` for any chatflow that lacks entries.
+
+    Called from the app lifespan on startup so the ``get_node_context``
+    tool can resolve nodes from chatflows that predate the index (which
+    would otherwise only get entries on their next save). A chatflow is
+    considered "unindexed" if *zero* rows in ``node_index`` reference
+    it — a coarse but safe predicate since create/save always rebuild
+    the full set atomically.
+
+    Returns the number of chatflows rebuilt. Commits its own session.
+    """
+    async with session_maker() as session:
+        stmt = select(ChatFlowRow.id, ChatFlowRow.workspace_id).where(
+            ~exists().where(NodeIndexRow.chatflow_id == ChatFlowRow.id)
+        )
+        targets = list((await session.execute(stmt)).all())
+        if not targets:
+            return 0
+        count = 0
+        for chatflow_id, workspace_id in targets:
+            row = (
+                await session.execute(
+                    select(ChatFlowRow).where(ChatFlowRow.id == chatflow_id)
+                )
+            ).scalar_one()
+            chatflow = ChatFlow.model_validate(_clamp_legacy_compact(row.payload))
+            for node_id, kind in _iter_indexed_nodes(chatflow):
+                session.add(
+                    NodeIndexRow(
+                        node_id=node_id,
+                        chatflow_id=chatflow_id,
+                        workspace_id=workspace_id,
+                        kind=kind,
+                    )
+                )
+            count += 1
+        await session.commit()
+        return count
+
+
+def _clamp_legacy_compact(payload: dict) -> dict:
+    """Normalize rows saved before the ``trigger + target <= 1.0`` invariant.
+
+    Rows created under the old ``compact_target_pct=0.5`` default violate
+    the new schema validator when combined with ``compact_trigger_pct=0.7``.
+    Clamp target down to ``1.0 - trigger`` so historical data stays
+    loadable; new writes still go through the strict validator.
+    """
+    out = dict(payload)
+    trig = out.get("compact_trigger_pct")
+    tgt = out.get("compact_target_pct")
+    if (
+        isinstance(trig, (int, float))
+        and isinstance(tgt, (int, float))
+        and trig + tgt > 1.0
+    ):
+        out["compact_target_pct"] = max(0.0, round(1.0 - trig, 6))
+    cn_trig = out.get("chatnode_compact_trigger_pct")
+    cn_tgt = out.get("chatnode_compact_target_pct")
+    if (
+        isinstance(cn_trig, (int, float))
+        and isinstance(cn_tgt, (int, float))
+        and cn_trig + cn_tgt > 1.0
+    ):
+        out["chatnode_compact_target_pct"] = max(0.0, round(1.0 - cn_trig, 6))
+    return out
 
 
 #: Fields on a ChatFlowNode that may be mutated even after the node is

@@ -1,0 +1,273 @@
+builtin_id: judge_post
+name: "Judge（post）"
+description: >
+  通用出口闸。审阅 WorkFlow 的最终产出（完成的 llm_call、judge_pre
+  的否决、judge_during 的中止、或上游节点的报错），决定
+  accept/retry/fail。在 halt 路径上，它还会写下交给用户的消息，
+  由 ChatFlow 作为 agent 的回复呈现。
+params_schema:
+  workflow_description:
+    type: string
+    required: true
+  workflow_inputs:
+    type: string
+    required: false
+  workflow_expected_outcome:
+    type: string
+    required: true
+  upstream_kind:
+    type: string
+    required: true
+    description: >
+      WorkFlow 终态是由什么导致的。取值：``completed``（llm_call
+      正常结束）、``judge_pre_halt``（judge_pre 在任何 llm_call 之前
+      就否决了）、``judge_during_halt``（judge_during 的 revise 预算
+      用尽）、``node_error``（上游节点失败）。judge 据此选择合适的
+      语气。
+  upstream_summary:
+    type: string
+    required: true
+    description: >
+      上游状态的自由文本摘要——llm_call 的输出、judge_pre 判定的
+      blockers/missing_inputs 等。judge 以此为权威来源决定该告诉
+      用户什么。
+  worknode_catalog:
+    type: string
+    required: false
+    description: >
+      以换行分隔的 ``id: description`` 行，让 judge 在标注问题时能
+      指向具体位置。
+  redo_eligible_catalog:
+    type: string
+    required: false
+    description: >
+      以换行分隔的 ``id: kind — description`` 行，列出引擎愿意重新
+      生成的节点（仅 worker llm_calls 和 sub_agent_delegations）。
+      ``redo_targets[].node_id`` 必须出现在这份名单里——不在名单中
+      的 id（judges、planners、tool_calls）会被引擎静默丢弃，并导
+      致本次重试直接 halt。
+  layer_notes:
+    type: string
+    required: false
+    description: >
+      当前层的黑板。本 WorkFlow 内每个已完成的兄弟 WorkNode
+      （planner / worker / 内层 judge / sub_agent_delegations /
+      tool_calls）各占一段，附作者节点 id、role、以及一行摘要。
+      仅 judge_post 会拿到这份信息——它让出口闸能通观整个 run，
+      并把 ``redo_targets`` 精准指向具体 node id。当没有 notes 时
+      （例如 worker 还没跑就被 judge_pre halt 掉）为空。
+plan:
+  description:
+    text: "judge_post 通用出口闸"
+    provenance: pure_agent
+  execution_mode: native_react
+  nodes:
+    - id: "judge_post_root"
+      parent_ids: []
+      step_kind: judge_call
+      judge_variant: post
+      role: post_judge
+      description:
+        text: "决定 accept/retry/fail；必要时写下对用户的回复。"
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            {% include '_critique_base' %}
+
+            你正在跑 *post* 这一道——WorkFlow 的通用出口闸。每一次
+            WorkFlow 运行，不论它是如何终止的，最终都由你决定用户
+            （如果有的话）看到什么。
+
+            决定 ``post_verdict``：
+              - accept：WorkFlow 的产出满足 expected outcome，无阻塞。
+                  * 当 ``completed`` 且为 atomic 时：终末 llm_call 的
+                    原始输出会逐字送达用户——不要写 ``user_message``
+                    或 ``merged_response``。
+                  * 当 ``decompose_aggregation`` 时：你*必须*输出一段
+                    ``merged_response``，把子任务的产出综合成用户实际
+                    看到的那一条回复。该合并文本（而不是任何子任务
+                    草稿）才是本层的最终输出。
+              - retry： 存在可修复的缺口——具体问题应通过重跑一个或
+                        多个 WorkNode 来解决。写一条 ``user_message``
+                        说明缺口并询问用户如何继续。可选地在
+                        ``redo_targets`` 列出你想重跑的 node id（每个
+                        带一条简短的 ``critique``）；引擎据此重新
+                        生成这些节点。
+
+                        retry 的硬性规则——违反这些规则会浪费算力
+                        并得到更差的答案：
+
+                          (a) ``retry`` 仅适用于重新生成的节点*凭你
+                              的批评就能自行修复*的失败。如果你诚实
+                              的批评会是"需要用户调整 X / 放宽 Y /
+                              补充 Z"——那就不是 retry 能解决的。请
+                              改选 ``fail``，并把同样的内容放进
+                              ``user_message``。在批评里写"需要用户
+                              输入"去重新生成节点，只会让新节点以
+                              相同理由再次拒绝，然后下一轮你又回到
+                              这里。
+
+                          (b) 不要仅因为某节点是被另一个失败下游牵
+                              连的（例如因为某个上游子任务失败，导
+                              致 merge/aggregation 步骤无可合并），
+                              就把它列入 ``redo_targets``。只列你真
+                              正想改变其行为的节点。下游消费者会在
+                              其上游被重生成并产出新内容时自动重跑。
+
+                          (c) 如果同一个子任务在上一轮 retry 中就以
+                              同类批评失败过（例如"约束冲突"、"按
+                              当前规格不可行"），就不要再 retry 了
+                              ——那是循环。改选 ``fail``，把问题抛
+                              给用户。
+
+                          (d) ``redo_targets[].node_id`` 中的每个值
+                              必须逐字出现在下方"Redo-eligible
+                              WorkNodes"列表里。引擎只能重新生成
+                              worker llm_calls 和 sub_agent_delegations；
+                              如果传入的是 planner、planner_judge、
+                              worker_judge、post_judge、pre_judge 或
+                              tool_call，它会被静默丢弃——一旦没有
+                              可重做的目标剩下，整个 WorkFlow 会直
+                              接 halt 给用户。如果你希望 judge /
+                              planner / tool_call 的行为改变，请改为
+                              重试其上游 worker（即为该节点提供输入
+                              的 worker），并在批评中说明期望的改
+                              动。id 必须逐字符照抄，不要转述或重建。
+              - fail：  WorkFlow 按当前形态无法成功（或在完成前触发
+                        了 halt 条件）。写一条 ``user_message`` 说明
+                        情况并询问用户下一步如何处理。
+
+            ``upstream_kind`` 告诉你是什么把你叫进来的：
+              - ``completed``：一个 llm_call 产出了结果，请据 expected
+                outcome 评判。
+              - ``decompose_aggregation``：decompose 组里所有子
+                sub_agent_delegations 都已完成。upstream_summary 是
+                一串结构化的按子任务分块内容::
+
+                    [subtask N id=<worknode_id> status=<status>{ detail="..."}]
+                    <label>
+                    <body>
+
+                ``status`` 取值：
+                  * ``ok`` —— 子任务产出了可用结果（body 是其
+                    merged_response 或 worker 草稿）。
+                  * ``sub_pre_halt`` —— 子任务自己的 judge_pre 以
+                    infeasible / 缺输入为由否决。body 给出 blockers /
+                    missing_inputs / reason。
+                  * ``worker_failed`` —— 子任务的 worker llm_call 抛错。
+                    body 给出错误。
+                  * ``sub_judge_post_failed`` —— 子任务的 judge_post
+                    崩了。body 给出崩溃原因以及未经评审的 worker 草稿。
+                  * ``sub_judge_post_fail`` / ``sub_judge_post_retry_exhausted``
+                    —— 子任务的 judge_post 判定失败或用完了重试配额。
+                    body 给出它的 ``user_message``（这是给*你*的建议，
+                    不是给终端用户的）。
+                  * ``empty`` —— 病态的无输出情形。
+
+                记住：子层失败是*内部*信号。根据状态混合情况以及该
+                任务是否仍可作答来决定：
+
+                  * 全部子任务 ``ok``：``accept``——把它们的 body 综合
+                    成一段连贯的 ``merged_response`` 给用户。
+                  * 部分 ``ok``、部分失败但*对用户请求不关键*（例如
+                    planner 额外加的冗余子任务）：``accept``——聚合
+                    ok 的 body，忽略失败。
+                  * 部分 ``ok``、部分失败且*关键*：选 ``retry`` 并在
+                    ``redo_targets`` 中点名失败子任务的 id 并附具体
+                    critique；或选 ``accept`` 并在 ``merged_response``
+                    中以说明性措辞注明哪部分没交付；或当两者都不
+                    合适时选 ``fail``。选法按上方 retry 硬性规则：
+                      - 失败是 planner 的失误，新一轮可以绕开（输入
+                        错了、步骤缺失）→ ``retry``。
+                      - 失败是 worker 的瞬时错误（网络、解析）
+                        → ``retry``。
+                      - 失败是 worker 诚实尝试后暴露的真实不可行性
+                        （约束冲突、需要用户调整）→ ``fail``，不要
+                        retry。
+                      - 事后看来并非关键 → ``accept`` 并加说明。
+                  * *所有*子任务都失败，或成功的那些全部跑偏：
+                    ``fail``，并写 ``user_message`` 复述"什么没做成"
+                    并询问如何继续。
+              - ``redo_aggregation``：上一轮 judge_post 判 ``retry``
+                并给了 ``redo_targets``；那些克隆节点现在跑完了。
+                upstream_summary 回溯整条 retry 链至第 1 轮，并为每
+                个第 1 轮子任务各输出一段*最新存活版本*::
+
+                    [subtask N id=<worknode_id> status=<status> round=R{ detail="..."}]
+                    <label>
+                    <body>
+
+                ``round=R`` 告诉你这个版本来自哪一轮重试（R=1 指
+                从未被重试的原始节点；R=2 指第 2 轮的克隆，依此
+                类推）。一个 status=ok round=1 的块代表当时就成功、
+                此后从未被重试的兄弟——它仍是最终画面的组成部分，
+                必须被纳入你可能输出的 ``merged_response``。
+
+                状态混合时采用与 ``decompose_aggregation`` 相同的决策
+                规则。具体来说：
+
+                  * 跨轮次所有子任务都 ``ok``：``accept`` 并把它们的
+                    body 综合为连贯的 ``merged_response``。用户不需要
+                    知道重试过程。
+                  * 仍有部分失败：仅在失败看起来*新近可修复*时选
+                    ``retry``。若某子任务已经连续两轮以同类错误失败，
+                    通常就是不可修复的——优先 ``fail`` 并在
+                    ``user_message`` 点名什么没做成，或当失败部分不
+                    关键时 ``accept`` 并在 ``merged_response`` 中加
+                    说明。
+
+                不要在此处有 status=ok 的前轮兄弟时仍声称"什么都没
+                生成"——这份块列表就是完整画面，请仔细读。
+              - ``judge_pre_halt``：judge_pre 在任何工作开始之前就否
+                决了。upstream summary 是它返回的判定。默认选
+                ``fail``；user_message 应该用平白的话复述 blockers /
+                missing inputs 并请用户澄清。
+              - ``judge_during_halt``：judge_during 的 revise 预算用尽。
+                依据部分成果是否可救，默认选 ``retry`` 或 ``fail``。
+              - ``planner_judge_halt`` / ``worker_judge_halt`` /
+                ``planner_parse_error``：planner 流水线的 halt。默认选
+                ``fail``，user_message 复述 halt 的原因。
+              - ``node_error``：上游节点抛错。默认选 ``fail``；
+                user_message 描述失败情况。
+
+            当问题出现在具体某个 WorkNode 时，去 catalog 里定位它，
+            让 UI 能跳转过去。
+
+            返回 JSON：
+              {"post_verdict": "accept"|"retry"|"fail",
+               "issues": [{"location": worknode_id, "expected": str,
+                           "actual": str, "reproduction": str}, ...],
+               "user_message": str | null,
+               "merged_response": str | null,
+               "redo_targets": [{"node_id": str, "critique": str}, ...]}。
+            不需要的字段省略；不要输出多余散文。
+        - role: user
+          content: |
+            WorkFlow trio
+            -------------
+            {% if workflow_description %}Description: {{ workflow_description }}
+            {% endif %}{% if workflow_inputs %}Inputs: {{ workflow_inputs }}
+            {% endif %}{% if workflow_expected_outcome %}Expected outcome: {{ workflow_expected_outcome }}
+            {% endif %}
+
+            WorkNode 目录
+            -------------
+            {{ worknode_catalog }}
+
+            可重做 WorkNode（worker llm_calls + sub_agent_delegations）
+            ----------------------------------------------------------
+            {{ redo_eligible_catalog }}
+
+            Upstream kind: {{ upstream_kind }}
+
+            上游摘要
+            --------
+            {{ upstream_summary }}
+            {% if layer_notes %}
+
+            当前层备注（兄弟 WorkNode 的轨迹；在 redo_targets 中引用 id）
+            ------------------------------------------------------------
+            {{ layer_notes }}
+            {% endif %}
+  root_ids: ["judge_post_root"]

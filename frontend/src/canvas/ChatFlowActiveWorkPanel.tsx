@@ -3,16 +3,16 @@
  * that are *actually* running right now, across all ChatNodes'
  * workflows and any nested sub_workflows.
  *
- * Filter (hybrid c, agreed with user):
- *   - status === "running" AND (step_kind === "tool_call" OR the node
- *     has received at least one streamed token — i.e. it's in
- *     ``streamingDeltas``).
- *   - sub_agent_delegation containers are skipped; their children
- *     (the real workers) surface here instead.
+ * Filter:
+ *   - status === "running" — the engine only flips a node to RUNNING
+ *     once ``_run_node`` actually starts executing it, so this already
+ *     excludes queued-but-not-started nodes.
+ *   - sub_agent_delegation containers are skipped; their children (the
+ *     real workers) surface here instead.
  *
- * This filters out llm_call / judge_call nodes that are merely
- * *queued* on a provider with concurrency = 1 but haven't started
- * emitting yet — they'd otherwise spam the panel.
+ * All other step_kinds surface — judge_call (structured output, no
+ * streaming) and planner llm_call (tool-use, no streaming) both need
+ * visibility while they're in flight.
  *
  * Rows show step_kind, short id, and the first line of description.
  * Clicking a row drills the canvas into that WorkNode (handles any
@@ -46,7 +46,6 @@ const STEP_KIND_COLOR: Record<StepKind, string> = {
 
 function collectActiveWorkNodes(
   chat: ChatFlow | null,
-  streamingDeltas: Record<NodeId, string>,
 ): ActiveEntry[] {
   if (!chat) return [];
   const out: ActiveEntry[] = [];
@@ -65,9 +64,6 @@ function collectActiveWorkNodes(
         continue;
       }
       if (wn.status !== "running") continue;
-      const isToolCall = wn.step_kind === "tool_call";
-      const hasStreamed = (streamingDeltas[wn.id] ?? "").length > 0;
-      if (!isToolCall && !hasStreamed) continue;
       out.push({ chatNodeId, subPath, node: wn, depth });
     }
   }
@@ -89,11 +85,10 @@ function descriptionOneLine(node: WorkFlowNode): string {
 
 export function ChatFlowActiveWorkPanel({ chatflow }: ChatFlowActiveWorkPanelProps) {
   const { t } = useTranslation();
-  const streamingDeltas = useChatFlowStore((s) => s.streamingDeltas);
   const jumpToWorkNode = useChatFlowStore((s) => s.jumpToWorkNode);
   const [open, setOpen] = useState(true);
 
-  const active = collectActiveWorkNodes(chatflow, streamingDeltas);
+  const active = collectActiveWorkNodes(chatflow);
   const count = active.length;
 
   return (

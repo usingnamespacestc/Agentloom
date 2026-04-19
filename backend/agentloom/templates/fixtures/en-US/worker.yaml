@@ -31,7 +31,7 @@ plan:
   description:
     text: "worker — execute the atomic brief"
     provenance: pure_agent
-  execution_mode: direct
+  execution_mode: native_react
   nodes:
     - id: "worker_root"
       parent_ids: []

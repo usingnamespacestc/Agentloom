@@ -1,0 +1,37 @@
+builtin_id: title_gen
+name: "Title"
+description: "Generate a short human-readable title for a new ChatFlow from its first turn."
+params_schema:
+  first_user_message:
+    type: string
+    required: true
+  first_agent_response:
+    type: string
+    required: false
+plan:
+  description:
+    text: "Generate a ChatFlow title."
+    provenance: pure_agent
+  execution_mode: native_react
+  nodes:
+    - id: "title_root"
+      parent_ids: []
+      step_kind: llm_call
+      description:
+        text: "Name this conversation in ≤6 words."
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            Produce a title of at most six words summarizing what
+            the conversation is about. No quotes, no punctuation at
+            the end, no prefixes like "Title:". Return the title and
+            nothing else.
+        - role: user
+          content: |
+            First user message:
+            {{ first_user_message }}
+
+            First agent response:
+            {{ first_agent_response }}
+  root_ids: ["title_root"]

@@ -16,6 +16,7 @@ import { ConversationView } from "@/canvas/ConversationView";
 import { WorkFlowCanvas } from "@/canvas/WorkFlowCanvas";
 import { ChatFlowHeader } from "@/components/ChatFlowHeader";
 import { Sidebar } from "@/components/Sidebar";
+import { api } from "@/lib/api";
 import { resolveDrilledWorkflow, useChatFlowStore } from "@/store/chatflowStore";
 
 export default function App() {
@@ -26,7 +27,7 @@ export default function App() {
   const drillStack = useChatFlowStore((s) => s.drillStack);
   const loadChatFlow = useChatFlowStore((s) => s.loadChatFlow);
   const setSSEFactory = useChatFlowStore((s) => s.setSSEFactory);
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
 
   const initialChatflowId = useMemo(() => {
     if (typeof window === "undefined") return null;
@@ -42,6 +43,33 @@ export default function App() {
       void loadChatFlow(initialChatflowId);
     }
   }, [initialChatflowId, loadChatFlow, setSSEFactory]);
+
+  // Hydrate i18n from the workspace's stored language on boot, then
+  // mirror every subsequent ``changeLanguage`` back to the server so
+  // the backend renders prompts in the matching fixtures/<lang>/
+  // variant. No-op if the fetch fails (offline / tests).
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getWorkspaceSettings()
+      .then((s) => {
+        if (cancelled) return;
+        if (s.language && s.language !== i18n.language) {
+          void i18n.changeLanguage(s.language);
+        }
+      })
+      .catch(() => {});
+    const push = (lng: string) => {
+      if (lng === "en-US" || lng === "zh-CN") {
+        void api.patchWorkspaceSettings({ language: lng }).catch(() => {});
+      }
+    };
+    i18n.on("languageChanged", push);
+    return () => {
+      cancelled = true;
+      i18n.off("languageChanged", push);
+    };
+  }, [i18n]);
 
   const drilledWorkflow = useMemo(
     () => resolveDrilledWorkflow(chatflow, drillStack),

@@ -8,6 +8,7 @@ Pydantic shape over that bag.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -41,10 +42,21 @@ BUILTIN_DEFAULT_STATES: dict[str, ToolState] = {
 }
 
 
+#: Language tags the backend ships prompt translations for. Add a new
+#: ``fixtures/<tag>/`` subdirectory to extend this list.
+WorkspaceLanguage = Literal["en-US", "zh-CN"]
+
+
 class WorkspaceSettings(BaseModel):
     """Settings payload stored in ``workspaces.payload``."""
 
     tool_states: dict[str, ToolState] = Field(default_factory=dict)
+    #: UI + built-in prompt language for this workspace. Drives which
+    #: ``fixtures/<lang>/`` variant the engine picks when resolving
+    #: planner / judge / worker / compact templates. The frontend
+    #: mirrors this to its i18n runtime on boot and pushes changes
+    #: back via PATCH.
+    language: WorkspaceLanguage = "en-US"
 
     def state_for(self, tool_name: str) -> ToolState:
         """Return the stored state, falling back to the built-in

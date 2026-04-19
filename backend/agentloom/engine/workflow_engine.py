@@ -16,6 +16,7 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -31,6 +32,7 @@ from agentloom.engine.judge_formatter import (
 )
 from agentloom.engine.judge_parser import (
     JudgeParseError,
+    judge_verdict_json_schema,
     judge_verdict_tool_def,
     parse_judge_from_tool_args,
     parse_judge_verdict,
@@ -140,62 +142,136 @@ class _CompactRequested(Exception):
     """
 
 
-def _estimate_tokens_from_provider_messages(messages: list[Message]) -> int:
-    """Char-based token estimate (chars/4) for a provider-side message
-    list. Matches the shape of the inputs ``_invoke_and_freeze`` has
-    already built, so the trigger fires on exactly what would hit the
-    wire. Good enough for a gate — not a substitute for tiktoken.
+@functools.lru_cache(maxsize=1)
+def _get_token_encoder() -> Any:
+    """Return a cached tiktoken encoder, or ``None`` if tiktoken can't
+    load (e.g. offline and encoding file not cached). ``o200k_base`` is
+    the GPT-4o tokenizer — a reasonable cross-provider approximation
+    with much better Chinese/CJK coverage than the old ``chars // 4``
+    heuristic (≈0.67 tokens/汉字, ≈0.24 tokens/ASCII-char).
+
+    We deliberately pick one encoding rather than per-provider ones:
+    Anthropic's tokenizer isn't publicly available, Ark / Volcengine /
+    Ollama use proprietary or model-specific BPEs, and threading a
+    model reference into every estimator call site is churn without
+    meaningful precision gain for the things these numbers drive
+    (compact trigger thresholds and a display bar).
     """
-    chars = 0
+    try:
+        import tiktoken
+        return tiktoken.get_encoding("o200k_base")
+    except Exception:  # noqa: BLE001 — defensive: never block on estimator
+        return None
+
+
+def _count_text_tokens(text: str) -> int:
+    """Token count for a single string. Uses tiktoken when available,
+    falls back to ``chars // 4`` if the encoder failed to load."""
+    if not text:
+        return 0
+    enc = _get_token_encoder()
+    if enc is None:
+        return len(text) // 4
+    return len(enc.encode(text, disallowed_special=()))
+
+
+def _estimate_tokens_from_provider_messages(messages: list[Message]) -> int:
+    """Token estimate for a provider-side message list using tiktoken
+    ``o200k_base``. Matches the shape of the inputs ``_invoke_and_freeze``
+    has already built, so the trigger fires on exactly what would hit
+    the wire.
+    """
+    total = 0
     for m in messages:
         content = getattr(m, "content", None) or ""
-        chars += len(content)
+        total += _count_text_tokens(content)
         tool_uses = getattr(m, "tool_uses", None)
         if tool_uses:
             for tu in tool_uses:
-                chars += len(tu.name)
+                total += _count_text_tokens(tu.name)
                 import json as _json
-                chars += len(_json.dumps(tu.arguments, default=str))
-    return chars // 4
+                total += _count_text_tokens(
+                    _json.dumps(tu.arguments, default=str)
+                )
+    return total
 
 
 def _estimate_tokens_from_wire(messages: list[WireMessage]) -> int:
     """Sibling of :func:`_estimate_tokens_from_provider_messages` for
     schema-side ``WireMessage`` lists. Used by snapshot accounting."""
-    chars = 0
+    total = 0
     for w in messages:
-        chars += len(w.content or "")
+        total += _count_text_tokens(w.content or "")
         for tu in w.tool_uses:
-            chars += len(tu.name)
+            total += _count_text_tokens(tu.name)
             import json as _json
-            chars += len(_json.dumps(tu.arguments, default=str))
-    return chars // 4
+            total += _count_text_tokens(
+                _json.dumps(tu.arguments, default=str)
+            )
+    return total
 
 
-_COMPACT_FIXTURE_CACHE: tuple[dict[str, Any], dict[str, str]] | None = None
+def _truncate_text_to_tokens(text: str, max_tokens: int) -> str:
+    """Truncate *text* so its estimated token count is ≤ ``max_tokens``.
+
+    Used as a last-resort hard cap when the compact worker returns a
+    summary longer than the caller's ``target_tokens`` budget. Without
+    this cap, a chatty summarizer can produce a post-compact context
+    that still overshoots the model's window — breaking the
+    ``trigger_pct + target_pct ≤ 1.0`` invariant the engine relies on.
+
+    When tiktoken is available the slice is exact; otherwise we fall
+    back to the ``chars // 4`` heuristic that matches
+    :func:`_count_text_tokens`.
+    """
+    if max_tokens <= 0 or not text:
+        return ""
+    enc = _get_token_encoder()
+    if enc is None:
+        cap = max_tokens * 4
+        if len(text) <= cap:
+            return text
+        return text[:cap]
+    ids = enc.encode(text, disallowed_special=())
+    if len(ids) <= max_tokens:
+        return text
+    return enc.decode(ids[:max_tokens])
+
+
+_COMPACT_FIXTURE_CACHE: dict[str, tuple[dict[str, Any], dict[str, str]]] = {}
 
 
 def _get_compact_fixture() -> tuple[dict[str, Any], dict[str, str]]:
-    """Return ``(plan_dict, include_fragments)`` for ``compact.yaml``.
+    """Return ``(plan_dict, include_fragments)`` for ``compact.yaml`` in
+    the workspace's currently-configured language.
 
-    Loaded once at first use and cached. Fails loudly if the fixture
-    is missing because Tier 1 can't function without it — the compact
-    worker has no fallback prompt.
+    Loaded once per language at first use and cached. Fails loudly if
+    the fixture is missing because Tier 1 can't function without it —
+    the compact worker has no fallback prompt.
     """
-    global _COMPACT_FIXTURE_CACHE
-    if _COMPACT_FIXTURE_CACHE is None:
-        from agentloom.templates.loader import fragments_as_texts, load_fixtures
+    from agentloom import tenancy_runtime
+    from agentloom.db.models.tenancy import DEFAULT_WORKSPACE_ID
+    from agentloom.templates.loader import (
+        DEFAULT_LANGUAGE,
+        fragments_as_texts,
+        load_fixtures,
+    )
 
-        templates, fragments = load_fixtures()
-        compact = next(
-            (f for f in templates if f.builtin_id == "compact"), None
+    lang = tenancy_runtime.get_settings(DEFAULT_WORKSPACE_ID).language
+    cached = _COMPACT_FIXTURE_CACHE.get(lang)
+    if cached is not None:
+        return cached
+    templates, fragments = load_fixtures(language=lang)
+    compact = next((f for f in templates if f.builtin_id == "compact"), None)
+    if compact is None and lang != DEFAULT_LANGUAGE:
+        templates, fragments = load_fixtures(language=DEFAULT_LANGUAGE)
+        compact = next((f for f in templates if f.builtin_id == "compact"), None)
+    if compact is None:
+        raise RuntimeError(
+            "compact.yaml fixture missing — required for Tier 1 auto-compact"
         )
-        if compact is None:
-            raise RuntimeError(
-                "compact.yaml fixture missing — required for Tier 1 auto-compact"
-            )
-        _COMPACT_FIXTURE_CACHE = (compact.plan, fragments_as_texts(fragments))
-    return _COMPACT_FIXTURE_CACHE
+    _COMPACT_FIXTURE_CACHE[lang] = (compact.plan, fragments_as_texts(fragments))
+    return _COMPACT_FIXTURE_CACHE[lang]
 
 
 def _compact_description_text() -> EditableText:
@@ -225,16 +301,23 @@ def _parent_is_fresh_compact(workflow: WorkFlow, node: WorkFlowNode) -> bool:
     return False
 
 
-def _render_messages_to_compact(messages: list[Message]) -> str:
-    """Serialize a provider-message list into the ``[role] body`` shape
-    the compact worker's prompt expects.
+def _render_messages_to_compact(
+    tagged: list[tuple[str | None, Message]],
+) -> str:
+    """Serialize a provider-message list into the
+    ``[node:<id> | role] body`` shape the compact worker's prompt
+    expects. The ``<id>`` prefix lets the worker cite source WorkNodes
+    next to each summary segment so readers can drill back into the
+    original content via ``get_node_context``. ``None`` ids — synthetic
+    entries like prior-compact preambles — render as ``[node:?]``.
     """
     lines: list[str] = []
-    for m in messages:
+    for node_id, m in tagged:
+        tag = node_id or "?"
         if isinstance(m, SystemMessage):
-            lines.append(f"[system] {m.content}")
+            lines.append(f"[node:{tag} | system] {m.content}")
         elif isinstance(m, UserMessage):
-            lines.append(f"[user] {m.content}")
+            lines.append(f"[node:{tag} | user] {m.content}")
         elif isinstance(m, AssistantMessage):
             body = m.content or ""
             if m.tool_uses:
@@ -244,9 +327,11 @@ def _render_messages_to_compact(messages: list[Message]) -> str:
                     for tu in m.tool_uses
                 ]
                 body = (body + "\n" if body else "") + "tool_uses: " + "; ".join(parts)
-            lines.append(f"[assistant] {body}")
+            lines.append(f"[node:{tag} | assistant] {body}")
         elif isinstance(m, ToolMessage):
-            lines.append(f"[tool:{m.tool_use_id}] {m.content}")
+            lines.append(
+                f"[node:{tag} | tool:{m.tool_use_id}] {m.content}"
+            )
     return "\n".join(lines)
 
 
@@ -620,6 +705,7 @@ class WorkflowEngine:
         override_tools: list[ToolDefinition] | None = None,
         extra: dict[str, Any] | None = None,
         json_schema: dict[str, Any] | None = None,
+        forced_tool_name: str | None = None,
     ) -> None:
         """Shared provider-call path for ``llm_call`` and ``judge_call``.
 
@@ -690,6 +776,7 @@ class WorkflowEngine:
             on_token=self._token_callback(workflow, node),
             extra=extra,
             json_schema=json_schema,
+            forced_tool_name=forced_tool_name,
         )
 
         # Freeze the result on the node.
@@ -808,10 +895,11 @@ class WorkflowEngine:
         """
         from agentloom.templates.instantiate import instantiate_fixture
 
-        keep = max(0, min(len(messages), self._effective_compact_preserve_recent_turns))
-        head = messages[:-keep] if keep else messages
-        tail = messages[-keep:] if keep else []
-        head_serialized = _render_messages_to_compact(head)
+        tagged = _build_tagged_context_from_ancestors(workflow, node)
+        keep = max(0, min(len(tagged), self._effective_compact_preserve_recent_turns))
+        head_tagged = tagged[:-keep] if keep else tagged
+        tail = [m for _, m in tagged[-keep:]] if keep else []
+        head_serialized = _render_messages_to_compact(head_tagged)
         original_tokens = _estimate_tokens_from_provider_messages(messages)
         ctx = self._context_window_for(ref)
         target_tokens = max(256, int(ctx * self._effective_compact_target_pct))
@@ -838,8 +926,8 @@ class WorkflowEngine:
         snapshot = CompactSnapshot(
             summary="",  # filled in by _run_compact after the LLM call
             preserved_messages=preserved_wire,
-            source_range=(0, len(head)),
-            dropped_count=len(head),
+            source_range=(0, len(head_tagged)),
+            dropped_count=len(head_tagged),
             original_tokens=original_tokens,
             compacted_tokens=0,
             compact_instruction=None,
@@ -892,7 +980,25 @@ class WorkflowEngine:
             raise RuntimeError(
                 f"compact node {node.id} missing pre-populated snapshot"
             )
-        compacted_tokens = len(summary) // 4 + _estimate_tokens_from_wire(
+        # Hard-cap the summary to the requested target_tokens. Without
+        # this, a chatty summarizer can return a summary larger than
+        # target, which breaks the ``trigger_pct + target_pct ≤ 1.0``
+        # invariant (post-compact context could then exceed the model's
+        # window). Truncation is lossy but strictly safer than letting
+        # the next turn blow past the wire budget.
+        ctx = self._context_window_for(node.resolved_model or node.model_override)
+        target_tokens = max(256, int(ctx * self._effective_compact_target_pct))
+        summary_tokens = _count_text_tokens(summary)
+        if summary_tokens > target_tokens:
+            log.warning(
+                "compact summary exceeds target: node=%s summary_tokens=%d "
+                "target_tokens=%d — truncating",
+                node.id,
+                summary_tokens,
+                target_tokens,
+            )
+            summary = _truncate_text_to_tokens(summary, target_tokens)
+        compacted_tokens = _count_text_tokens(summary) + _estimate_tokens_from_wire(
             node.compact_snapshot.preserved_messages
         )
         node.compact_snapshot = node.compact_snapshot.model_copy(
@@ -1042,11 +1148,24 @@ class WorkflowEngine:
             raise ValueError(f"judge_call node {node.id} missing judge_variant")
 
         tool_def = judge_verdict_tool_def(node.judge_variant)
+        # Defense-in-depth for judge structured output (ADR 2026-04-18):
+        # - ``forced_tool_name`` pins the model to the judge_verdict tool
+        #   via tool_choice so it can't silently emit a free-text content
+        #   reply. Observed failure: ark-code-latest on volcengine with
+        #   long prompts + thinking mode ignored the tool and replied
+        #   with an invented JSON shape missing ``feasibility``.
+        # - ``json_schema`` lets providers that coexist tools with
+        #   response_format (openai, volcengine) double-enforce the
+        #   verdict shape at the content level. Adapters that can't do
+        #   both will silently drop the response_format — tool_choice
+        #   still does the real work.
         await self._invoke_and_freeze(
             workflow,
             node,
             expose_tools=False,
             override_tools=[tool_def],
+            forced_tool_name="judge_verdict",
+            json_schema=judge_verdict_json_schema(node.judge_variant),
         )
         assert node.output_message is not None
 
@@ -1149,11 +1268,17 @@ class WorkflowEngine:
             else (ref.model_id if ref else None)
         )
         tool_def = judge_verdict_tool_def(node.judge_variant)
+        # Retry also forces the tool + ships the schema, for the same
+        # reason the first attempt does (see _run_judge_call). Without
+        # this the retry would be weaker than the first call whenever
+        # the adapter's gating silently dropped tool_choice.
         response = await self._provider_call(
             retry_messages,
             [tool_def],
             model,
             on_token=self._token_callback(workflow, node),
+            forced_tool_name="judge_verdict",
+            json_schema=judge_verdict_json_schema(node.judge_variant),
         )
         assistant = response.message
         node.output_message = WireMessage(
@@ -1571,26 +1696,44 @@ def _provider_to_wire(messages: list[Message]) -> list[WireMessage]:
 
 
 def _build_context_from_ancestors(workflow: WorkFlow, node: WorkFlowNode) -> list[Message]:
-    """Topologically walk ancestors and reconstruct the OpenAI-style
-    message list the upstream provider expects.
+    """Flat message list — see :func:`_build_tagged_context_from_ancestors`
+    for the full walk logic. This helper strips source-node annotations
+    since providers only want ``Message`` objects."""
+    return [m for _, m in _build_tagged_context_from_ancestors(workflow, node)]
 
-    Rules:
-    - The first llm_call's ``input_messages`` provides the seed
-      (system/user turns).
-    - Every subsequent llm_call contributes its ``output_message``
-      (assistant turn, possibly with tool_uses).
-    - Every frozen tool_call contributes a ``tool`` message carrying
-      ``tool_use_id = source_tool_use_id`` and the result string.
-    - If a COMPACT ancestor with a settled snapshot exists, everything
+
+def _build_tagged_context_from_ancestors(
+    workflow: WorkFlow, node: WorkFlowNode
+) -> list[tuple[str | None, Message]]:
+    """Topologically walk ancestors and reconstruct the OpenAI-style
+    message list, tagging each entry with the WorkNode id it came from.
+
+    The tag is what the compact worker cites next to summary segments so
+    readers can pull full content via ``get_node_context``; for callers
+    that only want the flat message list, :func:`_build_context_from_ancestors`
+    strips the tags.
+
+    Seed selection:
+    - A settled COMPACT ancestor acts as a hard cutoff: everything
       before (and including) it is replaced by a single user message
-      holding the summary prose plus the snapshot's preserved recent
-      turns. Later ancestors layer on top as usual.
+      holding the summary plus the snapshot's preserved recent turns.
+      The synthetic preamble is tagged with the compact node's id;
+      preserved tail messages are tagged ``None`` because their original
+      sources were folded into the summary.
+    - Otherwise, the **most recent** llm_call ancestor's
+      ``input_messages`` provides the seed (tagged with that ancestor),
+      and that ancestor's ``output_message`` follows immediately. This
+      anchors tool-loop follow-ups to the same system prompt as the
+      call they're continuing.
+
+    After the seed, remaining ancestors layer on in topological order:
+    - llm_call contributes its ``output_message`` (assistant turn,
+      possibly with tool_uses) tagged with the node.
+    - tool_call contributes a ``tool`` message tagged with the tool_call
+      node itself.
     """
     ancestors = workflow.ancestors(node.id)
 
-    # Find the latest (most-recent-topologically) compact ancestor whose
-    # snapshot is settled. ``ancestors`` is in topological order, so the
-    # last match wins.
     compact_cutoff_idx: int | None = None
     for i, aid in enumerate(ancestors):
         a = workflow.get(aid)
@@ -1601,39 +1744,58 @@ def _build_context_from_ancestors(workflow: WorkFlow, node: WorkFlowNode) -> lis
         ):
             compact_cutoff_idx = i
 
-    messages: list[Message] = []
-    seen_input = False
+    tagged: list[tuple[str | None, Message]] = []
     start_idx = 0
 
     if compact_cutoff_idx is not None:
-        snap = workflow.get(ancestors[compact_cutoff_idx]).compact_snapshot
-        assert snap is not None  # loop guarantees
-        messages.append(
-            UserMessage(
-                content=(
-                    "[Prior conversation — summarized to save context]\n\n"
-                    f"{snap.summary}"
-                )
+        cutoff_node = workflow.get(ancestors[compact_cutoff_idx])
+        snap = cutoff_node.compact_snapshot
+        assert snap is not None
+        tagged.append(
+            (
+                cutoff_node.id,
+                UserMessage(
+                    content=(
+                        "[Prior conversation — summarized to save context]\n\n"
+                        f"{snap.summary}"
+                    )
+                ),
             )
         )
-        messages.extend(_wire_to_provider(snap.preserved_messages))
-        seen_input = True  # summary stands in for the original seed
+        for m in _wire_to_provider(snap.preserved_messages):
+            tagged.append((None, m))
         start_idx = compact_cutoff_idx + 1
+    else:
+        seed_idx: int | None = None
+        for i, aid in enumerate(ancestors):
+            a = workflow.get(aid)
+            if a.step_kind == StepKind.LLM_CALL and a.input_messages:
+                seed_idx = i
+        if seed_idx is not None:
+            seed_owner = workflow.get(ancestors[seed_idx])
+            assert seed_owner.input_messages is not None
+            for m in _wire_to_provider(seed_owner.input_messages):
+                tagged.append((seed_owner.id, m))
+            if seed_owner.output_message is not None:
+                for m in _wire_to_provider([seed_owner.output_message]):
+                    tagged.append((seed_owner.id, m))
+            start_idx = seed_idx + 1
 
     for aid in ancestors[start_idx:]:
         a = workflow.get(aid)
         if a.step_kind == StepKind.LLM_CALL:
-            if not seen_input and a.input_messages:
-                messages.extend(_wire_to_provider(a.input_messages))
-                seen_input = True
             if a.output_message is not None:
-                messages.extend(_wire_to_provider([a.output_message]))
+                for m in _wire_to_provider([a.output_message]):
+                    tagged.append((a.id, m))
         elif a.step_kind == StepKind.TOOL_CALL:
             if a.tool_result is not None and a.source_tool_use_id is not None:
-                messages.append(
-                    ToolMessage(
-                        tool_use_id=a.source_tool_use_id,
-                        content=a.tool_result.content,
+                tagged.append(
+                    (
+                        a.id,
+                        ToolMessage(
+                            tool_use_id=a.source_tool_use_id,
+                            content=a.tool_result.content,
+                        ),
                     )
                 )
-    return messages
+    return tagged

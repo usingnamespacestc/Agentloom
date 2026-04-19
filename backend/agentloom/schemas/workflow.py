@@ -80,6 +80,28 @@ class CompactSnapshot(BaseModel):
     compact_instruction: str | None = None
 
 
+class MergeSnapshot(BaseModel):
+    """Frozen metadata on a ChatNode whose ``parent_ids`` carry a manual merge.
+
+    The merge node's ``agent_response.text`` *is* the synthesized reply
+    (emitted by the ``merge`` builtin template); this snapshot records
+    which two branches were folded together plus accounting metrics so
+    the downstream context walk can stop at the merge node — same
+    stop-rule as :class:`CompactSnapshot`.
+
+    MVP merges exactly two nodes (``source_ids`` has length 2). The field
+    is modelled as a list so future ≥3-way merges can reuse the shape.
+    """
+
+    source_ids: list[NodeId] = Field(default_factory=list)
+    #: Optional free-text hint passed through to the merge worker.
+    merge_instruction: str | None = None
+    #: Char-based token estimate of the pre-merge inputs (left + right contexts).
+    original_tokens: int = 0
+    #: Char-based token estimate of the merged reply.
+    merged_tokens: int = 0
+
+
 class WorkFlowNode(NodeBase):
     """A single step inside a WorkFlow.
 
@@ -255,7 +277,7 @@ class WorkFlow(BaseModel):
     expected_outcome: EditableText | None = None
 
     # Execution behavior — each WorkFlow (including nested ones) picks its own
-    execution_mode: ExecutionMode = ExecutionMode.DIRECT
+    execution_mode: ExecutionMode = ExecutionMode.NATIVE_REACT
     plan_enabled: bool = False
     judge_pre_enabled: bool = False
     judge_during_enabled: bool = False
@@ -265,8 +287,8 @@ class WorkFlow(BaseModel):
     tool_loop_budget: int | None = None
     auto_mode_revise_budget: int | None = None
     #: Hard cap on planner↔planner_judge / worker↔worker_judge debate
-    #: rounds before forcing convergence (§3.4.5). Ignored in ``direct``
-    #: mode where there are no judges.
+    #: rounds before forcing convergence (§3.4.5). Ignored in
+    #: ``native_react`` mode where there are no judges.
     debate_round_budget: int = 3
     #: Hard cap on judge_post retry rounds before the engine stops re-
     #: spawning redo clones and halts to the user. ``-1`` = unlimited

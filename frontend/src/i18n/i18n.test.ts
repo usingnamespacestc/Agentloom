@@ -48,6 +48,16 @@ const REQUIRED_KEYS = [
   "conversation.retry",
   "conversation.delete_failed",
   "conversation.branch_label",
+  "chatflow.ctx_select_to_merge",
+  "chatflow.ctx_cancel_pending_merge",
+  "chatflow.ctx_merge_with_pending",
+  "chatflow.merge_badge",
+  "chatflow.merge_badge_hint",
+  "conversation.merge_summary_label",
+  "conversation.merge_summary_pending",
+  "conversation.merge_instruction_label",
+  "conversation.merge_sources_label",
+  "conversation.merge_stats",
 ];
 
 describe("i18n", () => {

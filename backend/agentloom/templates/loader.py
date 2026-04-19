@@ -1,5 +1,18 @@
-"""Load YAML fixtures from ``fixtures/*.yaml`` into the
+"""Load YAML fixtures from ``fixtures/<language>/*.yaml`` into the
 ``workflow_templates`` table under ``workspace_id="__builtin__"``.
+
+Layout::
+
+    fixtures/
+        en-US/planner.yaml    # English authored version
+        en-US/_critique_base.yaml
+        zh-CN/planner.yaml    # Chinese authored version
+
+Each language's templates are upserted with ``builtin_id`` suffixed by
+``@<language>`` — e.g. the English planner stores as ``planner@en-US``.
+The engine's template lookups append the suffix derived from the
+workspace's current ``language`` setting, falling back to ``@en-US``
+when a translation hasn't been authored yet.
 
 A fixture file is a dict with the following top-level shape:
 
@@ -39,9 +52,22 @@ from agentloom.schemas.common import generate_node_id, utcnow
 
 BUILTIN_WORKSPACE_ID = "__builtin__"
 
-#: Directory that ships with the library — any ``*.yaml`` alongside this
-#: module is picked up.
+#: Directory that ships with the library. Each immediate subdirectory
+#: is a language tag (``en-US``, ``zh-CN``, …) whose ``*.yaml`` files
+#: are template fixtures or include fragments for that language.
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+#: Canonical fallback language. When a workspace requests a language
+#: for which no fixture exists, the loader's in-memory dict returns
+#: the entry for this language instead.
+DEFAULT_LANGUAGE = "en-US"
+
+
+def suffixed_builtin_id(builtin_id: str, language: str) -> str:
+    """Return the DB-side ``builtin_id`` key for a per-language fixture,
+    e.g. ``planner`` + ``zh-CN`` → ``planner@zh-CN``. Kept in one place
+    so resolver / loader / engine agree on the scheme."""
+    return f"{builtin_id}@{language}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,8 +131,13 @@ def fragments_as_texts(
 
 def load_fixtures(
     fixtures_dir: Path | None = None,
+    *,
+    language: str = DEFAULT_LANGUAGE,
 ) -> tuple[list[FixtureData], dict[str, IncludeFragment]]:
-    """Read all ``*.yaml`` files under *fixtures_dir* (default: shipped).
+    """Read ``*.yaml`` files under ``fixtures_dir/<language>`` (default:
+    shipped en-US). For a different *language*, falls back to
+    :data:`DEFAULT_LANGUAGE` for any fixture or include fragment that
+    has no translation in *language* yet.
 
     Returns a tuple ``(templates, includes)`` where ``includes`` maps
     fragment name (filename stem with leading underscore preserved) to
@@ -117,9 +148,31 @@ def load_fixtures(
     anything else is a template fixture.
     """
     root = fixtures_dir or FIXTURES_DIR
+    fallback_tpls, fallback_incs = _read_language_dir(root / DEFAULT_LANGUAGE)
+    if language == DEFAULT_LANGUAGE:
+        _check_include_cycles(fallback_incs)
+        return fallback_tpls, fallback_incs
+
+    lang_tpls, lang_incs = _read_language_dir(root / language)
+    tpl_by_id: dict[str, FixtureData] = {fx.builtin_id: fx for fx in fallback_tpls}
+    tpl_by_id.update({fx.builtin_id: fx for fx in lang_tpls})
+    inc_by_name: dict[str, IncludeFragment] = dict(fallback_incs)
+    inc_by_name.update(lang_incs)
+    merged_tpls = list(tpl_by_id.values())
+    _check_include_cycles(inc_by_name)
+    return merged_tpls, inc_by_name
+
+
+def _read_language_dir(
+    lang_dir: Path,
+) -> tuple[list[FixtureData], dict[str, IncludeFragment]]:
+    """Read a single ``fixtures/<lang>/`` directory. Missing directory
+    yields empty results so callers can merge with a fallback."""
     templates: list[FixtureData] = []
     includes: dict[str, IncludeFragment] = {}
-    for path in sorted(root.glob("*.yaml")):
+    if not lang_dir.is_dir():
+        return templates, includes
+    for path in sorted(lang_dir.glob("*.yaml")):
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise FixtureParseError(f"{path.name}: root must be a mapping")
@@ -128,8 +181,19 @@ def load_fixtures(
             includes[frag.name] = frag
         else:
             templates.append(_parse_template_fixture(path, raw))
-    _check_include_cycles(includes)
     return templates, includes
+
+
+def list_available_languages(
+    fixtures_dir: Path | None = None,
+) -> list[str]:
+    """Return the set of language subdirectories present under
+    *fixtures_dir*, sorted. Used by the loader's DB upsert to know
+    which languages to materialize."""
+    root = fixtures_dir or FIXTURES_DIR
+    if not root.is_dir():
+        return []
+    return sorted(p.name for p in root.iterdir() if p.is_dir())
 
 
 _INCLUDE_RE_SRC = r"\{%\s*include\s+'([^']+)'\s*%\}"
@@ -178,8 +242,10 @@ async def upsert_builtin_templates(
     session: AsyncSession,
     fixtures_dir: Path | None = None,
 ) -> list[WorkflowTemplateRow]:
-    """Upsert every fixture under ``fixtures_dir`` as a ``__builtin__``
-    row. Safe to call repeatedly.
+    """Upsert every fixture under ``fixtures_dir/<language>/`` as a
+    ``__builtin__`` row, one row per ``(fixture, language)`` pair. The
+    stored ``builtin_id`` is suffixed via :func:`suffixed_builtin_id`
+    (e.g. ``planner@zh-CN``). Safe to call repeatedly.
 
     Update strategy: match by ``(workspace_id=__builtin__, builtin_id)``.
     If the row exists, overwrite ``name``, ``description``, ``plan``, and
@@ -188,32 +254,39 @@ async def upsert_builtin_templates(
     timestamp is preserved.
     """
     await _ensure_builtin_workspace(session)
-    templates, _includes = load_fixtures(fixtures_dir)
     rows: list[WorkflowTemplateRow] = []
-    for fx in templates:
-        stmt = select(WorkflowTemplateRow).where(
-            WorkflowTemplateRow.workspace_id == BUILTIN_WORKSPACE_ID,
-            WorkflowTemplateRow.builtin_id == fx.builtin_id,
-        )
-        row = (await session.execute(stmt)).scalar_one_or_none()
-        if row is None:
-            row = WorkflowTemplateRow(
-                id=generate_node_id(),
-                workspace_id=BUILTIN_WORKSPACE_ID,
-                owner_id=None,
-                builtin_id=fx.builtin_id,
-                name=fx.name,
-                description=fx.description,
-                plan=fx.plan,
-                params_schema=fx.params_schema,
+    for language in list_available_languages(fixtures_dir):
+        templates, _includes = load_fixtures(fixtures_dir, language=language)
+        # ``load_fixtures`` merges the target language on top of the
+        # fallback, so every language ends up with a full set of
+        # ``builtin_id``s — untranslated ones just point at the en-US
+        # plan. This lets callers query ``<id>@<lang>`` directly
+        # without extra fallback logic.
+        for fx in templates:
+            suffixed = suffixed_builtin_id(fx.builtin_id, language)
+            stmt = select(WorkflowTemplateRow).where(
+                WorkflowTemplateRow.workspace_id == BUILTIN_WORKSPACE_ID,
+                WorkflowTemplateRow.builtin_id == suffixed,
             )
-            session.add(row)
-        else:
-            row.name = fx.name
-            row.description = fx.description
-            row.plan = fx.plan
-            row.params_schema = fx.params_schema
-            row.updated_at = utcnow()
-        rows.append(row)
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            if row is None:
+                row = WorkflowTemplateRow(
+                    id=generate_node_id(),
+                    workspace_id=BUILTIN_WORKSPACE_ID,
+                    owner_id=None,
+                    builtin_id=suffixed,
+                    name=fx.name,
+                    description=fx.description,
+                    plan=fx.plan,
+                    params_schema=fx.params_schema,
+                )
+                session.add(row)
+            else:
+                row.name = fx.name
+                row.description = fx.description
+                row.plan = fx.plan
+                row.params_schema = fx.params_schema
+                row.updated_at = utcnow()
+            rows.append(row)
     await session.flush()
     return rows

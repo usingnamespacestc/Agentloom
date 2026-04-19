@@ -35,6 +35,8 @@ function stubChatNode(
     workflow: { id: `wf-${id}`, root_ids: [], nodes: {} },
     pending_queue: [],
     compact_snapshot: null,
+    entry_prompt_tokens: null,
+    output_response_tokens: null,
   };
 }
 
@@ -47,7 +49,7 @@ function seedChatFlow(): ChatFlow {
     default_model: null,
     default_judge_model: null,
     default_tool_call_model: null,
-    default_execution_mode: 'direct',
+    default_execution_mode: 'native_react',
     judge_retry_budget: 3,
     min_ground_ratio: null,
     ground_ratio_grace_nodes: 20,
@@ -57,6 +59,8 @@ function seedChatFlow(): ChatFlow {
     compact_preserve_recent_turns: 3,
     compact_model: null,
     compact_require_confirmation: true,
+    chatnode_compact_trigger_pct: 0.6,
+    chatnode_compact_target_pct: 0.4,
     root_ids: ["n1"],
     created_at: "2026-04-10T00:00:00Z",
     nodes: {
@@ -110,6 +114,8 @@ function seedChatFlow(): ChatFlow {
         },
         pending_queue: [],
         compact_snapshot: null,
+        entry_prompt_tokens: null,
+        output_response_tokens: null,
       },
     },
   };
@@ -251,7 +257,7 @@ describe("chatflowStore", () => {
       default_model: null,
       default_judge_model: null,
       default_tool_call_model: null,
-      default_execution_mode: 'direct',
+      default_execution_mode: 'native_react',
       judge_retry_budget: 3,
     min_ground_ratio: null,
     ground_ratio_grace_nodes: 20,
@@ -261,6 +267,8 @@ describe("chatflowStore", () => {
       compact_preserve_recent_turns: 3,
       compact_model: null,
       compact_require_confirmation: true,
+      chatnode_compact_trigger_pct: 0.6,
+      chatnode_compact_target_pct: 0.4,
       root_ids: ["a"],
       nodes: {
         a: stubChatNode("a", []),
@@ -415,7 +423,7 @@ describe("chatflowStore", () => {
       default_model: null,
       default_judge_model: null,
       default_tool_call_model: null,
-      default_execution_mode: 'direct',
+      default_execution_mode: 'native_react',
       judge_retry_budget: 3,
     min_ground_ratio: null,
     ground_ratio_grace_nodes: 20,
@@ -425,6 +433,8 @@ describe("chatflowStore", () => {
       compact_preserve_recent_turns: 3,
       compact_model: null,
       compact_require_confirmation: true,
+      chatnode_compact_trigger_pct: 0.6,
+      chatnode_compact_target_pct: 0.4,
       root_ids: ["a"],
       nodes: {
         a: stubChatNode("a", []),

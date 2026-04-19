@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from agentloom.schemas.common import (
     EditableText,
@@ -19,7 +19,7 @@ from agentloom.schemas.common import (
     generate_node_id,
     utcnow,
 )
-from agentloom.schemas.workflow import CompactSnapshot, WorkFlow
+from agentloom.schemas.workflow import CompactSnapshot, MergeSnapshot, WorkFlow
 
 
 #: Canned greeting written to a brand-new ChatFlow's root node. Static
@@ -117,6 +117,43 @@ class ChatFlowNode(NodeBase):
     #: when the compaction was explicit; engine-triggered compacts
     #: leave it ``None``.
     compact_snapshot: CompactSnapshot | None = None
+    #: Manual branch-merge marker. When non-``None`` this ChatNode folds
+    #: two (MVP) ancestor branches into a single synthesized reply —
+    #: ``agent_response.text`` is the merged prose, ``parent_ids`` are
+    #: the two source tips. Downstream context walks stop here under the
+    #: same rule as :attr:`compact_snapshot`. Mutually exclusive with
+    #: ``compact_snapshot`` — enforced in the ChatFlowNode validator.
+    merge_snapshot: MergeSnapshot | None = None
+    #: Estimated tokens in the chain context this ChatNode was spawned
+    #: with — i.e. ``_build_chat_context`` output at creation time,
+    #: including this node's own user turn (if any). The engine stamps
+    #: it once at spawn; it never changes afterward. The canvas TokenBar
+    #: reads this to show monotonic context growth along the chain
+    #: instead of heuristically inferring incoming/outgoing from the
+    #: inner WorkFlow's first/last WorkNode — that heuristic became
+    #: unreliable once WorkFlows grew sub-delegations and multi-round
+    #: judge iterations. ``None`` on legacy nodes predating this field;
+    #: UI falls back to the old heuristic in that case.
+    entry_prompt_tokens: int | None = None
+    #: Estimated tokens in this ChatNode's ``agent_response.text`` — the
+    #: assistant turn that ``_build_chat_context`` will emit for every
+    #: descendant. Stamped once when the turn finalises (after
+    #: ``agent_response`` is written) and stays put. The canvas adds
+    #: this to ``entry_prompt_tokens`` so the card shows what the *next*
+    #: turn's first WorkNode will consume as input, not what *this*
+    #: turn consumed. ``None`` while the turn is still running and on
+    #: legacy nodes predating the field.
+    output_response_tokens: int | None = None
+
+    @model_validator(mode="after")
+    def _check_snapshot_exclusivity(self) -> "ChatFlowNode":
+        """A ChatNode is compact OR merge, never both."""
+        if self.compact_snapshot is not None and self.merge_snapshot is not None:
+            raise ValueError(
+                "ChatFlowNode cannot carry both compact_snapshot and "
+                "merge_snapshot at once"
+            )
+        return self
 
 
 class ChatFlow(BaseModel):
@@ -183,7 +220,7 @@ class ChatFlow(BaseModel):
     #: ChatFlowEngine derives the four switch defaults (``plan_enabled``,
     #: ``judge_pre_enabled``, ``judge_during_enabled``, ``judge_post_enabled``)
     #: from this per §3.4.1 — see :func:`derive_switches_from_mode`.
-    default_execution_mode: ExecutionMode = ExecutionMode.DIRECT
+    default_execution_mode: ExecutionMode = ExecutionMode.NATIVE_REACT
     #: Tier 1 pre-llm_call auto-compact threshold. When the estimated
     #: ancestor-context footprint of a pending llm_call crosses
     #: ``compact_trigger_pct`` of the target model's context window,
@@ -192,8 +229,11 @@ class ChatFlow(BaseModel):
     compact_trigger_pct: float | None = 0.7
     #: Target footprint for Tier 1 compact summaries, expressed as a
     #: fraction of the target model's context window. Fed to the
-    #: compact worker as the ``target_tokens`` param.
-    compact_target_pct: float = 0.5
+    #: compact worker as the ``target_tokens`` param. Must satisfy
+    #: ``compact_trigger_pct + compact_target_pct <= 1.0`` (see
+    #: the ChatFlow model_validator) so post-compact context is
+    #: provably bounded by the model's window.
+    compact_target_pct: float = 0.3
     #: Number of trailing messages kept verbatim on the downstream side
     #: of a compact. Smaller = more aggressive compaction, larger =
     #: more fidelity.
@@ -208,8 +248,57 @@ class ChatFlow(BaseModel):
     #: so the preference travels with the ChatFlow; the dialog itself
     #: lives in the frontend.
     compact_require_confirmation: bool = True
+    #: ChatFlow-layer auto-compact trigger (dual-track, independent of
+    #: the WorkFlow Tier 1 trigger above). Evaluated at ChatNode spawn:
+    #: if the prospective chain context (``entry_prompt_tokens``) crosses
+    #: ``chatnode_compact_trigger_pct`` of the turn model's context
+    #: window, the engine inserts a compact ChatNode *before* the new
+    #: turn and forwards the turn into the compact node's pending_queue.
+    #: ``None`` disables the ChatFlow-layer trigger. Reuses
+    #: ``compact_preserve_recent_turns`` and ``compact_model``.
+    chatnode_compact_trigger_pct: float | None = 0.6
+    #: Target footprint for ChatNode-level compact summaries, as a
+    #: fraction of the turn model's context window. Fed to the compact
+    #: worker as ``target_tokens``.
+    chatnode_compact_target_pct: float = 0.4
     sticky_notes: dict[str, StickyNote] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utcnow)
+
+    @model_validator(mode="after")
+    def _check_compact_invariants(self) -> "ChatFlow":
+        """Both compact tiers must satisfy ``trigger + target <= 1.0``.
+
+        Proof sketch: at trigger time pre-compact context = trigger×max,
+        and ``preserved + new_user`` is a subset of pre-compact so it's
+        also ≤ trigger×max. After compact: summary + preserved + new_user
+        ≤ (target + trigger)×max (the engine hard-caps summary at
+        target×max). The constraint ``trigger + target ≤ 1.0`` therefore
+        guarantees post-compact context ≤ max, preventing a second-turn
+        blowup past the model's window.
+        """
+        if (
+            self.compact_trigger_pct is not None
+            and self.compact_trigger_pct + self.compact_target_pct > 1.0
+        ):
+            raise ValueError(
+                "compact_trigger_pct + compact_target_pct must be <= 1.0 "
+                f"(got {self.compact_trigger_pct} + {self.compact_target_pct} "
+                f"= {self.compact_trigger_pct + self.compact_target_pct:.3f})"
+            )
+        if (
+            self.chatnode_compact_trigger_pct is not None
+            and self.chatnode_compact_trigger_pct
+            + self.chatnode_compact_target_pct
+            > 1.0
+        ):
+            raise ValueError(
+                "chatnode_compact_trigger_pct + chatnode_compact_target_pct "
+                "must be <= 1.0 "
+                f"(got {self.chatnode_compact_trigger_pct} + "
+                f"{self.chatnode_compact_target_pct} = "
+                f"{self.chatnode_compact_trigger_pct + self.chatnode_compact_target_pct:.3f})"
+            )
+        return self
 
     @property
     def root_id(self) -> NodeId | None:

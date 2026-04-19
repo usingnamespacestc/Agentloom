@@ -24,7 +24,7 @@ plan:
   description:
     text: "judge_during red-team pass"
     provenance: pure_agent
-  execution_mode: direct
+  execution_mode: native_react
   nodes:
     - id: "judge_during_root"
       parent_ids: []

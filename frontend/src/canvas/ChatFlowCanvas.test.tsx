@@ -23,7 +23,7 @@ function seed(): ChatFlow {
     default_model: null,
     default_judge_model: null,
     default_tool_call_model: null,
-    default_execution_mode: 'direct',
+    default_execution_mode: 'native_react',
     judge_retry_budget: 3,
     min_ground_ratio: null,
     ground_ratio_grace_nodes: 20,
@@ -33,6 +33,8 @@ function seed(): ChatFlow {
       compact_preserve_recent_turns: 3,
       compact_model: null,
       compact_require_confirmation: true,
+      chatnode_compact_trigger_pct: 0.6,
+      chatnode_compact_target_pct: 0.4,
     root_ids: ["a"],
     created_at: "2026-04-10T00:00:00Z",
     nodes: {
@@ -57,6 +59,8 @@ function seed(): ChatFlow {
         workflow: { id: "wf", root_ids: [], nodes: {} },
         pending_queue: [],
         compact_snapshot: null,
+        entry_prompt_tokens: null,
+        output_response_tokens: null,
       },
       b: {
         id: "b",
@@ -79,6 +83,8 @@ function seed(): ChatFlow {
         workflow: { id: "wf2", root_ids: [], nodes: {} },
         pending_queue: [],
         compact_snapshot: null,
+        entry_prompt_tokens: null,
+        output_response_tokens: null,
       },
     },
   };
@@ -129,6 +135,22 @@ describe("buildGraph", () => {
     // a is ancestor of running → also cannot delete
     expect(nodes.find((n) => n.id === "a")!.data.canDelete).toBe(false);
   });
+
+  it("preserves compact_snapshot on node data for canvas rendering", () => {
+    const cf = seed();
+    cf.nodes["b"].compact_snapshot = {
+      summary: "s",
+      preserved_messages: [],
+      source_range: [0, 1],
+      dropped_count: 1,
+      original_tokens: 100,
+      compacted_tokens: 50,
+      compact_instruction: null,
+    };
+    const { nodes } = buildGraph(cf, null);
+    // The card component reads node.compact_snapshot off data.node.
+    expect(nodes.find((n) => n.id === "b")!.data.node.compact_snapshot).not.toBeNull();
+  });
 });
 
 describe("ChatFlowCanvas rendering", () => {
@@ -148,7 +170,7 @@ describe("ChatFlowCanvas rendering", () => {
           default_model: null,
     default_judge_model: null,
     default_tool_call_model: null,
-          default_execution_mode: 'direct',
+          default_execution_mode: 'native_react',
           judge_retry_budget: 3,
     min_ground_ratio: null,
     ground_ratio_grace_nodes: 20,
@@ -158,6 +180,8 @@ describe("ChatFlowCanvas rendering", () => {
       compact_preserve_recent_turns: 3,
       compact_model: null,
       compact_require_confirmation: true,
+      chatnode_compact_trigger_pct: 0.6,
+      chatnode_compact_target_pct: 0.4,
           root_ids: [],
           nodes: {},
           created_at: "2026-04-10T00:00:00Z",

@@ -61,6 +61,10 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
   const [compactPreserveTurnsStr, setCompactPreserveTurnsStr] = useState("");
   const [compactModelKey, setCompactModelKey] = useState("");
   const [compactRequireConfirmation, setCompactRequireConfirmation] = useState(true);
+  // ChatFlow-layer auto-compact (dual-track). Same string-as-percentage
+  // pattern as the WorkFlow tier above.
+  const [chatnodeCompactTriggerPctStr, setChatnodeCompactTriggerPctStr] = useState("");
+  const [chatnodeCompactTargetPctStr, setChatnodeCompactTargetPctStr] = useState("");
   // Per-tool visibility: set of built-in tool names the user has
   // enabled for this chatflow. A tool is "checked" iff its name is
   // NOT in the stored ``disabled_tool_names`` list.
@@ -132,6 +136,13 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
       );
       setCompactModelKey(refKey(chatflow?.compact_model ?? null));
       setCompactRequireConfirmation(chatflow?.compact_require_confirmation ?? true);
+      const cnTrig = chatflow?.chatnode_compact_trigger_pct;
+      setChatnodeCompactTriggerPctStr(
+        cnTrig == null ? "" : String(Math.round(cnTrig * 100)),
+      );
+      setChatnodeCompactTargetPctStr(
+        String(Math.round((chatflow?.chatnode_compact_target_pct ?? 0.4) * 100)),
+      );
     }
   }, [open, chatflow, loadProviders, loadMcpServers, loadTools]);
 
@@ -170,6 +181,30 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
     });
     return out;
   }, [providers]);
+
+  // Resolve the context_window backing the compact % ↔ token two-way
+  // binding. Compact model pin wins; otherwise the chatflow default
+  // model; otherwise the engine's ``DEFAULT_CONTEXT_WINDOW_TOKENS``
+  // fallback (keep in sync with agentloom/engine/workflow_engine.py).
+  const DEFAULT_CTX_WINDOW = 32000;
+  const ctxWindowByKey = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const p of providers) {
+      for (const m of p.available_models) {
+        if (m.context_window != null) {
+          map[`${p.id}::${m.id}`] = m.context_window;
+        }
+      }
+    }
+    return map;
+  }, [providers]);
+  const compactCtxWindow = useMemo(() => {
+    return (
+      ctxWindowByKey[compactModelKey] ??
+      ctxWindowByKey[modelKey] ??
+      DEFAULT_CTX_WINDOW
+    );
+  }, [ctxWindowByKey, compactModelKey, modelKey]);
 
   if (!open || !chatflow) return null;
 
@@ -251,6 +286,23 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
         compactPreserveParsed >= 0
           ? compactPreserveParsed
           : (chatflow?.compact_preserve_recent_turns ?? 3);
+      const chatnodeTrigTrim = chatnodeCompactTriggerPctStr.trim();
+      let chatnodeTrigger: number | null;
+      if (chatnodeTrigTrim === "") {
+        chatnodeTrigger = null;
+      } else {
+        const pct = Number(chatnodeTrigTrim);
+        chatnodeTrigger =
+          Number.isFinite(pct) && pct >= 0 && pct <= 100
+            ? pct / 100
+            : (chatflow?.chatnode_compact_trigger_pct ?? 0.6);
+      }
+      const chatnodeTgtTrim = chatnodeCompactTargetPctStr.trim();
+      const chatnodeTgtParsed = chatnodeTgtTrim === "" ? NaN : Number(chatnodeTgtTrim);
+      const chatnodeTarget =
+        Number.isFinite(chatnodeTgtParsed) && chatnodeTgtParsed >= 1 && chatnodeTgtParsed <= 95
+          ? chatnodeTgtParsed / 100
+          : (chatflow?.chatnode_compact_target_pct ?? 0.4);
       await patchChatFlow({
         default_model: parseRefKey(modelKey),
         default_judge_model: parseRefKey(judgeModelKey),
@@ -264,6 +316,8 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
         compact_preserve_recent_turns: compactPreserve,
         compact_model: parseRefKey(compactModelKey),
         compact_require_confirmation: compactRequireConfirmation,
+        chatnode_compact_trigger_pct: chatnodeTrigger,
+        chatnode_compact_target_pct: chatnodeTarget,
       });
       onClose();
     } finally {
@@ -422,6 +476,11 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
                 modelOptions={modelOptions}
                 requireConfirmation={compactRequireConfirmation}
                 onRequireConfirmationChange={setCompactRequireConfirmation}
+                chatnodeTriggerPctStr={chatnodeCompactTriggerPctStr}
+                onChatnodeTriggerPctChange={setChatnodeCompactTriggerPctStr}
+                chatnodeTargetPctStr={chatnodeCompactTargetPctStr}
+                onChatnodeTargetPctChange={setChatnodeCompactTargetPctStr}
+                ctxWindow={compactCtxWindow}
               />
             )}
 
@@ -598,6 +657,11 @@ function CompactSettingsSection({
   modelOptions,
   requireConfirmation,
   onRequireConfirmationChange,
+  chatnodeTriggerPctStr,
+  onChatnodeTriggerPctChange,
+  chatnodeTargetPctStr,
+  onChatnodeTargetPctChange,
+  ctxWindow,
 }: {
   triggerPctStr: string;
   onTriggerPctChange: (v: string) => void;
@@ -610,14 +674,114 @@ function CompactSettingsSection({
   modelOptions: Array<{ key: string; label: string; pinned: boolean }>;
   requireConfirmation: boolean;
   onRequireConfirmationChange: (v: boolean) => void;
+  chatnodeTriggerPctStr: string;
+  onChatnodeTriggerPctChange: (v: string) => void;
+  chatnodeTargetPctStr: string;
+  onChatnodeTargetPctChange: (v: string) => void;
+  /** Effective context_window (in tokens) used for the percent ↔ token
+   * two-way binding on the target inputs. Resolved by the parent from
+   * the compact model pin → default model → engine fallback, so the
+   * binding stays correct when the user switches compact_model. */
+  ctxWindow: number;
 }) {
   const { t } = useTranslation();
+  // Derive a display string for the tokens sibling of a percent input.
+  // Empty percent → empty tokens (and vice-versa on the handler).
+  const pctStrToTokensStr = (pctStr: string): string => {
+    const trimmed = pctStr.trim();
+    if (trimmed === "") return "";
+    const pct = Number(trimmed);
+    if (!Number.isFinite(pct)) return "";
+    return String(Math.round((pct / 100) * ctxWindow));
+  };
+  // Handler for token-input → percent-input direction. Clamped to the
+  // same 1-95 range the percent input enforces so the two stay in a
+  // valid state even mid-edit.
+  const onTokensEdit =
+    (onPctChange: (v: string) => void) =>
+    (v: string) => {
+      const trimmed = v.trim();
+      if (trimmed === "") {
+        onPctChange("");
+        return;
+      }
+      const tokens = Number(trimmed);
+      if (!Number.isFinite(tokens) || ctxWindow <= 0) return;
+      const pct = Math.round((tokens / ctxWindow) * 100);
+      onPctChange(String(pct));
+    };
   return (
     <div>
       <p className="text-[10px] text-gray-400">
         {t("chatflow_settings.compact_hint")}
       </p>
       <div className="mt-3 space-y-3">
+        <h4 className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+          {t("chatflow_settings.compact_chatflow_layer")}
+        </h4>
+        <p className="-mt-2 text-[10px] text-gray-400">
+          {t("chatflow_settings.compact_chatflow_layer_hint")}
+        </p>
+
+        <label className="block">
+          <span className="text-[11px] font-medium text-gray-500">
+            {t("chatflow_settings.chatnode_compact_trigger_pct")}
+          </span>
+          <input
+            type="number"
+            min={0}
+            max={100}
+            step={1}
+            value={chatnodeTriggerPctStr}
+            onChange={(e) => onChatnodeTriggerPctChange(e.target.value)}
+            data-testid="chatnode-compact-trigger-pct-input"
+            className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+          />
+          <p className="mt-1 text-[10px] text-gray-400">
+            {t("chatflow_settings.chatnode_compact_trigger_pct_hint")}
+          </p>
+        </label>
+
+        <label className="block">
+          <span className="text-[11px] font-medium text-gray-500">
+            {t("chatflow_settings.chatnode_compact_target_pct")}
+          </span>
+          <div className="mt-0.5 flex gap-2">
+            <input
+              type="number"
+              min={1}
+              max={95}
+              step={1}
+              value={chatnodeTargetPctStr}
+              onChange={(e) => onChatnodeTargetPctChange(e.target.value)}
+              data-testid="chatnode-compact-target-pct-input"
+              className="w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+            />
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={pctStrToTokensStr(chatnodeTargetPctStr)}
+              onChange={(e) => onTokensEdit(onChatnodeTargetPctChange)(e.target.value)}
+              data-testid="chatnode-compact-target-tokens-input"
+              className="w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+            />
+          </div>
+          <p className="mt-1 text-[10px] text-gray-400">
+            {t("chatflow_settings.chatnode_compact_target_pct_hint")}
+          </p>
+          <p className="mt-0.5 text-[10px] text-gray-400">
+            {t("chatflow_settings.compact_target_tokens_hint", { ctx: ctxWindow })}
+          </p>
+        </label>
+
+        <h4 className="mt-2 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+          {t("chatflow_settings.compact_workflow_layer")}
+        </h4>
+        <p className="-mt-2 text-[10px] text-gray-400">
+          {t("chatflow_settings.compact_workflow_layer_hint")}
+        </p>
+
         <label className="block">
           <span className="text-[11px] font-medium text-gray-500">
             {t("chatflow_settings.compact_trigger_pct")}
@@ -641,20 +805,38 @@ function CompactSettingsSection({
           <span className="text-[11px] font-medium text-gray-500">
             {t("chatflow_settings.compact_target_pct")}
           </span>
-          <input
-            type="number"
-            min={1}
-            max={95}
-            step={1}
-            value={targetPctStr}
-            onChange={(e) => onTargetPctChange(e.target.value)}
-            data-testid="compact-target-pct-input"
-            className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
-          />
+          <div className="mt-0.5 flex gap-2">
+            <input
+              type="number"
+              min={1}
+              max={95}
+              step={1}
+              value={targetPctStr}
+              onChange={(e) => onTargetPctChange(e.target.value)}
+              data-testid="compact-target-pct-input"
+              className="w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+            />
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={pctStrToTokensStr(targetPctStr)}
+              onChange={(e) => onTokensEdit(onTargetPctChange)(e.target.value)}
+              data-testid="compact-target-tokens-input"
+              className="w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+            />
+          </div>
           <p className="mt-1 text-[10px] text-gray-400">
             {t("chatflow_settings.compact_target_pct_hint")}
           </p>
+          <p className="mt-0.5 text-[10px] text-gray-400">
+            {t("chatflow_settings.compact_target_tokens_hint", { ctx: ctxWindow })}
+          </p>
         </label>
+
+        <h4 className="mt-2 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+          {t("chatflow_settings.compact_shared")}
+        </h4>
 
         <label className="block">
           <span className="text-[11px] font-medium text-gray-500">

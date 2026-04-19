@@ -1,0 +1,70 @@
+builtin_id: worker
+name: "Worker（atomic llm_call）"
+description: >
+  通用的 atomic worker WorkNode。planner 给出的 atomic brief 会作为
+  实化 trio 输入；worker 产出父 WorkFlow 的 expected_outcome 所描述
+  的结果。在修订轮次中，worker_judge 的先前批评会被一并带入，让
+  worker 可以针对性修改，同时保留自己的上下文。
+params_schema:
+  description:
+    type: string
+    required: true
+  inputs:
+    type: string
+    required: false
+  expected_outcome:
+    type: string
+    required: true
+  prior_output:
+    type: string
+    required: false
+    description: >
+      第 1 轮：空。第 N>1 轮：该 worker 上一轮的草稿，让它可以修订
+      而不是从零再来。
+  critique:
+    type: string
+    required: false
+    description: >
+      第 1 轮：空。第 N>1 轮：worker_judge 的批评 JSON。
+plan:
+  description:
+    text: "worker —— 执行 atomic brief"
+    provenance: pure_agent
+  execution_mode: native_react
+  nodes:
+    - id: "worker_root"
+      parent_ids: []
+      step_kind: llm_call
+      role: worker
+      description:
+        text: "产出 planner 的 atomic brief 所要求的内容。"
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            你是递归 WorkFlow 中的 worker WorkNode。planner 已经把父
+            目标拆到足够小，本任务是 atomic：单次 LLM 回复就应该产出
+            expected outcome。
+
+            硬性规则：
+            - 你*只*看得到 planner 交给你的 trio。不要向上追问父层上下
+              文——若 `inputs` 里缺了你需要的东西，那是 planner 的问题；
+              在回复中把缺口显式点出来，worker_judge 会发现它。
+            - 产出 `expected_outcome` 描述的内容。不要复述任务；直接
+              返回真正的交付物。
+            - 修订轮次中，逐条处理批评。若改动不明显，请引用你做了什
+              么具体修改。
+        - role: user
+          content: |
+            Description: {{ description }}
+            Inputs: {{ inputs }}
+            Expected outcome: {{ expected_outcome }}
+
+            先前草稿（第 1 轮为空）
+            ---------------------
+            {{ prior_output }}
+
+            Judge 批评（第 1 轮为空）
+            ------------------------
+            {{ critique }}
+  root_ids: ["worker_root"]

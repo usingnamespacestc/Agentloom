@@ -94,6 +94,10 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
   const cancelNode = useChatFlowStore((s) => s.cancelNode);
   const setHoveredEdge = useChatFlowStore((s) => s.setHoveredEdge);
   const hoveredEdge = useChatFlowStore((s) => s.hoveredEdge);
+  const pendingMergeFirstId = useChatFlowStore((s) => s.pendingMergeFirstId);
+  const beginPendingMerge = useChatFlowStore((s) => s.beginPendingMerge);
+  const cancelPendingMerge = useChatFlowStore((s) => s.cancelPendingMerge);
+  const commitMergeWith = useChatFlowStore((s) => s.commitMergeWith);
 
   // Cursor position for the edge-hover tooltip — only tracked while an
   // edge is hovered, so we don't pay for global mousemove the rest of
@@ -344,7 +348,10 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
 
   const handleNodeDragStart: OnNodeDrag = useCallback(() => {
     isDragging.current = true;
-  }, []);
+    // Dragging a node ≠ panning the page — cancels a pending merge per the
+    // VSCode-compare handshake rule.
+    cancelPendingMerge();
+  }, [cancelPendingMerge]);
 
   // Fallback capture of the final drop position. ``onNodesChange``'s
   // final ``position`` event is often lost when an SSE-driven re-render
@@ -371,6 +378,9 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
       setEditingStickyId(null);
     }
     setContextMenu(null);
+    // Left-clicking a node counts as an "operation other than panning",
+    // which cancels a pending merge per the user-spec'd handshake.
+    cancelPendingMerge();
   };
 
   const handleNodeDoubleClick: NodeMouseHandler = (_event, node) => {
@@ -386,7 +396,19 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
     setStickyCtxMenu(null);
     setSelectedStickyId(null);
     setEditingStickyId(null);
-  }, []);
+    cancelPendingMerge();
+  }, [cancelPendingMerge]);
+
+  // Escape also cancels a pending merge — matches VSCode compare
+  // where Esc aborts the two-step pick.
+  useEffect(() => {
+    if (pendingMergeFirstId === null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") cancelPendingMerge();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [pendingMergeFirstId, cancelPendingMerge]);
 
   const handleContextMenu: NodeMouseHandler = (event, node) => {
     event.preventDefault();
@@ -475,6 +497,16 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
         // summary). Everything else is fair game — server rejects if
         // there's literally nothing to summarise.
         const canCompact = node.compact_snapshot == null;
+        // Classify the merge-state for THIS node given the pending state.
+        // - no-pending: no merge in flight — show "Select to merge"
+        // - first-pending-self: this node IS the pending first — show "Cancel"
+        // - first-pending-other: another node is pending — show "Merge with …"
+        const mergeState: "no-pending" | "first-pending-self" | "first-pending-other" =
+          pendingMergeFirstId === null
+            ? "no-pending"
+            : pendingMergeFirstId === contextMenu.nodeId
+              ? "first-pending-self"
+              : "first-pending-other";
 
         return (
           <NodeContextMenu
@@ -484,21 +516,39 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
             isLeaf={isLeaf}
             canDelete={canDel}
             canCompact={canCompact}
+            mergeState={mergeState}
+            onSelectToMerge={() => {
+              beginPendingMerge(contextMenu.nodeId);
+              setContextMenu(null);
+            }}
+            onCommitMerge={() => {
+              const secondId = contextMenu.nodeId;
+              setContextMenu(null);
+              void commitMergeWith(secondId);
+            }}
+            onCancelPendingMerge={() => {
+              cancelPendingMerge();
+              setContextMenu(null);
+            }}
             onEnterWorkflow={() => {
               enterWorkflow(contextMenu.nodeId);
               setContextMenu(null);
+              cancelPendingMerge();
             }}
             onRetry={() => {
               void retryNode(contextMenu.nodeId);
               setContextMenu(null);
+              cancelPendingMerge();
             }}
             onCancel={() => {
               void cancelNode(contextMenu.nodeId);
               setContextMenu(null);
+              cancelPendingMerge();
             }}
             onCompact={() => {
               const parentId = contextMenu.nodeId;
               setContextMenu(null);
+              cancelPendingMerge();
               if (chatflow.compact_require_confirmation ?? true) {
                 setCompactDialogParentId(parentId);
                 return;
@@ -515,6 +565,7 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
                 setPendingDeleteId(contextMenu.nodeId);
               }
               setContextMenu(null);
+              cancelPendingMerge();
             }}
             onClose={() => setContextMenu(null)}
           />
@@ -619,43 +670,41 @@ function computeLeafIds(nodes: Record<string, ChatFlowNode>): Set<string> {
 }
 
 /**
- * Tokens that would be carried into a *next* turn spawned from this
- * ChatNode — i.e. the realistic context-window load the user pays for
- * when continuing the conversation here.
+ * Chain-context tokens the *next* turn will consume as input if it
+ * forks off this ChatNode. Composed as ``entry_prompt_tokens`` (what
+ * this turn saw going in) + ``output_response_tokens`` (what this
+ * turn contributed as ``agent_response``, which every descendant
+ * pays for via ``_build_chat_context``).
  *
- * Formula:
- *   incoming = first worknode's prompt_tokens
- *     (already includes all ancestor user/agent turns + this turn's
- *      user_message — _build_chat_context walks the full parent chain)
- *   outgoing = last worknode's completion_tokens
- *     (this turn's agent_response — what becomes part of the next
- *      turn's prompt)
+ * While the turn is still running ``output_response_tokens`` is
+ * ``null``; we show just the entry value so the bar doesn't jump
+ * mid-flight. Once the turn finishes the card grows by the output
+ * size — which is what the next turn's first WorkNode will see.
  *
- * Internal WorkFlow chatter (intermediate judge/tool/llm calls) is NOT
- * counted: it never crosses the ChatNode boundary into the next turn's
- * input. This drives the auto-compress trigger downstream.
+ * Legacy fallback (node predates ``entry_prompt_tokens``): use the
+ * prompt_tokens of the first root WorkNode to execute (judge_pre in
+ * semi_auto / auto, or the initial llm_call in direct mode). That
+ * node's prompt is the closest proxy for "what the LLM saw entering
+ * this turn" and keeps monotonic growth along the chain. Picking
+ * ``max(prompt_tokens)`` would overshoot because judge_post sees the
+ * accumulated tool-loop output and blows past the true entry value —
+ * producing the inverted display where a legacy ancestor shows more
+ * tokens than a freshly-stamped leaf.
  */
 function nodeTokens(node: ChatFlowNode): number {
-  let first: { started_at: string; prompt_tokens: number } | null = null;
-  let last: { finished_at: string; completion_tokens: number } | null = null;
-  for (const wn of Object.values(node.workflow.nodes)) {
-    if (!wn.usage || !wn.started_at) continue;
-    const startedAt = wn.started_at;
-    const promptTokens = wn.usage.prompt_tokens;
-    if (first === null || startedAt < first.started_at) {
-      first = { started_at: startedAt, prompt_tokens: promptTokens };
-    }
-    if (wn.finished_at) {
-      const finishedAt = wn.finished_at;
-      const completionTokens = wn.usage.completion_tokens;
-      if (last === null || finishedAt > last.finished_at) {
-        last = { finished_at: finishedAt, completion_tokens: completionTokens };
-      }
-    }
+  if (node.entry_prompt_tokens != null) {
+    return node.entry_prompt_tokens + (node.output_response_tokens ?? 0);
   }
-  const incoming = first?.prompt_tokens ?? 0;
-  const outgoing = last?.completion_tokens ?? 0;
-  return incoming + outgoing;
+  for (const rid of node.workflow.root_ids ?? []) {
+    const wn = node.workflow.nodes[rid];
+    if (wn?.usage) return wn.usage.prompt_tokens;
+  }
+  let min = Infinity;
+  for (const wn of Object.values(node.workflow.nodes)) {
+    if (!wn.usage) continue;
+    if (wn.usage.prompt_tokens < min) min = wn.usage.prompt_tokens;
+  }
+  return min === Infinity ? 0 : min;
 }
 
 /**
@@ -782,6 +831,10 @@ function NodeContextMenu({
   onCompact,
   onDelete,
   onClose,
+  mergeState,
+  onSelectToMerge,
+  onCommitMerge,
+  onCancelPendingMerge,
 }: {
   x: number;
   y: number;
@@ -795,6 +848,10 @@ function NodeContextMenu({
   onCompact: () => void;
   onDelete: () => void;
   onClose: () => void;
+  mergeState: "none" | "first-pending-self" | "first-pending-other" | "no-pending";
+  onSelectToMerge: () => void;
+  onCommitMerge: () => void;
+  onCancelPendingMerge: () => void;
 }) {
   const { t } = useTranslation();
 
@@ -809,6 +866,24 @@ function NodeContextMenu({
   }
   if (status === "running") {
     items.push({ label: t("chatflow.ctx_cancel"), onClick: onCancel });
+  }
+
+  // Merge (VSCode compare-style two-step handshake).
+  if (mergeState === "no-pending") {
+    items.push({
+      label: t("chatflow.ctx_select_to_merge"),
+      onClick: onSelectToMerge,
+    });
+  } else if (mergeState === "first-pending-self") {
+    items.push({
+      label: t("chatflow.ctx_cancel_pending_merge"),
+      onClick: onCancelPendingMerge,
+    });
+  } else if (mergeState === "first-pending-other") {
+    items.push({
+      label: t("chatflow.ctx_merge_with_pending"),
+      onClick: onCommitMerge,
+    });
   }
 
   // Compact — hide on compact nodes themselves.

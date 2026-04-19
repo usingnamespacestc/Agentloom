@@ -56,6 +56,12 @@ def _repo(session: AsyncSession) -> WorkflowRepository:
     return WorkflowRepository(session, workspace_id=DEFAULT_WORKSPACE_ID)
 
 
+def _repo_providers(session: AsyncSession):  # type: ignore[no-untyped-def]
+    from agentloom.db.repositories.provider import ProviderRepository
+
+    return ProviderRepository(session, workspace_id=DEFAULT_WORKSPACE_ID)
+
+
 # ---------------------------------------------------------------- Pydantic payloads
 
 
@@ -148,12 +154,17 @@ async def execute_workflow(
     except WorkflowNotFoundError as exc:
         raise HTTPException(404, f"workflow {workflow_id} not found") from exc
 
+    from agentloom.engine.provider_context_cache import lookup as _ctx_lookup
+    from agentloom.engine.provider_context_cache import refresh as _ctx_refresh
+
+    await _ctx_refresh(_repo_providers(session))
     provider_call = _provider_call_from_settings()
     engine = WorkflowEngine(
         provider_call,
         get_event_bus(),
         tool_registry=get_shared_registry(),
         tool_context=ToolContext(workspace_id=DEFAULT_WORKSPACE_ID),
+        context_window_lookup=_ctx_lookup,
     )
 
     try:
@@ -206,11 +217,16 @@ async def _run_judge_in_background(workflow_id: str, new_node_id: str) -> None:
         async with get_session_maker()() as session:
             repo = WorkflowRepository(session, workspace_id=DEFAULT_WORKSPACE_ID)
             wf = await repo.get(workflow_id)
+            from agentloom.engine.provider_context_cache import lookup as _ctx_lookup
+            from agentloom.engine.provider_context_cache import refresh as _ctx_refresh
+
+            await _ctx_refresh(_repo_providers(session))
             engine = WorkflowEngine(
                 _provider_call_from_settings(),
                 get_event_bus(),
                 tool_registry=get_shared_registry(),
                 tool_context=ToolContext(workspace_id=DEFAULT_WORKSPACE_ID),
+                context_window_lookup=_ctx_lookup,
             )
             await engine.execute(wf)
             await repo.save(wf)
@@ -362,7 +378,7 @@ def _provider_call_from_settings():
     from agentloom.db.repositories.provider import ProviderRepository
     from agentloom.providers.registry import build_adapter
 
-    async def call(messages, tools, model, on_token=None, extra=None, json_schema=None):  # type: ignore[no-untyped-def]
+    async def call(messages, tools, model, on_token=None, extra=None, json_schema=None, forced_tool_name=None):  # type: ignore[no-untyped-def]
         async with get_session_maker()() as session:
             repo = ProviderRepository(session, workspace_id=DEFAULT_WORKSPACE_ID)
             providers = await repo.list_all()
@@ -477,6 +493,7 @@ def _provider_call_from_settings():
                 on_token=on_token,
                 json_mode=resolved_json_mode,
                 json_schema=json_schema,
+                forced_tool_name=forced_tool_name,
             )
 
     return call

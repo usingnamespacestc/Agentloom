@@ -142,6 +142,12 @@ class ToolRegistry:
         except KeyError as exc:
             raise ToolError(f"unknown tool {name!r}") from exc
 
+    def has(self, name: str) -> bool:
+        """Return True iff *name* is a registered tool. Ignores
+        visibility constraints — callers that need constraint-aware
+        checks should use :meth:`definitions_for_constraints` instead."""
+        return name in self._tools
+
     def all(self) -> list[Tool]:
         return list(self._tools.values())
 

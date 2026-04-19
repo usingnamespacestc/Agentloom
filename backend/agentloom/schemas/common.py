@@ -67,6 +67,12 @@ class StepKind(str, Enum):
     #: the configured threshold; explicitly placed by users in ChatFlow
     #: (Tier 2). See compact design in devlog 2026-04-18 夜.
     COMPACT = "compact"
+    #: Branch merge — a single LLM call that synthesizes two ChatNode
+    #: branches into one follow-up reply, recorded as a
+    #: :class:`MergeSnapshot` on the resulting multi-parent ChatNode.
+    #: Downstream context walks stop at the merge node exactly like they
+    #: stop at a compact node.
+    MERGE = "merge"
 
 
 class JudgeVariant(str, Enum):
@@ -99,9 +105,9 @@ class WorkNodeRole(str, Enum):
 class ExecutionMode(str, Enum):
     """How autonomous a WorkFlow's execution is — see §3.4.1."""
 
-    DIRECT = "direct"          # pure ReAct, no plan phase
-    SEMI_AUTO = "semi_auto"    # plan + modal gates; keyframes allowed
-    AUTO = "auto"              # end-to-end until halt condition
+    NATIVE_REACT = "native_react"  # pure ReAct, no plan phase
+    SEMI_AUTO = "semi_auto"        # plan + modal gates; keyframes allowed
+    AUTO_PLAN = "auto_plan"        # end-to-end until halt condition
 
 
 class EditProvenance(str, Enum):
@@ -323,6 +329,16 @@ class JudgeVerdict(BaseModel):
     feasibility: Literal["ok", "risky", "infeasible"] | None = None
     blockers: list[str] = Field(default_factory=list)
     missing_inputs: list[str] = Field(default_factory=list)
+    #: judge_pre additionally distills the conversation into the
+    #: WorkFlow trio (description / inputs / expected_outcome) so the
+    #: planner downstream doesn't have to re-parse the full transcript.
+    #: The engine writes these onto ``WorkFlow.description`` / ``.inputs``
+    #: / ``.expected_outcome`` before spawning the planner. All three
+    #: are optional: an empty string means "judge_pre couldn't extract
+    #: a clean value", which the planner treats as infeasible.
+    extracted_description: str | None = None
+    extracted_inputs: str | None = None
+    extracted_expected_outcome: str | None = None
 
     # --- judge_during ---
     critiques: list[Critique] = Field(default_factory=list)

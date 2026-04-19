@@ -26,6 +26,7 @@ from agentloom.api import (
 from agentloom.config import get_settings
 from agentloom.db.base import get_session_maker
 from agentloom.db.models.tenancy import DEFAULT_WORKSPACE_ID
+from agentloom.db.repositories.chatflow import backfill_missing_node_index
 from agentloom.db.repositories.mcp_server import MCPServerRepository
 from agentloom.db.repositories.workspace_settings import WorkspaceSettingsRepository
 from agentloom.mcp import runtime as mcp_runtime
@@ -58,6 +59,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:  # noqa: BLE001 — never fail-fast on MCP boot
         logging.getLogger(__name__).exception("mcp: startup load failed")
         print(f"mcp: startup load failed: {exc!r}", flush=True)
+    try:
+        backfilled = await backfill_missing_node_index(get_session_maker())
+        if backfilled:
+            logging.getLogger(__name__).info(
+                "node_index: backfilled %d pre-existing chatflow(s)", backfilled
+            )
+    except Exception:  # noqa: BLE001 — backfill is best-effort
+        logging.getLogger(__name__).exception("node_index: backfill failed")
     try:
         yield
     finally:

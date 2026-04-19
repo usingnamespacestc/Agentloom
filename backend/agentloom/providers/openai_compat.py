@@ -207,6 +207,7 @@ class OpenAICompatAdapter(ProviderAdapter):
         on_token: TokenCallback | None = None,
         json_mode: str | None = None,
         json_schema: dict[str, Any] | None = None,
+        forced_tool_name: str | None = None,
     ) -> ChatResponse:
         payload: dict[str, Any] = {
             "model": model,
@@ -250,6 +251,21 @@ class OpenAICompatAdapter(ProviderAdapter):
         wire_tools = self._to_wire_tools(tools)
         if wire_tools is not None:
             payload["tools"] = wire_tools
+        # Pin the model to a specific tool when requested. Must come
+        # after ``tools`` is set so validation-on-the-wire sees both.
+        # OpenAI spec: tool_choice={"type":"function","function":{"name":...}}.
+        # volcengine's Ark and most OpenAI-compat shims accept the same
+        # shape. Adapter is intentionally strict: forced_tool_name only
+        # has effect when tools are actually exposed — a forced name
+        # without a matching tool definition would 400 on any sane
+        # backend, so we silently skip rather than inventing a tool.
+        if forced_tool_name is not None and wire_tools:
+            tool_names = {t.get("function", {}).get("name") for t in wire_tools}
+            if forced_tool_name in tool_names:
+                payload["tool_choice"] = {
+                    "type": "function",
+                    "function": {"name": forced_tool_name},
+                }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         if on_token is not None:
@@ -261,11 +277,24 @@ class OpenAICompatAdapter(ProviderAdapter):
             # carrying ``{choices: [], usage: {...}}``. Without it,
             # TokenUsage ends up all zeros and the UI ribbon reads 0.
             payload["stream_options"] = {"include_usage": True}
-        # Structured-output shaping. We only emit ``response_format``
-        # when the caller opts in and tools are NOT set — tool-use and
-        # response_format are mutually exclusive on most OpenAI-compat
-        # backends (the tool JSON itself is the structured output).
-        if json_mode and not wire_tools:
+        # Structured-output shaping. Historically we skipped
+        # ``response_format`` whenever tools were set because Ollama's
+        # OpenAI-compat shim 400s on that combination. OpenAI proper
+        # and volcengine's Ark both accept tools + response_format
+        # together, though — and the combination is exactly what the
+        # judge path wants: tool_choice pins the structured call and
+        # response_format double-enforces the content shape on models
+        # that decide to answer in text anyway. We gate the coexistence
+        # by ``provider_sub_kind`` so legacy/unknown backends stay on
+        # the conservative mutually-exclusive path.
+        _RESPONSE_FORMAT_COEXISTS_WITH_TOOLS = {"openai_chat", "volcengine"}
+        allow_with_tools = (
+            self._sub_kind in _RESPONSE_FORMAT_COEXISTS_WITH_TOOLS
+        )
+        emit_response_format = bool(json_mode) and (
+            not wire_tools or allow_with_tools
+        )
+        if emit_response_format:
             if json_mode == "schema" and json_schema is not None:
                 payload["response_format"] = {
                     "type": "json_schema",

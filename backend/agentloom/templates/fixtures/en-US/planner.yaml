@@ -46,7 +46,7 @@ plan:
   description:
     text: "planner — atomic-or-decompose decision"
     provenance: pure_agent
-  execution_mode: direct
+  execution_mode: native_react
   nodes:
     - id: "planner_root"
       parent_ids: []
@@ -64,6 +64,11 @@ plan:
             expected_outcome) for the WorkFlow level you are planning,
             plus optional handoff_notes from a preceding serial sibling.
 
+            At the top of a turn this trio was distilled by judge_pre
+            from the user's conversation; at a nested layer it was
+            authored by the layer's parent planner. Either way the
+            trio IS your context — you do not see the full transcript.
+
             Decide one of two shapes:
 
             - "atomic": the task can be completed by a single LLM call
@@ -79,13 +84,61 @@ plan:
             - Leaves are always workers. A planner that cannot find a
               viable decomposition must say so by emitting `mode:
               "infeasible"` with a `reason`. Never invent a no-op.
-            - Each sub-task must declare its own trio in the same shape
-              as the parent's. Be explicit — children only see what you
-              hand them; they cannot read your reasoning.
+            - If the trio arrives empty (description / inputs /
+              expected_outcome are all blank), judge_pre could not
+              extract a clean task from the conversation. Emit
+              `mode: "infeasible"` with a `reason` explaining that
+              the task is too vague to plan, so the user is re-asked.
+            - Each sub-task must declare its own trio — children only
+              see what you hand them, not your reasoning and not
+              sibling output. Decide per sub-task what goes in its
+              `inputs`: just what that child needs to do its job.
+              Copy raw material verbatim when the child must operate
+              on it literally (text to edit, a code block to review);
+              summarise or omit otherwise. If a downstream child
+              later reports missing information, the exit judge will
+              surface that back to the user — you don't need to
+              front-load everything "just in case".
             - For atomic worker briefs, choose `step_kind`:
                 * "llm_call": natural language / reasoning task.
                 * "tool_call": single tool invocation. Provide
                   `tool_name` and `tool_args`.
+                  `tool_name` MUST reference a tool that actually
+                  exists in the runtime's tool registry. Do NOT invent
+                  names and do NOT borrow identifiers from this engine's
+                  internals (``judge_verdict``, ``post_verdict``,
+                  ``feasibility``, ``planner``, etc. — those are JSON
+                  keys, not tools). If you're unsure whether a
+                  specific tool exists, leave `tool_name` null and let
+                  the worker pick at run time, or pick `step_kind:
+                  "llm_call"` so the worker can decide.
+            - **Fetch full content before answering compacted
+              questions.** When `inputs` references node ids from a
+              compact summary (e.g. ``(节点: <id>)`` / ``(nodes:
+              <id>)`` tags, or judge_pre explicitly noting "use
+              get_node_context to read the full content of node
+              <id>"), and the current task needs the specifics of
+              the compacted material (not just the summary-level
+              overview), prefer `mode: "atomic"`.
+              * **Exactly one node** needed, and nothing else has
+                to happen after retrieval: `step_kind: "tool_call"`
+                + `tool_name: "get_node_context"` + `tool_args:
+                {"node_id": "<cited node id>"}`.
+              * **Multiple nodes** needed, or synthesis / answering
+                still has to happen after retrieval: `step_kind:
+                "llm_call"`, and spell out in `description` that the
+                worker must call `get_node_context` once per node
+                id (the tool's ``node_id`` argument accepts a single
+                string — loop in the worker, don't try to batch) and
+                then answer from the retrieved text. **Do NOT**
+                split the per-node fetches into separate
+                `sub_agent_delegation` sub-tasks — one llm_call
+                worker can loop through all the fetches and the
+                final synthesis in a single step, whereas splitting
+                makes each nested judge_pre receive an empty
+                conversation and halt on a bogus infeasibility.
+              Do not answer content-specific questions from the
+              summary alone — that treats uncertainty as certainty.
 
             On revision rounds, you receive your own prior plan and the
             judge's critique. Address every blocker. You may keep the
@@ -123,10 +176,10 @@ plan:
           content: |
             Realised trio
             -------------
-            Description: {{ description }}
-            Inputs: {{ inputs }}
-            Expected outcome: {{ expected_outcome }}
-
+            {% if description %}Description: {{ description }}
+            {% endif %}{% if inputs %}Inputs: {{ inputs }}
+            {% endif %}{% if expected_outcome %}Expected outcome: {{ expected_outcome }}
+            {% endif %}
             Handoff from preceding sibling
             ------------------------------
             {{ handoff_notes }}

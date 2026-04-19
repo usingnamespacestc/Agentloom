@@ -43,6 +43,8 @@ function node(
     workflow: { id: `wf-${id}`, root_ids: [], nodes: {} },
     pending_queue: [],
     compact_snapshot: null,
+    entry_prompt_tokens: null,
+    output_response_tokens: null,
   };
 }
 
@@ -55,7 +57,7 @@ function twoBranchFlow(): ChatFlow {
     default_model: null,
     default_judge_model: null,
     default_tool_call_model: null,
-    default_execution_mode: 'direct',
+    default_execution_mode: 'native_react',
     judge_retry_budget: 3,
     min_ground_ratio: null,
     ground_ratio_grace_nodes: 20,
@@ -65,6 +67,8 @@ function twoBranchFlow(): ChatFlow {
     compact_preserve_recent_turns: 3,
     compact_model: null,
     compact_require_confirmation: true,
+    chatnode_compact_trigger_pct: 0.6,
+    chatnode_compact_target_pct: 0.4,
     root_ids: ["a"],
     nodes: {
       a: node("a", [], "hello", "hi there", 0),
@@ -128,5 +132,60 @@ describe("ConversationView", () => {
     // The branch selector at the terminal fork is still rendered,
     // so the user can click into a branch.
     expect(screen.getByTestId("branch-selector-a")).toBeInTheDocument();
+  });
+
+  it("truncates at a compact node and renders a distinct compact bubble", () => {
+    // a → b (compact) → c — the panel should hide a and render b with
+    // a compact marker. Matches _build_chat_context's upward-walk stop.
+    const cf: ChatFlow = {
+      id: "cf",
+      title: null,
+      description: null,
+      tags: [],
+      default_model: null,
+      default_judge_model: null,
+      default_tool_call_model: null,
+      default_execution_mode: "native_react",
+      judge_retry_budget: 3,
+      min_ground_ratio: null,
+      ground_ratio_grace_nodes: 20,
+      disabled_tool_names: [],
+      compact_trigger_pct: 0.7,
+      compact_target_pct: 0.5,
+      compact_preserve_recent_turns: 3,
+      compact_model: null,
+      compact_require_confirmation: true,
+      chatnode_compact_trigger_pct: 0.6,
+      chatnode_compact_target_pct: 0.4,
+      root_ids: ["a"],
+      nodes: {
+        a: node("a", [], "old user", "old agent", 0),
+        b: {
+          ...node("b", ["a"], "", "SUMMARY_BODY", 1),
+          compact_snapshot: {
+            summary: "SUMMARY_BODY",
+            preserved_messages: [],
+            source_range: [0, 2],
+            dropped_count: 2,
+            original_tokens: 1234,
+            compacted_tokens: 321,
+            compact_instruction: null,
+          },
+        },
+        c: node("c", ["b"], "new user", "new agent", 2),
+      },
+      created_at: "2026-04-10T00:00:00Z",
+    };
+    useChatFlowStore.getState().setChatFlow(cf);
+    render(<ConversationView />);
+
+    // Default walk lands on c. Path should be b (compact) → c; a hidden.
+    expect(screen.queryByTestId("conversation-node-a")).not.toBeInTheDocument();
+    expect(screen.getByTestId("conversation-node-b")).toBeInTheDocument();
+    expect(screen.getByTestId("conversation-node-c")).toBeInTheDocument();
+    // Compact bubble variant is in use.
+    expect(screen.getByTestId("conversation-node-b-compact")).toBeInTheDocument();
+    // Truncation notice tells the user some history was compacted away.
+    expect(screen.getByTestId("compact-truncation-notice")).toBeInTheDocument();
   });
 });

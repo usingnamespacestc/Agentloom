@@ -124,6 +124,9 @@ _VARIANT_SCHEMAS: dict[JudgeVariant, dict[str, Any]] = {
     JudgeVariant.PRE: {
         "type": "object",
         "properties": {
+            "extracted_description": {"type": "string"},
+            "extracted_inputs": {"type": "string"},
+            "extracted_expected_outcome": {"type": "string"},
             "feasibility": {
                 "type": "string",
                 "enum": ["ok", "risky", "infeasible"],
@@ -137,7 +140,12 @@ _VARIANT_SCHEMAS: dict[JudgeVariant, dict[str, Any]] = {
                 "items": {"type": "string"},
             },
         },
-        "required": ["feasibility"],
+        "required": [
+            "extracted_description",
+            "extracted_inputs",
+            "extracted_expected_outcome",
+            "feasibility",
+        ],
     },
     JudgeVariant.DURING: {
         "type": "object",
@@ -216,6 +224,22 @@ def judge_verdict_tool_def(variant: JudgeVariant) -> ToolDefinition:
         description=_VARIANT_DESCRIPTIONS[variant],
         parameters=_VARIANT_SCHEMAS[variant],
     )
+
+
+def judge_verdict_json_schema(variant: JudgeVariant) -> dict[str, Any]:
+    """Return the JSON schema for *variant*'s expected output.
+
+    Used by the engine to pass a ``response_format=json_schema`` shape
+    through to providers that support content-level JSON enforcement
+    alongside tool_use. Having both belt (tool_choice) and braces
+    (response_format) guards against models that ignore one but honor
+    the other.
+    """
+    schema = dict(_VARIANT_SCHEMAS[variant])
+    # response_format=json_schema needs a ``title`` to derive the output
+    # name OpenAI uses. Match the tool name so logs are greppable.
+    schema.setdefault("title", "judge_verdict")
+    return schema
 
 
 def parse_judge_from_tool_args(
