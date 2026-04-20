@@ -1,5 +1,5 @@
-builtin_id: planner_judge
-name: "Planner judge"
+builtin_id: plan_judge
+name: "规划评判"
 description: >
   评审 planner WorkNode 的输出（atomic brief 或 decomposition），
   关注可行性、覆盖度、时序以及遗漏的约束。返回 `during` 判定——

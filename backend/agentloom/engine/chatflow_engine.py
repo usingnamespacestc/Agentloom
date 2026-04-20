@@ -1930,7 +1930,7 @@ class ChatFlowEngine:
         handoff_notes: str = "",
     ) -> WorkFlowNode:
         templated = instantiate_fixture(
-            self._fixture_plans["planner"],
+            self._fixture_plans["plan"],
             {
                 **_trio_params(inner),
                 "prior_plan": prior_plan,
@@ -1952,7 +1952,7 @@ class ChatFlowEngine:
         round_index: int,
     ) -> WorkFlowNode:
         templated = instantiate_fixture(
-            self._fixture_plans["planner_judge"],
+            self._fixture_plans["plan_judge"],
             {
                 **_trio_params(inner),
                 "plan_json": (

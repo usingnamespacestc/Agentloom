@@ -1,5 +1,5 @@
-builtin_id: planner_judge
-name: "Planner judge"
+builtin_id: plan_judge
+name: "Plan judge"
 description: >
   Reviews a planner WorkNode's output (atomic brief OR decomposition)
   for feasibility, coverage, ordering, and missed constraints. Returns

@@ -1,0 +1,60 @@
+builtin_id: goal_expand
+name: "目标展开"
+description: "把目标展开为供用户审阅的 dashed-node WorkFlow。"
+params_schema:
+  goal:
+    type: string
+    required: true
+    description: "WorkFlow 对外负责的外层任务。"
+  inputs:
+    type: string
+    required: false
+    description: "已知输入 / 起点材料；若无则为空串。"
+  expected_outcome:
+    type: string
+    required: false
+    description: "成功长什么样；未指定则为空串。"
+  keyframes_json:
+    type: string
+    required: false
+    description: >
+      用户放置的 keyframes（dashed WorkNodes）JSON 数组，plan 必须
+      保留它们。锁定的 keyframes 是硬约束——其 trio 不可变。未锁定
+      的 keyframes 是可细化的建议。空串表示没有 keyframes。
+plan:
+  description:
+    text: "为目标规划：{{ goal }}"
+    provenance: pure_agent
+  execution_mode: native_react
+  plan_enabled: false
+  judge_pre_enabled: false
+  judge_during_enabled: false
+  judge_post_enabled: false
+  nodes:
+    - id: "plan_root"
+      parent_ids: []
+      step_kind: draft
+      description:
+        text: "为给定目标生成一个 DAG plan。"
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            你是 planner，负责把目标拆成一个可执行的 WorkNode DAG。
+            每个节点是以下之一：
+              - llm_call：单次模型调用
+              - tool_call：使用参数调用命名工具
+              - sub_agent_delegation：交给嵌套 WorkFlow
+
+            返回符合 WorkFlow schema 的合法 JSON。只输出 dashed
+            节点（status=planned）。对锁定的 keyframes 逐字保留；
+            未锁定时可细化。
+        - role: user
+          content: |
+            Goal: {{ goal }}
+            Inputs: {{ inputs }}
+            Expected outcome: {{ expected_outcome }}
+
+            用户放置的 keyframes（按顺序必须保留）：
+            {{ keyframes_json }}
+  root_ids: ["plan_root"]
