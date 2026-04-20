@@ -81,7 +81,7 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
     maxContextTokens,
   } = data as ChatFlowNodeData;
   const isMerge = node.parent_ids.length >= 2;
-  const isMergeSettled = node.merge_snapshot != null;
+  const isMergeSettled = isMerge && node.status === "succeeded";
   const isGreetingRoot = node.user_message === null;
   const hasWorkflow = Object.keys(node.workflow.nodes).length > 0;
   const isDashed = node.status === "planned" || node.status === "running";

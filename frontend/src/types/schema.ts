@@ -265,26 +265,6 @@ export interface CompactSnapshot {
   compact_instruction: string | null;
 }
 
-/**
- * Mirror of ``agentloom.schemas.workflow.MergeSnapshot``.
- * Populated on a ChatNode whose ``parent_ids`` carry a user-initiated
- * branch merge. The node's ``agent_response.text`` IS the synthesized
- * reply; this snapshot only records the sources + accounting metrics
- * so the downstream context walk can stop here.
- */
-export interface MergeSnapshot {
-  source_ids: NodeId[];
-  merge_instruction: string | null;
-  original_tokens: number;
-  merged_tokens: number;
-  /** True if that branch overflowed the merge model's per-branch budget
-   * and was summarized via the ``compact`` builtin before being fed into
-   * the merge prompt. Surfaced on the MergeMessageBubble so the user
-   * knows the merge saw a compacted view of that side, not the raw wire. */
-  left_precompacted?: boolean;
-  right_precompacted?: boolean;
-}
-
 export interface ChatFlowNode extends NodeBaseFields {
   user_message: EditableText | null;
   agent_response: EditableText;
@@ -294,11 +274,6 @@ export interface ChatFlowNode extends NodeBaseFields {
    * this ChatNode is a compact point: ``agent_response.text`` holds
    * the summary prose and downstream context builds root here. */
   compact_snapshot: CompactSnapshot | null;
-  /** Branch-merge marker. Non-null on a ChatNode that folds two
-   * ancestor branches into a single synthesized reply; ``parent_ids``
-   * has length ≥2 in that case. Mutually exclusive with
-   * ``compact_snapshot``. */
-  merge_snapshot?: MergeSnapshot | null;
   /** Tokens in this node's chain context at spawn (``_build_chat_context``
    * output + this turn's user message). Stamped once by the engine; the
    * canvas TokenBar reads this for monotonic context-growth display.

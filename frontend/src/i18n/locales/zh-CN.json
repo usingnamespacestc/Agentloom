@@ -155,10 +155,7 @@
     "merge_summary_label": "合并后的上下文",
     "merge_summary_pending": "（合并 worker 仍在运行…）",
     "merge_instruction_label": "合并指令",
-    "merge_sources_label": "来源",
-    "merge_stats": "{{original}} → {{merged}} tokens · 来源 {{sources}}",
-    "merge_precompact_badge": "已预压缩",
-    "merge_precompact_hint": "该分支超过了合并模型的上下文窗口，在进入合并 prompt 前先通过 compact 模板做了一轮摘要。"
+    "merge_sources_label": "来源"
   },
   "compact_dialog": {
     "button_label": "压缩",

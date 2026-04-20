@@ -19,7 +19,7 @@ from agentloom.schemas.common import (
     generate_node_id,
     utcnow,
 )
-from agentloom.schemas.workflow import CompactSnapshot, MergeSnapshot, WorkFlow
+from agentloom.schemas.workflow import CompactSnapshot, WorkFlow
 
 
 #: Canned greeting written to a brand-new ChatFlow's root node. Static
@@ -117,13 +117,6 @@ class ChatFlowNode(NodeBase):
     #: when the compaction was explicit; engine-triggered compacts
     #: leave it ``None``.
     compact_snapshot: CompactSnapshot | None = None
-    #: Manual branch-merge marker. When non-``None`` this ChatNode folds
-    #: two (MVP) ancestor branches into a single synthesized reply —
-    #: ``agent_response.text`` is the merged prose, ``parent_ids`` are
-    #: the two source tips. Downstream context walks stop here under the
-    #: same rule as :attr:`compact_snapshot`. Mutually exclusive with
-    #: ``compact_snapshot`` — enforced in the ChatFlowNode validator.
-    merge_snapshot: MergeSnapshot | None = None
     #: Estimated tokens in the chain context this ChatNode was spawned
     #: with — i.e. ``_build_chat_context`` output at creation time,
     #: including this node's own user turn (if any). The engine stamps
@@ -144,16 +137,6 @@ class ChatFlowNode(NodeBase):
     #: turn consumed. ``None`` while the turn is still running and on
     #: legacy nodes predating the field.
     output_response_tokens: int | None = None
-
-    @model_validator(mode="after")
-    def _check_snapshot_exclusivity(self) -> "ChatFlowNode":
-        """A ChatNode is compact OR merge, never both."""
-        if self.compact_snapshot is not None and self.merge_snapshot is not None:
-            raise ValueError(
-                "ChatFlowNode cannot carry both compact_snapshot and "
-                "merge_snapshot at once"
-            )
-        return self
 
 
 class ChatFlow(BaseModel):

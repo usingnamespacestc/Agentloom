@@ -70,7 +70,6 @@ from agentloom.schemas import (
     ChatFlow,
     ChatFlowNode,
     CompactSnapshot,
-    MergeSnapshot,
     PendingTurn,
     StepKind,
     WorkFlow,
@@ -305,15 +304,16 @@ def _first_line(text: str) -> str:
 def _chat_board_source_kind(node: ChatFlowNode) -> str:
     """Classify a finished ChatNode into a MemoryBoard ``source_kind``.
 
-    The tiered-rule is the same one ``_build_chat_context`` uses for
-    chain-boundary detection: ``compact_snapshot`` beats
-    ``merge_snapshot`` because a ChatNode can only carry one of the
-    two at once (enforced on :class:`ChatFlowNode`). Plain turn nodes
-    fall through to ``"chat_turn"``.
+    Same tiered rule as ``_build_chat_context``: a populated
+    ``compact_snapshot`` outranks the structural merge test
+    (``len(parent_ids) >= 2``) because the two are mutually exclusive
+    in practice — a compact ChatNode always has exactly one parent,
+    a merge ChatNode always has two. Plain turn nodes fall through to
+    ``"chat_turn"``.
     """
     if node.compact_snapshot is not None:
         return "chat_compact"
-    if node.merge_snapshot is not None:
+    if len(node.parent_ids) >= 2:
         return "chat_merge"
     return "chat_turn"
 
@@ -345,8 +345,7 @@ def _chat_board_description(node: ChatFlowNode) -> str:
             f"(+{preserved} preserved verbatim): {summary_snippet}"
         ).rstrip(": ")
     if kind == "chat_merge":
-        snap = node.merge_snapshot
-        sources = snap.source_ids if snap is not None else node.parent_ids
+        sources = node.parent_ids
         if len(sources) >= 2:
             src_label = f"{sources[0][:8]}+{sources[1][:8]}"
         elif sources:
@@ -1040,10 +1039,10 @@ class ChatFlowEngine:
         Mirrors :meth:`compact_chain` in shape: we build a new ChatNode
         with ``parent_ids=[left_id, right_id]``, run the ``merge``
         builtin template as its inner workflow, and stamp the worker's
-        output onto ``agent_response`` + :class:`MergeSnapshot`. The
-        downstream context walk stops at this node just like it stops
-        at a compact node — both branches' history is encoded in the
-        merged reply.
+        output onto ``agent_response``. Multi-parent is itself the
+        structural marker — downstream context walks stop at this node
+        just like they stop at a compact node (both branches' history
+        is encoded in the merged reply).
 
         Context-overflow handling: if either branch's wire chain would
         exceed the per-branch budget (half of the merge model's context
@@ -1051,8 +1050,7 @@ class ChatFlowEngine:
         :data:`_MERGE_PROMPT_OVERHEAD_TOKENS`), that branch is first
         summarized via :meth:`_precompact_branch_for_merge` and the
         summary string is fed into the merge prompt instead of the raw
-        chain. Recorded on :class:`MergeSnapshot` via
-        ``left_precompacted`` / ``right_precompacted``.
+        chain.
 
         MVP: exactly two source nodes; left/right ordering is the order
         the user picked them in the canvas.
@@ -1108,9 +1106,6 @@ class ChatFlowEngine:
         right_tokens = _estimate_tokens_from_wire(right_ctx)
         original_tokens = left_tokens + right_tokens
 
-        left_precompacted = False
-        right_precompacted = False
-
         if left_tokens > per_branch_budget:
             log.info(
                 "merge pre-compact: left branch %d tokens > %d budget",
@@ -1126,7 +1121,6 @@ class ChatFlowEngine:
                 model=merge_model_ref,
                 disabled_tool_names=effective_disabled,
             )
-            left_precompacted = True
         else:
             left_summary = _serialize_wire_chain(left_ctx)
 
@@ -1145,7 +1139,6 @@ class ChatFlowEngine:
                 model=merge_model_ref,
                 disabled_tool_names=effective_disabled,
             )
-            right_precompacted = True
         else:
             right_summary = _serialize_wire_chain(right_ctx)
 
@@ -1182,14 +1175,6 @@ class ChatFlowEngine:
                 workflow=templated,
                 status=NodeStatus.PLANNED,
                 entry_prompt_tokens=original_tokens,
-                merge_snapshot=MergeSnapshot(
-                    source_ids=[left_id, right_id],
-                    merge_instruction=merge_instruction,
-                    original_tokens=original_tokens,
-                    merged_tokens=0,
-                    left_precompacted=left_precompacted,
-                    right_precompacted=right_precompacted,
-                ),
             )
             chatflow.add_node(merge_node)
             merge_id = merge_node.id
@@ -1275,10 +1260,6 @@ class ChatFlowEngine:
                 merge_node.finished_at = utcnow()
             else:
                 merged_tokens = _count_text_tokens(merged_reply)
-                if merge_node.merge_snapshot is not None:
-                    merge_node.merge_snapshot = merge_node.merge_snapshot.model_copy(
-                        update={"merged_tokens": merged_tokens}
-                    )
                 merge_node.agent_response = EditableText.by_agent(merged_reply)
                 merge_node.output_response_tokens = merged_tokens
                 merge_node.status = NodeStatus.SUCCEEDED
@@ -4534,7 +4515,11 @@ def _build_chat_context(
     while current is not None:
         chain.append(current)
         node = chatflow.nodes[current]
-        if node.merge_snapshot is not None:
+        # Merge ChatNodes are a hard stop: multi-parent is the structural
+        # marker for a manual branch-merge synthesized reply. Walking
+        # past it would re-pull both source branches' history, defeating
+        # the merge's whole point.
+        if len(node.parent_ids) >= 2:
             break
         current = node.parent_ids[0] if node.parent_ids else None
     chain.reverse()
@@ -4622,7 +4607,7 @@ def _build_tagged_chat_context_for_compact(
         chain.append(current)
         node = chatflow.nodes[current]
         # Merge ChatNodes are a hard stop — same rule as _build_chat_context.
-        if node.merge_snapshot is not None:
+        if len(node.parent_ids) >= 2:
             break
         current = node.parent_ids[0] if node.parent_ids else None
     chain.reverse()

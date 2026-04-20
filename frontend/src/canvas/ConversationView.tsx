@@ -172,7 +172,7 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
     let cutoffIdx = -1;
     for (let i = path.length - 1; i >= 0; i--) {
       const n = chatflow.nodes[path[i]];
-      if (n?.compact_snapshot != null || n?.merge_snapshot != null) {
+      if (n?.compact_snapshot != null || (n?.parent_ids?.length ?? 0) >= 2) {
         cutoffIdx = i;
         break;
       }
@@ -752,7 +752,7 @@ function ChatMessageBubble({
   const isFailed = node.status === "failed";
   const thinking = collectThinking(node);
   const compact = node.compact_snapshot;
-  const merge = node.merge_snapshot;
+  const isMerge = (node.parent_ids?.length ?? 0) >= 2;
 
   if (compact) {
     return (
@@ -764,7 +764,7 @@ function ChatMessageBubble({
     );
   }
 
-  if (merge) {
+  if (isMerge) {
     return (
       <MergeMessageBubble
         node={node}
@@ -916,15 +916,10 @@ function MergeMessageBubble({
 }) {
   const { t } = useTranslation();
   const showNodeId = usePreferencesStore((s) => s.showNodeId);
-  const snap = node.merge_snapshot!;
+  const sourceIds = node.parent_ids ?? [];
   const merged = node.agent_response.text;
   const isRunning = node.status === "running";
-  const instr = snap.merge_instruction;
-  const stats = t("conversation.merge_stats", {
-    original: snap.original_tokens,
-    merged: snap.merged_tokens,
-    sources: snap.source_ids.length,
-  });
+  const instr = node.user_message?.text ?? null;
 
   return (
     <div
@@ -946,31 +941,17 @@ function MergeMessageBubble({
             <span aria-hidden>⨝</span>
             {t("conversation.merge_summary_label")}
           </span>
-          <span className="font-normal text-[10px] text-violet-600/80">{stats}</span>
         </div>
         <div className="mb-1 text-[11px] text-violet-700/80 break-words">
           <span className="font-medium">
             {t("conversation.merge_sources_label")}:
           </span>{" "}
-          {snap.source_ids.map((id, i) => {
-            const precompacted =
-              (i === 0 && snap.left_precompacted) ||
-              (i === 1 && snap.right_precompacted);
-            return (
-              <span key={id}>
-                {i > 0 && " + "}
-                {id.slice(0, 8)}
-                {precompacted && (
-                  <span
-                    title={t("conversation.merge_precompact_hint")}
-                    className="ml-1 inline-flex items-center rounded bg-violet-200/70 px-1 text-[9px] font-semibold text-violet-800"
-                  >
-                    {t("conversation.merge_precompact_badge")}
-                  </span>
-                )}
-              </span>
-            );
-          })}
+          {sourceIds.map((id, i) => (
+            <span key={id}>
+              {i > 0 && " + "}
+              {id.slice(0, 8)}
+            </span>
+          ))}
         </div>
         {instr && (
           <div className="mb-1 text-[11px] text-violet-700/80">

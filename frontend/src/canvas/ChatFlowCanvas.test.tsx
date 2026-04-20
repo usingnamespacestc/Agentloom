@@ -186,7 +186,6 @@ describe("ChatFlowNodeCard — ChatBoard badge (PR 3)", () => {
       workflow: { id: "wf", root_ids: [], nodes: {} },
       pending_queue: [],
       compact_snapshot: null,
-      merge_snapshot: null,
       entry_prompt_tokens: null,
       output_response_tokens: null,
     } as unknown as ChatFlowNode;

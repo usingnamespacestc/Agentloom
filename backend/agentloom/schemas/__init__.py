@@ -25,7 +25,6 @@ from agentloom.schemas.chatflow import (
 from agentloom.schemas.provider import ModelInfo, ProviderConfig, ProviderKind
 from agentloom.schemas.workflow import (
     CompactSnapshot,
-    MergeSnapshot,
     WireMessage,
     WorkFlow,
     WorkFlowNode,
@@ -40,7 +39,6 @@ __all__ = [
     "ChatFlow",
     "ChatFlowNode",
     "CompactSnapshot",
-    "MergeSnapshot",
     "DEFAULT_GREETING",
     "EditProvenance",
     "EditableText",

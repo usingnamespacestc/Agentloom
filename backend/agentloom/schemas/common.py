@@ -68,8 +68,8 @@ class StepKind(str, Enum):
     #: (Tier 2). See compact design in devlog 2026-04-18 夜.
     COMPRESS = "compress"
     #: Branch merge — a single LLM call that synthesizes two ChatNode
-    #: branches into one follow-up reply, recorded as a
-    #: :class:`MergeSnapshot` on the resulting multi-parent ChatNode.
+    #: branches into one follow-up reply, recorded on a multi-parent
+    #: ChatNode (detected structurally via ``len(parent_ids) >= 2``).
     #: Downstream context walks stop at the merge node exactly like they
     #: stop at a compact node.
     MERGE = "merge"
