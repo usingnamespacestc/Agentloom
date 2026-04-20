@@ -158,8 +158,7 @@ def _substitute_string(
 
     # ``{% if var %}...{% endif %}`` — drops the body when ``params[var]``
     # is missing, None, an empty string, or otherwise falsy. Used by the
-    # judge templates to elide trio lines judge_pre didn't extract, and
-    # to elide optional sections like judge_post's ``layer_notes``. No
+    # judge templates to elide trio lines judge_pre didn't extract. No
     # else / elif — keep the engine tiny.
     def expand_if(match: re.Match[str]) -> str:
         name = match.group(1)

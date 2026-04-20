@@ -38,11 +38,7 @@ from agentloom.engine.judge_parser import (
     parse_judge_verdict,
 )
 from agentloom.engine.model_resolution import effective_model_for
-from agentloom.engine.recursive_planner_parser import (
-    PlannerParseError,
-    RecursivePlannerOutput,
-    parse_recursive_planner_output,
-)
+from agentloom.engine.recursive_planner_parser import RecursivePlannerOutput
 from agentloom.providers.types import (
     AssistantMessage,
     ChatResponse,
@@ -61,7 +57,6 @@ from agentloom.schemas.common import (
     NodeScope,
     NodeStatus,
     ProviderModelRef,
-    SharedNote,
     StepKind,
     TokenUsage,
     WorkNodeRole,
@@ -570,6 +565,46 @@ def _render_node_briefs_for_flow(workflow: WorkFlow) -> str:
     return "\n".join(lines)
 
 
+#: Sentinel embedded in the runtime-injected layer_notes system message
+#: so a judge clone (spawned by ``_after_judge_failed`` after a parse
+#: crash) can detect that its copied input_messages already carry the
+#: block and skip re-appending it. The marker isn't user-facing — it
+#: sits on its own line at the top of the appended content.
+_LAYER_NOTES_MARKER = "[__layer_notes__]"
+
+
+def _inject_layer_notes_for_post_judge(
+    workflow: WorkFlow, node: WorkFlowNode
+) -> None:
+    """Append a ``Layer notes`` system message to a POST judge's input.
+
+    Replaces the ADR-era spawn-time ``shared_notes`` rendering (PR
+    4.2.c). ``_spawn_judge_post`` extends ``parent_ids`` with every
+    scope=NODE brief in the WorkFlow, so every brief is SUCCEEDED when
+    this runs — the trail judge_post sees is the real post-hoc one.
+    Idempotent via ``_LAYER_NOTES_MARKER``: a crash-clone's copied
+    input_messages already carries the block and we must not duplicate.
+    """
+    if not node.input_messages:
+        return
+    for msg in node.input_messages:
+        if msg.role == "system" and _LAYER_NOTES_MARKER in msg.content:
+            return
+    rendered = _render_node_briefs_for_flow(workflow)
+    if not rendered:
+        return
+    body = (
+        f"{_LAYER_NOTES_MARKER}\n"
+        "Layer notes (sibling WorkNode briefs; cite ids in redo_targets)\n"
+        "---------------------------------------------------------------\n"
+        f"{rendered}"
+    )
+    node.input_messages = [
+        *node.input_messages,
+        WireMessage(role="system", content=body),
+    ]
+
+
 class WorkflowEngine:
     def __init__(
         self,
@@ -929,7 +964,6 @@ class WorkflowEngine:
             if node.status == NodeStatus.RUNNING:
                 node.status = NodeStatus.SUCCEEDED
                 node.finished_at = utcnow()
-                _append_shared_note(workflow, node)
                 await self._bus.publish(
                     WorkflowEvent(
                         workflow_id=workflow.id,
@@ -1814,6 +1848,14 @@ class WorkflowEngine:
         if node.judge_variant is None:
             raise ValueError(f"judge_call node {node.id} missing judge_variant")
 
+        # PR 4.2.c: judge_post waits on every sibling NODE-brief via its
+        # spawn-time ``parent_ids``, so by the time we reach here those
+        # briefs have SUCCEEDED. Render them into a trailing system
+        # message so the exit gate sees the actual sibling trail (the
+        # old spawn-time ``shared_notes`` blackboard is gone).
+        if node.judge_variant == JudgeVariant.POST:
+            _inject_layer_notes_for_post_judge(workflow, node)
+
         tool_def = judge_verdict_tool_def(node.judge_variant)
         # Defense-in-depth for judge structured output (ADR 2026-04-18):
         # - ``forced_tool_name`` pins the model to the judge_verdict tool
@@ -1984,176 +2026,6 @@ class WorkflowEngine:
             )
 
 
-#: Cap on a single SharedNote's summary length. Picked at "fits in a
-#: single line of typical model context" — long enough to identify the
-#: output, short enough that ~50 notes still cost a manageable amount
-#: of tokens in a layer-wide injection.
-_SHARED_NOTE_SUMMARY_MAX = 200
-
-
-def _summarize_for_shared_note(node: WorkFlowNode) -> str | None:
-    """Pull a one-line summary out of a freshly-succeeded WorkNode.
-
-    Read by judge_post (only consumer today) to evaluate sibling state
-    and target redo on specific node ids. Summaries are role-aware so
-    each entry actually carries information judge_post can act on:
-
-    - judge_call: verdict label + the human ask (user_message) /
-      blockers / critique count / redo target count, whichever apply.
-      Lets judge_post see *why* a prior judge said what it did.
-    - llm_call planner: parsed plan shape (``atomic <step_kind>`` or
-      ``decompose N subtasks``), not the raw JSON. The previous
-      "first line of output" gave back ``{`` because JSON starts with
-      a brace.
-    - llm_call worker / aggregator / other: first substantive line of
-      the markdown output (skips blank lines and lone braces).
-    - tool_call: ``tool_name → first-line-of-result``.
-    - sub_agent_delegation: best-effort one-liner from the sub-WorkFlow's
-      effective output (judge_post merged_response if present, else
-      latest worker draft).
-
-    Returns ``None`` when there's nothing meaningful to record yet —
-    callers skip the append in that case.
-    """
-    if node.step_kind == StepKind.JUDGE_CALL and node.judge_verdict is not None:
-        return _summarize_judge(node)
-    if node.step_kind == StepKind.DRAFT and node.output_message is not None:
-        return _summarize_llm(node)
-    if node.step_kind == StepKind.TOOL_CALL and node.tool_result is not None:
-        return _truncate_one_line(
-            f"{node.tool_name or 'tool'} → {node.tool_result.content or '(empty)'}"
-        )
-    if node.step_kind == StepKind.DELEGATE and node.sub_workflow is not None:
-        body = _sub_workflow_summary(node)
-        return _truncate_one_line(body) if body else None
-    return None
-
-
-def _summarize_judge(node: WorkFlowNode) -> str:
-    v = node.judge_verdict
-    assert v is not None  # caller guards
-    if v.during_verdict:
-        verdict_label = v.during_verdict
-    elif v.post_verdict:
-        verdict_label = v.post_verdict
-    elif v.feasibility:
-        verdict_label = v.feasibility
-    else:
-        verdict_label = "verdict"
-    variant_label = node.judge_variant.value if node.judge_variant else "judge"
-    extras: list[str] = []
-    if v.user_message:
-        extras.append(_truncate_one_line(v.user_message))
-    if v.blockers:
-        extras.append("blockers: " + "; ".join(v.blockers))
-    if v.missing_inputs:
-        extras.append("missing: " + ", ".join(v.missing_inputs))
-    if v.critiques:
-        extras.append(f"{len(v.critiques)} critiques")
-    if v.redo_targets:
-        extras.append(f"redo {len(v.redo_targets)}")
-    suffix = " — " + " | ".join(extras) if extras else ""
-    return _truncate_one_line(f"{variant_label}: {verdict_label}{suffix}")
-
-
-def _summarize_llm(node: WorkFlowNode) -> str:
-    assert node.output_message is not None  # caller guards
-    content = node.output_message.content
-    if node.role == WorkNodeRole.PLAN:
-        try:
-            plan = parse_recursive_planner_output(content)
-        except PlannerParseError:
-            return _truncate_one_line(f"plan: parse-error — {content}")
-        if plan.mode == "atomic" and plan.atomic is not None:
-            return _truncate_one_line(
-                f"plan: atomic {plan.atomic.step_kind.value} — {plan.atomic.description}"
-            )
-        if plan.mode == "decompose" and plan.subtasks:
-            heads = ", ".join(st.description for st in plan.subtasks[:3])
-            more = "" if len(plan.subtasks) <= 3 else f" (+{len(plan.subtasks) - 3} more)"
-            return _truncate_one_line(
-                f"plan: decompose {len(plan.subtasks)} — {heads}{more}"
-            )
-        return _truncate_one_line(f"plan: infeasible — {plan.reason or ''}")
-    return _first_substantive_line(content)
-
-
-def _first_substantive_line(text: str) -> str:
-    """First non-empty, non-syntactic line — skips blank lines and lone
-    braces / brackets so JSON-shaped outputs don't degenerate to ``{``.
-    """
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line in {"{", "}", "[", "]"}:
-            continue
-        if len(line) <= _SHARED_NOTE_SUMMARY_MAX:
-            return line
-        return line[: _SHARED_NOTE_SUMMARY_MAX - 1] + "…"
-    return ""
-
-
-def _truncate_one_line(text: str) -> str:
-    first_line = text.strip().splitlines()[0] if text.strip() else ""
-    if len(first_line) <= _SHARED_NOTE_SUMMARY_MAX:
-        return first_line
-    return first_line[: _SHARED_NOTE_SUMMARY_MAX - 1] + "…"
-
-
-def _sub_workflow_summary(node: WorkFlowNode) -> str:
-    """Best-effort one-liner for a delegation node.
-
-    Walks the sub-WorkFlow looking for the most informative output:
-    judge_post's ``merged_response`` (decompose aggregation) →
-    judge_post's ``user_message`` (halt path) → most recent worker
-    draft → empty. Kept inline (rather than calling chatflow_engine's
-    full ``_classify_sub_outcome``) to avoid an import cycle and
-    because the blackboard only needs a single line, not a structured
-    classification.
-    """
-    sub = node.sub_workflow
-    if sub is None:
-        return ""
-    for n in reversed(list(sub.nodes.values())):
-        if n.step_kind != StepKind.JUDGE_CALL or n.judge_variant != JudgeVariant.POST:
-            continue
-        v = n.judge_verdict
-        if v is None:
-            continue
-        if v.merged_response:
-            return v.merged_response
-        if v.user_message:
-            return v.user_message
-        break
-    for n in reversed(list(sub.nodes.values())):
-        if n.step_kind == StepKind.DRAFT and n.output_message is not None:
-            return n.output_message.content
-    return ""
-
-
-def _append_shared_note(workflow: WorkFlow, node: WorkFlowNode) -> None:
-    """Append a one-line note for a freshly-succeeded WorkNode.
-
-    Engine-side hook — runs unconditionally on success; templates
-    decide whether to render the note list. The note carries
-    ``author_node_id`` so any consumer can look the full output back
-    up via ``workflow.nodes[id]``.
-    """
-    summary = _summarize_for_shared_note(node)
-    if summary is None or summary == "":
-        return
-    kind = (
-        "judge_verdict" if node.step_kind == StepKind.JUDGE_CALL else "node_succeeded"
-    )
-    workflow.shared_notes.append(
-        SharedNote(
-            author_node_id=node.id,
-            role=node.role,
-            kind=kind,
-            summary=summary,
-        )
-    )
 
 
 def _assert_tool_loop_budget(

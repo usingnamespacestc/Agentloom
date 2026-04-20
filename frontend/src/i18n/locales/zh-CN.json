@@ -124,9 +124,7 @@
     "blockers": "阻塞项",
     "missing_inputs": "缺失输入",
     "critiques": "评审意见",
-    "issues": "问题",
-    "blackboard": "黑板",
-    "blackboard_empty": "（暂无记录）"
+    "issues": "问题"
   },
   "canvas": {
     "insert_note": "插入文本框",

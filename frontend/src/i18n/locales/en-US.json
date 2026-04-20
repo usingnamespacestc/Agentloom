@@ -124,9 +124,7 @@
     "blockers": "Blockers",
     "missing_inputs": "Missing inputs",
     "critiques": "Critiques",
-    "issues": "Issues",
-    "blackboard": "Blackboard",
-    "blackboard_empty": "(no entries yet)"
+    "issues": "Issues"
   },
   "canvas": {
     "insert_note": "Insert note",

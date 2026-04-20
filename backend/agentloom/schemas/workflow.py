@@ -21,7 +21,6 @@ from agentloom.schemas.common import (
     NodeId,
     NodeScope,
     ProviderModelRef,
-    SharedNote,
     StepKind,
     StickyNote,
     TokenUsage,
@@ -360,13 +359,6 @@ class WorkFlow(BaseModel):
     #: lives at the ChatFlow layer, never inside a WorkFlow (§3.5).
     pending_user_prompt: str | None = None
 
-    #: Layer-local blackboard. Engine appends a one-line summary when a
-    #: WorkNode succeeds so siblings / aggregating judges get a layer
-    #: picture without pulling every full output into context. Full
-    #: content stays on the WorkNode itself; consumers that need it
-    #: pull explicitly via prompt params. NOT shared across nested
-    #: WorkFlows — each layer has its own (§3.4.6).
-    shared_notes: list[SharedNote] = Field(default_factory=list)
     sticky_notes: dict[str, StickyNote] = Field(default_factory=dict)
 
     @property

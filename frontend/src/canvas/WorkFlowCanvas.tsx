@@ -33,7 +33,6 @@ import { useTranslation } from "react-i18next";
 import { layoutDag } from "./layout";
 import { CanvasContextMenu, StickyNoteContextMenu } from "./CanvasContextMenu";
 import { contextWindowMap } from "./ChatFlowCanvas";
-import { WorkFlowBlackboard } from "./WorkFlowBlackboard";
 import { StickyNoteNode, type StickyNoteData } from "./nodes/StickyNoteNode";
 import { WorkFlowNodeCard, type WorkFlowNodeData } from "./nodes/WorkFlowNodeCard";
 import { api } from "@/lib/api";
@@ -278,20 +277,6 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
     }
   };
 
-  const handleSelectNote = useCallback(
-    (nodeId: string) => {
-      selectWorkflowNode(nodeId);
-      const rfNode = reactFlow.getNode(nodeId);
-      if (!rfNode) return;
-      const width = rfNode.measured?.width ?? 200;
-      const height = rfNode.measured?.height ?? 100;
-      const cx = rfNode.position.x + width / 2;
-      const cy = rfNode.position.y + height / 2;
-      reactFlow.setCenter(cx, cy, { zoom: reactFlow.getZoom(), duration: 300 });
-    },
-    [reactFlow, selectWorkflowNode],
-  );
-
   if (!workflow) {
     return (
       <div
@@ -357,11 +342,6 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
           onClose={() => setStickyCtxMenu(null)}
         />
       )}
-      <WorkFlowBlackboard
-        notes={workflow.shared_notes}
-        selectedNodeId={workflowSelectedNodeId}
-        onSelectNote={handleSelectNote}
-      />
     </div>
   );
 }

@@ -49,18 +49,6 @@ params_schema:
       MUST appear in this list — ids outside it (judges, planners,
       tool_calls) will be silently dropped by the engine and the
       retry will halt.
-  layer_notes:
-    type: string
-    required: false
-    description: >
-      Layer-local blackboard. One block per sibling WorkNode that
-      finished in this WorkFlow (planner / worker / inner judges /
-      sub_agent_delegations / tool_calls), each with author node id,
-      role, and a one-line summary. Only judge_post receives this —
-      it gives the exit gate a sibling trail to evaluate the run as
-      a whole and to point ``redo_targets`` at specific node ids.
-      Empty when there are no notes (e.g. judge_pre halt before any
-      worker ran).
 plan:
   description:
     text: "judge_post universal exit gate"
@@ -302,10 +290,4 @@ plan:
             Upstream summary
             ----------------
             {{ upstream_summary }}
-            {% if layer_notes %}
-
-            Layer notes (sibling WorkNode trail; cite ids in redo_targets)
-            --------------------------------------------------------------
-            {{ layer_notes }}
-            {% endif %}
   root_ids: ["judge_post_root"]

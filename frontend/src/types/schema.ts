@@ -96,14 +96,6 @@ export interface JudgeVerdict {
   redo_targets?: RedoTarget[];
 }
 
-export interface SharedNote {
-  author_node_id: NodeId;
-  role: WorkNodeRole | null;
-  kind: "node_succeeded" | "judge_verdict";
-  summary: string;
-  at: string;
-}
-
 export type EditProvenance = "pure_user" | "pure_agent" | "mixed" | "unset";
 
 export interface EditableText {
@@ -240,9 +232,6 @@ export interface WorkFlow {
   /** Hard cap on plan↔plan_judge / worker↔worker_judge debate
    * rounds before forcing convergence (§3.4.5). */
   debate_round_budget?: number;
-  /** Layer-local blackboard. Engine appends a one-line summary on
-   * every WorkNode success. Not shared across nested WorkFlows. */
-  shared_notes?: SharedNote[];
   sticky_notes?: Record<string, StickyNote>;
 }
 

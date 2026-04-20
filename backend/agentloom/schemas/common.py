@@ -392,27 +392,6 @@ class JudgeVerdict(BaseModel):
     redo_targets: list[RedoTarget] = Field(default_factory=list)
 
 
-class SharedNote(BaseModel):
-    """One entry in a WorkFlow's blackboard.
-
-    Engine appends a note when a WorkNode succeeds: a one-line summary
-    so downstream siblings / aggregators get a layer-wide picture
-    without pulling every full output into context. Full content lives
-    on the WorkNode itself (``workflow.nodes[author_node_id]``); callers
-    that need it pull it explicitly via prompt params.
-
-    Notes do NOT cross layer boundaries — each sub-WorkFlow has its own
-    blackboard. Information that needs to flow between layers travels
-    through ``sub_agent_delegation`` inputs / outputs explicitly.
-    """
-
-    author_node_id: NodeId
-    role: WorkNodeRole | None = None
-    kind: Literal["node_succeeded", "judge_verdict"] = "node_succeeded"
-    summary: str
-    at: datetime = Field(default_factory=utcnow)
-
-
 class StickyNote(BaseModel):
     """User-created canvas sticky note, persisted with the ChatFlow."""
 

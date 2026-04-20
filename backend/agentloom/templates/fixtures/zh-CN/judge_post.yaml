@@ -46,16 +46,6 @@ params_schema:
       ``redo_targets[].node_id`` 必须出现在这份名单里——不在名单中
       的 id（judges、planners、tool_calls）会被引擎静默丢弃，并导
       致本次重试直接 halt。
-  layer_notes:
-    type: string
-    required: false
-    description: >
-      当前层的黑板。本 WorkFlow 内每个已完成的兄弟 WorkNode
-      （planner / worker / 内层 judge / sub_agent_delegations /
-      tool_calls）各占一段，附作者节点 id、role、以及一行摘要。
-      仅 judge_post 会拿到这份信息——它让出口闸能通观整个 run，
-      并把 ``redo_targets`` 精准指向具体 node id。当没有 notes 时
-      （例如 worker 还没跑就被 judge_pre halt 掉）为空。
 plan:
   description:
     text: "judge_post 通用出口闸"
@@ -264,10 +254,4 @@ plan:
             上游摘要
             --------
             {{ upstream_summary }}
-            {% if layer_notes %}
-
-            当前层备注（兄弟 WorkNode 的轨迹；在 redo_targets 中引用 id）
-            ------------------------------------------------------------
-            {{ layer_notes }}
-            {% endif %}
   root_ids: ["judge_post_root"]

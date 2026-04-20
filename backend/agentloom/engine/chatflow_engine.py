@@ -81,6 +81,7 @@ from agentloom.schemas.common import (
     EditableText,
     ExecutionMode,
     NodeId,
+    NodeScope,
     NodeStatus,
     ProviderModelRef,
     StepKind,
@@ -1890,17 +1891,20 @@ class ChatFlowEngine:
                 # the retry halts. Giving the judge the list up-front
                 # stops it from naming judge / planner / tool_call ids.
                 "redo_eligible_catalog": _format_redo_eligible(inner),
-                # Layer-local blackboard. Only judge_post reads it —
-                # planner / worker / planner_judge / worker_judge get
-                # their context via input_messages, this gives the exit
-                # gate a sibling-by-sibling trail with node-id anchors
-                # for redo_targets.
-                "layer_notes": _format_layer_notes(inner.shared_notes),
             },
             includes=self._fixture_includes,
         )
         node = _single_node(templated)
-        node.parent_ids = [parent_node.id]
+        # PR 4.2.c: wait on every sibling NODE-brief so the exit gate
+        # sees the full post-hoc trail. ``_run_judge_call`` injects a
+        # ``Layer notes`` system message from those briefs at run time;
+        # the old spawn-time ``shared_notes`` rendering is gone.
+        sibling_briefs = [
+            n.id
+            for n in inner.nodes.values()
+            if n.step_kind == StepKind.BRIEF and n.scope == NodeScope.NODE
+        ]
+        node.parent_ids = [parent_node.id, *sibling_briefs]
         node.judge_target_id = parent_node.id
         node.input_messages = [*(node.input_messages or []), *context_wire]
         node.model_override = inner.judge_model_override
@@ -4361,27 +4365,6 @@ def _atomic_brief_for_worker(
     except PlannerParseError:
         return None
     return plan.atomic if plan.mode == "atomic" else None
-
-
-def _format_layer_notes(notes: list) -> str:
-    """Render the WorkFlow's blackboard for the judge_post template.
-
-    Empty list → empty string (template uses Jinja's truthy check to
-    skip the section). Otherwise one line per note, prefixed with the
-    ``author_node_id`` so the judge can target redo_targets directly:
-
-        [019d8eaa role=plan kind=node_succeeded]
-          plan: decompose 4 — bio_a, bio_b, bio_c (+1 more)
-    """
-    if not notes:
-        return ""
-    lines: list[str] = []
-    for n in notes:
-        role_label = n.role.value if n.role else "—"
-        lines.append(
-            f"[{n.author_node_id} role={role_label} kind={n.kind}]\n  {n.summary}"
-        )
-    return "\n".join(lines)
 
 
 def _format_redo_eligible(workflow: WorkFlow) -> str:
