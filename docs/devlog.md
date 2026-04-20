@@ -1470,4 +1470,64 @@ while current is not None:
 - **PR 3**：ChatBoard 级联——ChatNode 向上游走时带上祖先 brief 的摘要视图，让对话压缩不必每次都走 compact。
 - Forget counter：当前 `board_items.forget_counter` 留了字段但没人写；PR 2 读路径起来之后可以接「最近被读过」计数。
 
+---
+
+## 第 N+1 轮 — MemoryBoard 读路径 + 检索 DDL + 简介气泡（PR 2/3）— 2026-04-20
+
+承接 PR 1。这一轮把「读」和「看」两条路径补齐：一个给 agent 用的只读 skill、一份 Postgres 检索索引、以及画布上用户侧的 brief 可视化。
+
+### P0 — `memoryboard_lookup` skill
+
+- `backend/agentloom/tools/memoryboard_lookup.py`：新 `MemoryBoardLookupTool`，入参 `chatflow_id` / `workflow_id` / `scope` / `source_node_id` / `query` / `limit`，返回 `{"items": [...], "truncated": bool}`。自己 `get_session_maker()` 开会话，`limit + 1` 预取来判断截断。
+- 与既有的 `get_node_context` **共存**（不删）：前者按 id 拉完整对话上下文，后者按过滤条件拉 brief 摘要。
+- `backend/agentloom/tools/registry.py`：`default_registry()` 加注册，总数 7 → 8。
+
+### P1 — Postgres 检索 DDL（Alembic 0013）
+
+- `backend/alembic/versions/0013_board_items_retrieval.py`：Postgres-only 迁移，SQLite 直接 return。
+- `board_items.description_tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple', description)) STORED` + `ix_board_items_description_tsv` GIN。选 `'simple'` 而非语言分词器——中文没有空白分词，`'simple'` 最兼容。
+- `pg_trgm` 扩展 + `ix_board_items_description_trgm`（`gin_trgm_ops`）给模糊匹配。
+- `pgvector` 扩展 + `description_embedding vector(1536)` + `ivfflat` 索引（`lists=100`）给 PR 4 的 embedding 召回预留。
+- **两个扩展都是 opt-in**：先查 `pg_available_extensions`，没装就跳过。踩的坑：原本用 `try/except` 包 `CREATE EXTENSION vector`，但 Postgres 的 DDL 是事务性的——`ERROR` 之后整个事务进 aborted 状态，后续 `UPDATE alembic_version` 也失败。改成 pre-check 才干净。
+
+### P2 — 前端 brief 可视化
+
+- `GET /api/chatflows/{id}/board_items`：返回 `{"items": [...]}` 展平列表（`backend/agentloom/api/chatflows.py`）。
+- `types/schema.ts`：新增 `BoardItem` interface。
+- `lib/api.ts` + `store/chatflowStore.ts`：`boardItems: Record<NodeId, BoardItem>`（按 `source_node_id` 索引），`refreshBoardItems` 在 `loadChatFlow` 和 SSE reconcile (`_doRefreshOnce`) 里调；fail-open，任何异常只打 log 不中断。
+- `canvas/nodes/WorkFlowNodeCard.tsx`：新 `NodeBriefBubble`——在 WorkNode 上方 8px 绝对定位的 chip，展示描述前 80 字符，点击展开全文。`scope === "node"` 才渲染；**递归守卫**：brief WorkNode 自己不长气泡（step_kind === "brief" 跳过）。`data-fallback` 透传让 style 可以区分 code-template fallback vs LLM-generated。
+- `canvas/WorkFlowCanvas.tsx`：新 `FlowBriefBanner`——画布顶部 `scope === "flow"` banner，key 是 `workflow.id`。
+
+### 测试
+
+后端：`tests/backend/integration/test_memoryboard_lookup.py` 9 条：
+
+1. `test_lookup_by_source_node_id` — 直接按 id 定位。
+2. `test_lookup_by_scope` — `scope=node` / `scope=flow` 过滤。
+3. `test_lookup_query_substring` — `query` 做 description ilike 匹配。
+4. `test_lookup_returns_empty_list` — 无命中时 `items=[]` 不抛错。
+5. `test_lookup_cross_workspace_isolation` — workspace A 看不到 workspace B 的 brief（ADR-015 validator）。
+6. `test_lookup_missing_chatflow_raises` — 未知 chatflow_id 触发 ToolError。
+7. `test_lookup_invalid_scope_raises` — 非 `node`/`flow`/`chat` 的 scope 值拒掉。
+8. `test_lookup_limit_truncation` — `limit=N` 时 `truncated=true` 当 match > N。
+9. `test_lookup_via_registry_envelope` — `default_registry().execute("memoryboard_lookup", ...)` 走完 schema 校验 + result shape。
+
+单测侧：`tests/backend/unit/test_tools.py` 里 `test_default_registry_has_seven_tools` 改名 `..._eight_tools`，expected list 加 `"memoryboard_lookup"`。
+
+前端：`frontend/src/canvas/nodes/WorkFlowNodeCard.test.tsx` 加 4 条——bubble 正常渲染、无 BoardItem 时不渲染、brief 节点上不渲染（递归守卫）、`fallback` 透传为 `data-fallback`。
+
+全量跑（继续忽略 PR 1 里点名的 3 份 LCA-merge stash 损坏文件 `test_citation_fallback.py` / `test_merge_context.py` / `test_chatflow_merge.py`）：后端 **396 passed**（+9），前端 `npx vitest run`：**59 passed**（+4）。
+
+### 坑与决策
+
+- 集成测试最初撞 FK：`board_items.chatflow_id` → `chatflows.id`。写了 `_ensure_chatflow(session, chatflow_id, workspace_id)` helper 先插一条最小 ChatFlowRow，fixture 用 `patched_session_maker` 绑到测试 session。
+- `refreshBoardItems` 失败不抛：既有 chatflowStore 测试对 fetch mock 用通用 `{}`，如果 refresh 抛会连累不相关测试。写成 try/catch + `console.warn`。
+- `scope === "chat"` 的 ChatBoardItem 先不在画布上画——那是 PR 3 的 ChatNode 级继承故事；数据模型先收，UI 留给下一轮。
+
+### 未做 / 后续
+
+- **PR 3**：ChatBoard 级联——ChatNode 向上游走时沿祖先链继承 brief 摘要，用于对话压缩决策。
+- **PR 4（延后）**：blackboard/CompactSnapshot/MergeSnapshot 迁移、`capabilities` / `assigned_resources` 字段、`compact`→`compress`、`sub_agent_delegation`→`delegate`、`llm_call`→`draft`、`planner`→`plan`——这批是语义重命名/重构，与本轮读路径解耦。
+- 写 embedding 到 `description_embedding`：DDL 已建，但没有写入器；等 PR 4 接 embedding provider。
+
 

@@ -35,6 +35,7 @@ from agentloom import tenancy_runtime
 from agentloom.api import workflows as _workflows_api
 from agentloom.db.base import get_session, get_session_scope
 from agentloom.db.models.tenancy import DEFAULT_WORKSPACE_ID
+from agentloom.db.repositories.board_item import BoardItemRepository
 from agentloom.db.repositories.chatflow import (
     ChatFlowNotFoundError,
     ChatFlowRepository,
@@ -317,6 +318,37 @@ async def get_chatflow(
         await repo.patch_metadata(chatflow_id, draft_model=new_model)
         await session.commit()
     return chat.model_dump(mode="json")
+
+
+@router.get("/{chatflow_id}/board_items")
+async def list_chatflow_board_items(
+    chatflow_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Return every MemoryBoardItem row attached to this ChatFlow.
+
+    Flat list — the frontend filters by ``scope`` (``node`` / ``flow``
+    / ``chat``) and by ``source_node_id`` client-side. Shaped as
+    ``{"items": [...]}`` to leave room for pagination metadata later
+    without a breaking rev of the response envelope.
+    """
+    repo = BoardItemRepository(session, workspace_id=DEFAULT_WORKSPACE_ID)
+    rows = await repo.list_by_chatflow(chatflow_id)
+    items = [
+        {
+            "id": row.id,
+            "chatflow_id": row.chatflow_id,
+            "workflow_id": row.workflow_id,
+            "source_node_id": row.source_node_id,
+            "source_kind": row.source_kind,
+            "scope": row.scope,
+            "description": row.description,
+            "fallback": row.fallback,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+        for row in rows
+    ]
+    return {"items": items}
 
 
 @router.delete("/{chatflow_id}")

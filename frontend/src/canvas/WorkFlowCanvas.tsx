@@ -316,6 +316,7 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
 
   return (
     <div data-testid="workflow-canvas" className="relative h-full w-full" onClick={() => { setCtxMenu(null); setStickyCtxMenu(null); }}>
+      <FlowBriefBanner workflowId={workflow.id} />
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -361,6 +362,39 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
         selectedNodeId={workflowSelectedNodeId}
         onSelectNote={handleSelectNote}
       />
+    </div>
+  );
+}
+
+/**
+ * Top-of-frame banner showing the WorkFlow's flow-brief description
+ * once the engine has produced one (i.e. the enclosing WorkFlow has
+ * reached a terminal state — succeeded, halted, or cancelled). The
+ * banner is rendered absolutely-positioned so it doesn't push the
+ * React Flow viewport around.
+ *
+ * When no flow-brief exists for this WorkFlow yet (in-flight runs,
+ * older WorkFlows that predate the MemoryBoard), the banner stays
+ * hidden.
+ */
+function FlowBriefBanner({ workflowId }: { workflowId: string }) {
+  // scope=flow briefs have source_node_id == workflow_id by the
+  // BoardItem contract, so a direct lookup in the flat map works.
+  const boardItem = useChatFlowStore((s) => s.boardItems[workflowId]);
+  if (!boardItem || boardItem.scope !== "flow") return null;
+  return (
+    <div
+      data-testid="flow-brief-banner"
+      data-fallback={boardItem.fallback ? "true" : "false"}
+      className={[
+        "absolute left-3 right-3 top-3 z-20",
+        "rounded-md border border-sky-200 bg-white/95",
+        "px-3 py-1.5 text-[11px] text-gray-800 shadow-sm",
+        "pointer-events-auto",
+      ].join(" ")}
+      title={boardItem.description}
+    >
+      {boardItem.description}
     </div>
   );
 }

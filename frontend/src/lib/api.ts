@@ -7,7 +7,7 @@
  * HTTP failures apart from network failures.
  */
 
-import type { ChatFlow, ChatFlowSummary, ExecutionMode, Folder, PendingTurn, PendingTurnSource, ProviderModelRef, StickyNote } from "@/types/schema";
+import type { BoardItem, ChatFlow, ChatFlowSummary, ExecutionMode, Folder, PendingTurn, PendingTurnSource, ProviderModelRef, StickyNote } from "@/types/schema";
 
 export class ApiError extends Error {
   constructor(
@@ -76,6 +76,12 @@ export const api = {
     }),
 
   getChatFlow: (id: string) => request<ChatFlow>(`/api/chatflows/${id}`),
+
+  /** List every MemoryBoardItem attached to a ChatFlow. The frontend
+   * filters the flat list by ``scope`` / ``source_node_id`` client-side
+   * when rendering the node-brief bubble and flow-brief banner. */
+  listBoardItems: (id: string) =>
+    request<{ items: BoardItem[] }>(`/api/chatflows/${id}/board_items`),
 
   patchChatFlow: (
     id: string,

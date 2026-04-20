@@ -30,6 +30,7 @@ import { api, ApiError } from "@/lib/api";
 import { subscribeEvents, type SSEFactory, type SSESubscription } from "@/lib/sse";
 import type { ComposerModelMap } from "@/store/preferencesStore";
 import type {
+  BoardItem,
   ChatFlow,
   ChatFlowNode,
   ChatFlowSummary,
@@ -128,6 +129,14 @@ export interface ChatFlowStoreState {
    * should only display this when the node's status is ``running`` —
    * once it terminates, the refreshed full payload is authoritative. */
   streamingDeltas: Record<NodeId, string>;
+
+  /** MemoryBoardItem cache for the currently loaded ChatFlow, keyed by
+   * ``source_node_id`` so the canvas bubbles can look up a node-brief
+   * in O(1). Flow-briefs are keyed by their WorkFlow id (the source
+   * node id of a ``scope=flow`` BoardItem is the workflow id by
+   * design). Populated on ``loadChatFlow``; refreshed by
+   * ``refreshBoardItems``. */
+  boardItems: Record<NodeId, BoardItem>;
 
   /** Fetch the chatflow list and folders for the sidebar. */
   fetchChatFlowList: () => Promise<void>;
@@ -267,6 +276,10 @@ export interface ChatFlowStoreState {
   applyEvent: (event: WorkFlowEvent) => void;
   /** Override the SSE factory (for tests). */
   setSSEFactory: (factory: SSEFactory | null) => void;
+  /** Refetch the ``board_items`` list for the current ChatFlow and
+   * repopulate the ``boardItems`` cache. Called on ``loadChatFlow``
+   * and after any SSE event hinting a brief just finished. */
+  refreshBoardItems: () => Promise<void>;
   /** Close any live subscription and reset state. */
   reset: () => void;
 }
@@ -309,6 +322,7 @@ const INITIAL: Omit<
   | "commitMergeWith"
   | "applyEvent"
   | "setSSEFactory"
+  | "refreshBoardItems"
   | "reset"
 > = {
   chatflowList: [],
@@ -332,6 +346,7 @@ const INITIAL: Omit<
   sseSubscription: null,
   sseFactory: null,
   streamingDeltas: {},
+  boardItems: {},
 };
 
 function autoLeafForChatFlow(chat: ChatFlow | null): NodeId | null {
@@ -432,6 +447,10 @@ async function _doRefreshOnce(get: GetFn, set: SetFn): Promise<void> {
       const leaf = autoLeafForChatFlow(fresh);
       if (leaf) get().selectNode(leaf);
     }
+    // A refresh implies the workflow graph changed; a brief may have
+    // just landed. Piggyback a board_items fetch so the canvas bubbles
+    // update in the same reconcile pass.
+    void get().refreshBoardItems();
   } catch {
     // Refresh failed — stale state is acceptable, next SSE event will retry.
   }
@@ -625,9 +644,13 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
 
     try {
       const chat = await api.getChatFlow(id);
-      set({ chatflow: chat, loadState: "ready" });
+      set({ chatflow: chat, loadState: "ready", boardItems: {} });
       const leaf = autoLeafForChatFlow(chat);
       if (leaf) get().selectNode(leaf);
+      // Fetch the MemoryBoard cache in the background — canvas bubbles
+      // appear as soon as the response returns, but we don't block the
+      // main load on it.
+      void get().refreshBoardItems();
 
       const factory = get().sseFactory;
       if (factory) {
@@ -1115,6 +1138,31 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
 
   setSSEFactory(factory) {
     set({ sseFactory: factory });
+  },
+
+  async refreshBoardItems() {
+    const chat = get().chatflow;
+    if (!chat) return;
+    try {
+      const res = await api.listBoardItems(chat.id);
+      // ``scope=node``: source_node_id is the source WorkNode's id.
+      // ``scope=flow``: source_node_id is the enclosing WorkFlow's id.
+      // ``scope=chat``: source_node_id is the source ChatNode's id (PR 3).
+      // All three share the same id-space (UUIDv7), so a flat map
+      // keyed by source_node_id is unambiguous.
+      const next: Record<NodeId, BoardItem> = {};
+      for (const item of res.items) {
+        next[item.source_node_id] = item;
+      }
+      // Keep the store write scoped to the still-current ChatFlow: if
+      // the user switched away during the fetch, don't overwrite the
+      // cache for a different ChatFlow's bubbles.
+      if (get().chatflow?.id === chat.id) {
+        set({ boardItems: next });
+      }
+    } catch {
+      // Fail open: absent bubbles aren't worth surfacing a toast.
+    }
   },
 
   reset() {

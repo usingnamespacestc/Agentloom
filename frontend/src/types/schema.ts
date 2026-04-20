@@ -436,3 +436,19 @@ export interface WorkFlowEvent {
   data: Record<string, unknown>;
   at: string;
 }
+
+/** One row from the ``board_items`` table — MemoryBoardItem in the
+ * PR-1 design doc. The frontend caches these per-ChatFlow and filters
+ * by ``scope`` / ``source_node_id`` client-side when rendering the
+ * floating node-brief bubble and the flow-brief top banner. */
+export interface BoardItem {
+  id: string;
+  chatflow_id: string;
+  workflow_id: string | null;
+  source_node_id: string;
+  source_kind: string;
+  scope: "chat" | "node" | "flow";
+  description: string;
+  fallback: boolean;
+  created_at: string | null;
+}
