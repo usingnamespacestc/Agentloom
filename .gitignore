@@ -209,8 +209,10 @@ __marimo__/
 # Local-only design docs and test code (not committed)
 /docs/*
 /tests/
-# Exception: devlog is shipped with the repo (linked from README)
+# Exception: devlog + README-linked screenshots are shipped with the repo
 !/docs/devlog.md
+!/docs/images/
+!/docs/images/**
 
 # Env / secrets
 .env

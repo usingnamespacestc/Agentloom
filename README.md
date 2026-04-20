@@ -1,238 +1,241 @@
+[English](./README.en.md) | **中文**
+
 # Agentloom
 
-> **⚠️ Work-in-progress.** Agentloom is in rapid iteration — milestones land daily,
-> APIs shift, rough edges are expected. Treat what you see as a snapshot of an
-> active prototype, not a finished product. The devlog at the bottom is the
-> authoritative record of what changed and why.
+> **⚠️ 快速迭代中。** Agentloom 仍在高速开发——里程碑按天推进，API
+> 随时在变，边角粗糙在所难免。你看到的是一个活跃原型的当前快照，而不是成品。
+> 页尾链接的开发日志才是"发生了什么、为什么这样改"的权威记录。
 
-**Agentloom is a visual agent workflow platform where every conversation is a
-branchable, forkable, mergeable DAG and every agent step is inspectable.**
-Instead of a linear chat log or a hand-wired pipeline, the conversation itself
-is a graph you can fork, merge, compact, and replay — with a dynamic planner
-that decomposes goals into sub-tasks as it goes.
+**Agentloom 是一个可视化的 Agent 工作流平台：每一段对话都是可分支、可 fork、可 merge
+的 DAG，每一步 agent 执行都可以被拆开查看。** 这里既不是线性聊天记录，也不是预先
+手工连好的流水线——**对话本身就是一张图**，你可以 fork、merge、compact、回放；内置
+的动态 planner 在执行过程中把目标拆解成子任务再递归下去。
 
----
-
-## Why it's interesting
-
-Most "agent" UIs degenerate into one of two things: a linear chatbox, or a
-pre-wired static workflow. Agentloom tries to do both at once, and adds a
-third axis: **the conversation is the workflow**, and the workflow is a
-first-class DAG the user can edit.
-
-Concretely, that means:
-
-- **Multi-thread conversation.** Any ChatNode can be forked — you get a new
-  branch that shares history up to the fork point and diverges from there.
-  Branches run in parallel, independent of each other. There's no "current
-  chat session" — there are as many live threads as you want.
-
-- **Merge.** Two branches that explored different strategies can be folded
-  back into a single node whose reply reconciles both. Downstream turns
-  continue from the merged conclusion. Fork / merge together turn the chat
-  tree into a DAG rather than just a tree.
-
-- **Compact.** Long conversations are summarized into a compact ChatNode at
-  either ChatFlow level (explicit, user-visible) or WorkFlow level (implicit,
-  triggered before an llm_call that's about to overflow the context window).
-  Both tiers dogfood the same `compact.yaml` template — compaction is a
-  reusable workflow, not a hardcoded engine action.
-
-- **Dynamic planner + nested workflows.** Each ChatNode has an inner WorkFlow
-  DAG: model calls, tool calls, sub-agent delegations, judges. For complex
-  goals the planner decomposes the task into a DAG of WorkNodes, executes
-  them in parallel where possible, and judges the output at each phase
-  (pre / during / post). Sub-agent delegations spawn nested WorkFlows with
-  their own event stream forwarded up to the parent.
-
-- **Plan / Execute separation.** Every node has two phases: dashed (planned,
-  editable) → solid (executed, frozen). You can edit the plan before it
-  runs, inspect the execution afterwards, and iterate by branching —
-  nothing is overwritten.
-
-- **Full observability.** SSE event stream surfaces every engine transition
-  to the canvas. Usage, latency, token counts, judge verdicts, retry state
-  are all visible per node. Node IDs, model metadata, and tool call args
-  are exposed so you can understand *why* the agent did what it did.
+![ChatFlow canvas: 四条"资料讲解"对话分支在同一个 LCA 下展开，两条深入分支最终
+合流到一个 merge ChatNode，右栏同步显示当前选中节点的 ConversationView。](docs/images/01-chatflow-canvas.png)
 
 ---
 
-## Core concepts
+## 为什么有意思
 
-| Concept | What it is |
+常见的 "agent" UI 通常会退化成两种形态：一种是线性聊天框，一种是预先写死的静态
+工作流。Agentloom 想把两者同时做掉，还加上了第三个维度——**对话即工作流**，而这
+个工作流是用户可以直接编辑的一等公民 DAG。
+
+具体来说：
+
+- **多线程对话。** 任何一个 ChatNode 都可以被 fork——新分支继承 fork 点之前的
+  历史，然后各自独立演进。多个分支并行存在，互不干扰；系统里没有所谓的"当前
+  会话"——你有多少个想法就有多少个活跃分支。
+
+- **合流（Merge）。** 两条探索了不同策略的分支可以被折回成一个节点，这个节点的
+  回复会综合两边的结论。后续对话从合流后的结论继续。fork 加 merge 让对话树真正
+  变成 DAG，而不只是一棵树。
+
+- **压缩（Compact）。** 超长对话会被归纳成一个紧凑的 ChatNode：既可以在 ChatFlow
+  层手动触发（显式、用户可见），也可以在 WorkFlow 层自动触发（隐式，在 llm_call
+  即将撑破上下文时启动）。两层压缩都 dogfood 同一个 `compact.yaml` 模板——压缩本
+  身就是一个可复用的 workflow，而不是写死在 engine 里的动作。
+
+  ![Compact ChatNode：前三轮背景资料被自动归纳成一个浅色的 compact 节点插在对话链中间，
+  summary 直接引用源节点 id 作为 "citation"；紧随其后的真实问题在
+  "summary + 保留 tail" 之上继续推理。](docs/images/02-chatflow-compact.png)
+
+- **动态 planner + 嵌套 WorkFlow。** 每个 ChatNode 内部都有一个 WorkFlow DAG：
+  模型调用、工具调用、子 agent 委派、judge 判定。面对复杂目标，planner 会把任务
+  分解成一张 WorkNode 的 DAG，能并行就并行，并在每个阶段（pre / during / post）
+  让 judge 审阅产出。子 agent 委派会开出一个嵌套的 WorkFlow，它的事件流会往上
+  转发到父 WorkFlow。
+
+  ![WorkFlow 内部视图：点击 ChatNode 的 ⤢ 按钮钻入后，可以看到 planner 生成的
+  judge_pre / plan / 并行 worker / judge_post 这张 DAG，每个 WorkNode 都能看到
+  它的输入、输出、状态、耗时。](docs/images/04-workflow-canvas.png)
+
+- **Plan / Execute 分离。** 每个节点都有两态：虚线（已规划，可编辑）→ 实线（已
+  执行，已冻结）。你可以在执行前修改计划，执行后查看现场；想重来就开分支——原来
+  的尝试不会被覆盖。
+
+- **完整可观测。** SSE 事件流把 engine 的每一次状态变化都推到 canvas 上。每个
+  节点的 token 用量、延迟、judge 判定、retry 状态都能看到。Node ID、模型元数据、
+  工具调用参数都对用户可见，方便理解 agent "为什么这么做"。
+
+---
+
+## 核心概念
+
+| 概念 | 是什么 |
 |---|---|
-| **ChatFlow** | The outer DAG. Nodes are `ChatNode`s — a user-turn / agent-turn pair, or a special compact / merge node. Edges are `parent_ids`. Branching = new ChatNode with the same parent. |
-| **ChatNode** | One turn in the conversation. Holds a `user_message`, an `agent_response`, and an *inner* WorkFlow that produced the response. Can also be a compact or merge node. |
-| **WorkFlow** | The inner DAG. Nodes are `WorkNode`s representing a unit of agent work. |
-| **WorkNode** | One of `llm_call` / `tool_call` / `judge_call` / `sub_agent_delegation` / `compact` / `merge`. Solid once executed (frozen, immutable). |
-| **Planner** | A recursive decomposer that expands an auto-plan ChatNode into a WorkFlow DAG, with judge_pre / judge_during / judge_post checkpoints. |
-| **Blackboard** | Structured cross-node state (missing_inputs, critiques, blockers, issues) that judges read and write. |
-| **Execution mode** | Per-node selector: `native_react` (single ReAct loop) / `semi_auto` (explicit plan phase, one pass) / `auto_plan` (recursive planner with judge-driven retry). |
+| **ChatFlow** | 外层 DAG。节点是 `ChatNode`——一轮 user/agent 对话、或者特殊的 compact / merge 节点。边是 `parent_ids`，fork 就是共享 parent 开新 ChatNode。 |
+| **ChatNode** | 对话中的一轮。承载一条 `user_message`、一条 `agent_response`，以及产生这条回复的那个*内层* WorkFlow。也可以是 compact 或 merge 节点。 |
+| **WorkFlow** | 内层 DAG。节点是代表一个 agent 工作单元的 `WorkNode`。 |
+| **WorkNode** | 类型之一：`llm_call` / `tool_call` / `judge_call` / `sub_agent_delegation` / `compact` / `merge`。执行完后变为实线（冻结、不可变）。 |
+| **Planner** | 递归分解器。把一个 auto_plan 的 ChatNode 展开成 WorkFlow DAG，并在 judge_pre / judge_during / judge_post 各关卡上插入检查点。 |
+| **Blackboard** | 跨节点的结构化共享状态（missing_inputs / critiques / blockers / issues），judge 负责读写。 |
+| **执行模式** | 每节点可选：`native_react`（单一 ReAct 循环）/ `semi_auto`（显式 plan 阶段，一次性执行）/ `auto_plan`（递归 planner + judge 驱动重试）。 |
 
 ---
 
-## Features shipped so far
+## 目前已落地的能力
 
-### Conversation DAG
-- [x] Fork any ChatNode (right-click → "Branch from here")
-- [x] **Merge two ChatNodes** into a synthesized reply (VSCode-compare-style
-      two-step pick: "Select to merge" → "Merge with pending"; cancel on
-      drag/escape/background-click)
-- [x] **Compact** conversation tier 1 (auto, pre-llm_call) + tier 2 (manual
-      or auto, ChatFlow-level). Reusable compact template, visible snapshot
-      with preserved tail.
-- [x] Retry / cancel / delete with cascade
-- [x] Branch navigation (↑↓ siblings, jump to parent/child)
-- [x] Multi-parent merge ChatNodes render as a confluence in the canvas
+### 对话 DAG
+- [x] 任意 ChatNode 右键 → "从此处分支" 开 fork
+- [x] **两节点合流**，用 VSCode-compare 式的两步操作（"选中待合流" → "与待合流项
+      合并"；拖拽/ESC/点空白可取消）。LCA 感知：root→LCA 的公共前缀只喂给
+      模型一次，只有 LCA 之后的两条分支后缀才进入 merge 上下文。
+- [x] **Compact** Tier 1（自动，触发于 llm_call 前）+ Tier 2（手动或自动，
+      ChatFlow 级）。复用同一套 compact 模板，生成带可见快照的 ChatNode，
+      保留 tail 消息。
+- [x] Joint-compact：当两条待合流分支合起来超预算时，会在两个源节点和 merge
+      节点之间材料化一个可见的 joint-compact ChatNode，而不是默默对每条分支做
+      一次隐藏的预压缩。
+- [x] retry / cancel / delete 级联处理
+- [x] 分支导航（↑↓ 切兄弟，跳转到 parent/child）
+- [x] 多 parent 的 merge ChatNode 在 canvas 上渲染成汇流形态
 
-### WorkFlow engine
-- [x] Three execution modes (`native_react` / `semi_auto` / `auto_plan`) —
-      per-ChatFlow default + per-ChatNode override
-- [x] Recursive planner with `plan.yaml` / `planner.yaml` / `planner_judge.yaml`
-      templates; decompose → execute → judge → retry loop
-- [x] Parallel sibling scheduling — ready WorkNodes in a layer run concurrently
-- [x] Sub-agent delegation with nested WorkFlow + bubbled halts
-- [x] Judge trio (`pre` / `during` / `post`) with structured verdicts
-- [x] Ground-ratio fuse (halts WorkFlows that churn without tool_calls)
-- [x] Retry budget + redo_targets (re-spawn + re-run affected sub-trees)
-- [x] Tool-loop budget guard
-- [x] Pending user-prompt — agent can explicitly ask the user a question
-      mid-flow and pause; user reply resumes the workflow
+### WorkFlow 引擎
+- [x] 三种执行模式（`native_react` / `semi_auto` / `auto_plan`），ChatFlow 级
+      默认值 + 每 ChatNode 可覆盖
+- [x] 递归 planner：`plan.yaml` / `planner.yaml` / `planner_judge.yaml` 模板化
+      的 "分解 → 执行 → judge → retry" 循环
+- [x] 并行同层调度——每一层就绪的 WorkNode 一批并发执行
+- [x] 子 agent 委派：嵌套 WorkFlow + 向上冒泡的 halt + 向上转发的 SSE 事件
+- [x] Judge 三段式（`pre` / `during` / `post`），结构化 verdict（JSON Schema +
+      强制 tool-use 双保险）
+- [x] Ground-ratio 保险丝：WorkFlow 长时间没有 tool_call 就熔断
+- [x] Retry budget + redo_targets（重开并重跑受影响的子树）
+- [x] Tool-loop 预算守卫
+- [x] Pending user-prompt：agent 可以在流程中主动提问并暂停，用户回复后流程继续
 
-### Context management
-- [x] Context window lookup cache (per-provider / per-model, reads real
-      metadata — Ark 131K, Anthropic 200K, etc.)
-- [x] Compact trigger + target percent invariant (sum ≤ 100%)
-- [x] Compact loop fuse (skips recursive compact-the-summary cascade)
-- [x] Tagged context with per-ChatNode-id prefixes for compact worker citations
+### 上下文管理
+- [x] 上下文窗口查询缓存（per-provider / per-model，读取真实元数据——Ark 131K、
+      Anthropic 200K 等）
+- [x] Compact 触发阈值 + 目标占比不变式（总和 ≤ 100%）
+- [x] Compact 循环保险丝（避免在 summary 之上递归压缩）
+- [x] 带 ChatNode id 前缀的标签化上下文，方便 compact worker 引用
+- [x] 结构化 citation + coverage 兜底：当 compact / merge LLM 忘了引用源
+      节点 id 时，engine 会把未被引用的节点的原文尾巴截断后追加进去，保证
+      下游上下文不会成为孤儿
 
-### Providers + tools
-- [x] OpenAI-compatible providers (Volcengine / Ark / Ollama / OpenAI)
-- [x] Anthropic native (for Claude tool-use)
-- [x] `provider_sub_kind` whitelist for per-provider sampling params
-- [x] Per-call-type model overrides (judge / tool-call can use cheaper models)
-- [x] Tools: Bash / Read / Write / Edit / Glob / Grep / Tavily search
-- [x] MCP client (basic)
-- [x] `get_node_context` skill — pull any ChatNode/WorkNode's context by id
+### Provider + 工具
+- [x] OpenAI 兼容 provider（Volcengine / Ark / Ollama / OpenAI）
+- [x] Anthropic 原生（用于 Claude 工具调用）
+- [x] `provider_sub_kind` 白名单控制每个 provider 可用的采样参数
+- [x] 按调用类型的模型覆盖（judge / tool-call 可以用更便宜的模型）
+- [x] 内置工具：Bash / Read / Write / Edit / Glob / Grep / Tavily 搜索
+- [x] MCP 客户端（基础版）
+- [x] `get_node_context` skill——按 id 拉任意 ChatNode / WorkNode 的上下文
 
 ### UX
-- [x] React Flow canvas with sticky notes, compact badges, merge badges,
-      awaiting-user highlight, active-work panel
-- [x] ChatFlow settings: execution mode, default / judge / tool-call /
-      compact models, compact triggers, ground-ratio thresholds
-- [x] ConversationView with compact / merge bubbles, token usage, copy,
-      markdown rendering
-- [x] i18n (en-US + zh-CN) — all fixture templates translated
-- [x] Structured JSON output (provider / model two-layer `json_mode`)
+- [x] React Flow canvas：sticky notes、compact 徽章、merge 徽章、等待用户
+      高亮、active-work 面板
+- [x] ChatFlow 设置：执行模式、default / judge / tool-call / compact 模型、
+      compact 阈值、ground-ratio 阈值
 
-### Infra
-- [x] Postgres (async SQLAlchemy) + Redis
-- [x] Alembic migrations
-- [x] SSE event bus with per-workflow subscriptions
-- [x] Hierarchical token-bucket rate limiting
-- [x] Pytest: 385 backend tests + 55 frontend tests passing
+  ![ChatFlow 设置面板：按类别（判官 judge / 工具调用 tool_call / 压缩 compact）
+  分别指定模型与采样参数，compact 触发/目标阈值两端绑定且总和 ≤ 100%。
+  ](docs/images/05-settings-panel.png)
+- [x] ConversationView：compact / merge 气泡、token 用量、复制、markdown 渲染
+- [x] i18n（en-US + zh-CN）——所有 fixture 模板按语言各有一份
+- [x] 结构化 JSON 输出（provider / model 两层 `json_mode`）
 
----
-
-## Design philosophy
-
-Three commitments drive most decisions:
-
-1. **Immutable on execute, iterate by branching.** A node that has run is
-   frozen. If you want to try a different approach, you fork — the previous
-   attempt stays intact on the canvas. This makes every experiment
-   auditable and makes "rewind" a first-class navigation primitive instead
-   of a destructive edit.
-
-2. **DAG > linear.** A real research session is not a single thread; it's
-   multiple parallel lines of thought that occasionally converge. The tree
-   of forks + the merge operator turn the canvas into a DAG where history
-   is structural, not chronological. This is what enables parallel
-   branches, cross-branch merge, and compact summaries that cite specific
-   ancestor nodes.
-
-3. **Engine actions are reusable plans, not hardcoded steps.** Compact,
-   merge, judge, planner — each is a YAML fixture instantiated into a
-   real WorkFlow, not a special case in the engine. Users can inspect
-   and (eventually) modify these fixtures; the platform dogfoods its own
-   primitives.
+### 基础设施
+- [x] docker-compose 起 Postgres（async SQLAlchemy）+ Redis
+- [x] Alembic 迁移
+- [x] SSE 事件总线：按 workflow 订阅 + 嵌套转发
+- [x] 分层 token-bucket 限流
+- [x] Pytest：后端 385+ 个单测 + 前端 55+ 个单测全绿
 
 ---
 
-## Dev setup
+## 设计理念
+
+三条承诺贯穿了大部分设计决策：
+
+1. **执行即冻结，迭代靠分支。** 一个节点一旦执行完就不可变。想换思路？开分支——
+   之前那次尝试会作为历史留在 canvas 上。这让所有实验都可审计，也让"回滚"
+   变成一等导航操作，而不是破坏性编辑。
+
+2. **DAG 优于线性。** 真实的研究过程从来不是单线程，而是多个并行思路偶尔汇流。
+   fork 的树形 + merge 算子把 canvas 变成 DAG，历史是结构性的而不是时间性的。
+   正是这个结构让并行分支、跨分支合流、带源节点引用的压缩摘要成为可能。
+
+3. **Engine 动作就是可复用的计划，不是硬编码。** Compact、merge、judge、
+   planner——每一个都是一份 YAML fixture 实例化成的真 WorkFlow，不是 engine 里
+   的特殊逻辑。用户可以（未来也能）直接审视和修改这些 fixture；平台自己吃自己的
+   狗粮。
+
+---
+
+## 开发环境
 
 ```bash
 cp .env.example .env
-# Fill in VOLCENGINE_API_KEY, TAVILY_API_KEY, ANTHROPIC_API_KEY as available.
+# 按需填入 VOLCENGINE_API_KEY、TAVILY_API_KEY、ANTHROPIC_API_KEY
 
-# Start postgres + redis
+# 启动 postgres + redis
 docker compose up -d postgres redis
 
-# Backend (hot reload)
+# 后端（热重载）
 cd backend
 pip install -e ".[dev]"
 uvicorn agentloom.main:app --reload
 
-# Frontend (separate terminal)
+# 前端（另开一个终端）
 cd frontend
 npm install
 npm run dev
 ```
 
-Health check: `curl localhost:8000/health` → `{"status":"ok","version":"0.1.0"}`
-Frontend: `http://localhost:5173`.
+健康检查：`curl localhost:8000/health` → `{"status":"ok","version":"0.1.0"}`
+前端：`http://localhost:5173`。
 
-## Tests
+## 测试
 
 ```bash
-make test           # backend unit + integration
-make test-smoke     # live API tests (requires env keys)
+make test           # 后端 unit + integration
+make test-smoke     # 实打 API 的 smoke（需要环境变量里的 key）
 make test-e2e       # playwright
-cd frontend && npx vitest run   # frontend unit
+cd frontend && npx vitest run   # 前端单测
 ```
 
-## Layout
+## 目录结构
 
 ```
 backend/
   agentloom/
-    api/          HTTP routes (chatflows, workflows, providers, settings)
-    db/           SQLAlchemy models + async repositories
-    engine/       WorkFlow + ChatFlow execution engines
-    providers/    OpenAI-compat + Anthropic native adapters
-    templates/    YAML fixtures (plan / planner / judge / worker / compact / merge / title_gen)
+    api/          HTTP 路由（chatflows / workflows / providers / settings）
+    db/           SQLAlchemy 模型 + 异步仓储
+    engine/       WorkFlow + ChatFlow 执行引擎
+    providers/    OpenAI 兼容 + Anthropic 原生适配
+    templates/    YAML fixture（plan / planner / judge / worker / compact / merge / title_gen）
     tools/        Bash / Read / Write / Edit / Glob / Grep / Tavily / node_context
-    mcp/          MCP client
-    rate_limit/   Hierarchical Token Bucket
-  alembic/        migrations
+    mcp/          MCP 客户端
+    rate_limit/   分层 token bucket
+  alembic/        数据库迁移
 frontend/
   src/
-    canvas/       React Flow canvas, ConversationView, node cards
-    components/   Settings, dialogs, ribbons
-    i18n/         zh-CN + en-US locales
-    store/        Zustand stores (chatflowStore, preferencesStore)
+    canvas/       React Flow canvas、ConversationView、节点卡片
+    components/   设置、对话框、ribbon
+    i18n/         zh-CN + en-US 语言包
+    store/        Zustand store（chatflowStore、preferencesStore）
 tests/
   backend/{unit,integration,smoke,system}
-  frontend/   (colocated `*.test.ts` under `src/`)
+  frontend/   （与 src 共置的 `*.test.ts`）
 docs/
-  devlog.md     <-- authoritative development log
-  plan.md       phased build plan (local)
-  requirements.md
+  devlog.md     <-- 开发日志权威记录
 ```
 
-## Status
+## 状态
 
-Rapid-iteration MVP. Core ChatFlow/WorkFlow DAG + planner + compact + merge
-have landed. See [`docs/devlog.md`](docs/devlog.md) for the full
-development log — every milestone, every design tradeoff, every bug that
-bit and how it was fixed.
+快速迭代中的 MVP。ChatFlow / WorkFlow DAG + planner + compact + merge 核心
+都已落地。详见 [`docs/devlog.md`](docs/devlog.md)——每一个里程碑、每一次设计
+权衡、每一个踩过的 bug 及其修复都在那里。
 
 ---
 
-## Development log
+## 开发日志
 
-For the full narrative — design decisions, tradeoffs considered and
-rejected, bugs discovered during integration, and the order in which
-features landed — see:
+想看完整叙事——设计决策、考虑过但否决的方案、集成时冒出来的 bug、功能落地的
+顺序——请看：
 
 **→ [`docs/devlog.md`](docs/devlog.md)**
