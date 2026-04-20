@@ -288,6 +288,86 @@ def _make_board_writer(
     return write
 
 
+_CHAT_BRIEF_USER_SNIPPET = 120
+_CHAT_BRIEF_AGENT_SNIPPET = 200
+
+
+def _first_line(text: str) -> str:
+    """Grab the first non-empty line of *text* (stripped)."""
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def _chat_board_source_kind(node: ChatFlowNode) -> str:
+    """Classify a finished ChatNode into a MemoryBoard ``source_kind``.
+
+    The tiered-rule is the same one ``_build_chat_context`` uses for
+    chain-boundary detection: ``compact_snapshot`` beats
+    ``merge_snapshot`` because a ChatNode can only carry one of the
+    two at once (enforced on :class:`ChatFlowNode`). Plain turn nodes
+    fall through to ``"chat_turn"``.
+    """
+    if node.compact_snapshot is not None:
+        return "chat_compact"
+    if node.merge_snapshot is not None:
+        return "chat_merge"
+    return "chat_turn"
+
+
+def _chat_board_description(node: ChatFlowNode) -> str:
+    """Deterministic code-template ChatBoardItem description for *node*.
+
+    Three shapes, one per ``source_kind``:
+
+    - ``chat_turn``  — "user asked: <first 120 chars>; agent: <first 200>".
+    - ``chat_compact`` — mentions the number of messages folded and the
+      leading line of the compact summary stored in ``agent_response``.
+    - ``chat_merge``   — names the two parent branches and shows the
+      leading line of the merged reply.
+
+    We keep it code-only for MVP (§PR-3 scope); a quality LLM-generated
+    brief can follow in a later PR without touching any of the readers.
+    """
+    kind = _chat_board_source_kind(node)
+    agent_text = node.agent_response.text if node.agent_response else ""
+    agent_snippet = _first_line(agent_text)[:_CHAT_BRIEF_AGENT_SNIPPET].strip()
+    if kind == "chat_compact":
+        snap = node.compact_snapshot
+        dropped = snap.dropped_count if snap is not None else 0
+        preserved = len(snap.preserved_messages) if snap is not None else 0
+        summary_snippet = agent_snippet or "(empty summary)"
+        return (
+            f"compacted {dropped} messages into a summary "
+            f"(+{preserved} preserved verbatim): {summary_snippet}"
+        ).rstrip(": ")
+    if kind == "chat_merge":
+        snap = node.merge_snapshot
+        sources = snap.source_ids if snap is not None else node.parent_ids
+        if len(sources) >= 2:
+            src_label = f"{sources[0][:8]}+{sources[1][:8]}"
+        elif sources:
+            src_label = sources[0][:8]
+        else:
+            src_label = "?"
+        reply_snippet = agent_snippet or "(empty merge reply)"
+        return (
+            f"merged branches {src_label} into one reply: {reply_snippet}"
+        ).rstrip(": ")
+    # chat_turn: user ask + agent reply.
+    user_text = node.user_message.text if node.user_message else ""
+    user_snippet = _first_line(user_text)[:_CHAT_BRIEF_USER_SNIPPET].strip()
+    if not user_snippet and not agent_snippet:
+        return "(empty turn)"
+    if not user_snippet:
+        return f"agent: {agent_snippet}"
+    if not agent_snippet:
+        return f"user asked: {user_snippet}"
+    return f"user asked: {user_snippet}; agent: {agent_snippet}"
+
+
 class ChatFlowEngine:
     """Scheduler for ChatFlow turns.
 
@@ -1202,6 +1282,13 @@ class ChatFlowEngine:
                 merge_node.output_response_tokens = merged_tokens
                 merge_node.status = NodeStatus.SUCCEEDED
                 merge_node.finished_at = utcnow()
+
+        # ChatBoard hook (PR 3): a successful merge ChatNode gets its
+        # own ChatBoardItem so descendants see a single "branches A+B
+        # merged" entry on their ancestor walk. The write happens after
+        # the runtime lock so board I/O doesn't serialize queued turns.
+        if merge_node.status == NodeStatus.SUCCEEDED:
+            await self._spawn_chat_board_item(chatflow, merge_node)
 
         await self._bus.publish(
             WorkflowEvent(
@@ -3226,6 +3313,15 @@ class ChatFlowEngine:
                 if fut is not None and not fut.done():
                     fut.set_result(chat_node)
 
+            # ChatBoard cascade (PR 3, 2026-04-20): once the ChatNode has
+            # frozen into SUCCEEDED, write a ``scope='chat'`` BoardItem so
+            # descendants' ancestor walks can read it. FAILED turns don't
+            # get a ChatBoardItem — there's no agent reply worth
+            # briefing, and the retry will surface a sibling with its
+            # own description.
+            if chat_node.status == NodeStatus.SUCCEEDED:
+                await self._spawn_chat_board_item(chatflow, chat_node)
+
             cascade = chat_node.status == NodeStatus.SUCCEEDED
             if not cascade:
                 # Partition the queue by channel policy. 'discard'
@@ -3331,6 +3427,57 @@ class ChatFlowEngine:
                 },
             )
         )
+
+    async def _spawn_chat_board_item(
+        self, chatflow: ChatFlow, node: ChatFlowNode
+    ) -> None:
+        """Write one ChatBoardItem for *node* via the inner engine's
+        ``board_writer`` (PR 3, 2026-04-20).
+
+        Called synchronously from every ChatNode-success path: plain
+        turn nodes, Tier-2 compact nodes, and manual merge nodes. The
+        description is a deterministic code template — no LLM call —
+        so the cost is bounded and offline tests don't need a provider
+        stub. A future PR can swap in an LLM-generated brief without
+        changing the call sites.
+
+        Idempotent: the underlying ``BoardItemRepository.upsert_by_source``
+        keys off ``source_node_id``, so a re-invocation (retry, engine
+        replay) overwrites the existing row in place instead of growing
+        duplicates.
+
+        No-ops silently when no ``board_writer`` is wired (e.g. unit
+        tests that constructed ``ChatFlowEngine`` without a DB) — same
+        best-effort contract as the WorkBoard writer.
+        """
+        writer = self._inner._board_writer
+        if writer is None:
+            return
+        # Greeting root has no turn content and no chat story to brief.
+        # Skip it — downstream descendants won't read a board item from
+        # the root anyway.
+        if node.user_message is None and node.agent_response.text == "":
+            return
+        source_kind = _chat_board_source_kind(node)
+        description = _chat_board_description(node)
+        try:
+            await writer(
+                chatflow_id=chatflow.id,
+                workflow_id=None,
+                source_node_id=node.id,
+                source_kind=source_kind,
+                scope="chat",
+                description=description,
+                fallback=False,
+            )
+        except Exception:  # noqa: BLE001 — board is best-effort
+            log.exception(
+                "ChatBoardItem write failed for chatflow=%s node=%s "
+                "kind=%s — ChatNode state is unchanged",
+                chatflow.id,
+                node.id,
+                source_kind,
+            )
 
     async def _relay_inner_events(
         self,

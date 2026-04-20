@@ -91,6 +91,14 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
   const isPendingMergeFirst = useChatFlowStore(
     (s) => s.pendingMergeFirstId === node.id,
   );
+  // ChatBoardItem lookup (PR 3 cascading inheritance, 2026-04-20) —
+  // keyed by the ChatNode id. ``scope='chat'`` rows are auto-written by
+  // ``_spawn_chat_board_item`` when a ChatNode reaches SUCCEEDED. We
+  // render a small badge on the card tooltip-revealing the description;
+  // a full MemoryBoard browser lands in a later PR.
+  const chatBoardItem = useChatFlowStore((s) => s.boardItems[node.id]);
+  const hasChatBoardItem =
+    chatBoardItem !== undefined && chatBoardItem.scope === "chat";
 
   // Live preview: pick the longest streaming delta among any running
   // WorkNode under this ChatNode (handles parallel siblings + nested
@@ -214,6 +222,16 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
         {node.pending_queue?.length > 0 && (
           <span className="text-[10px] text-blue-500 font-medium">
             +{node.pending_queue.length}
+          </span>
+        )}
+        {hasChatBoardItem && (
+          <span
+            data-testid={`chatflow-node-${node.id}-chatboard-badge`}
+            data-source-kind={chatBoardItem.source_kind}
+            title={chatBoardItem.description}
+            className="inline-flex items-center rounded bg-indigo-100 px-1 py-0.5 text-[9px] font-medium text-indigo-700"
+          >
+            {t("chatflow.chatboard_badge")}
           </span>
         )}
       </div>

@@ -1530,4 +1530,59 @@ while current is not None:
 - **PR 4（延后）**：blackboard/CompactSnapshot/MergeSnapshot 迁移、`capabilities` / `assigned_resources` 字段、`compact`→`compress`、`sub_agent_delegation`→`delegate`、`llm_call`→`draft`、`planner`→`plan`——这批是语义重命名/重构，与本轮读路径解耦。
 - 写 embedding 到 `description_embedding`：DDL 已建，但没有写入器；等 PR 4 接 embedding provider。
 
+---
+
+## 第 N+2 轮 — ChatBoard 每 ChatNode 级联继承（PR 3/3）— 2026-04-20
+
+收尾 MemoryBoard 三 PR 系列：把 `board_items` 表从「只装 WorkBoard 行」升级为「同时承载 ChatBoard 行」的统一存储。每个 ChatNode 到达 SUCCEEDED 时同步生成一条 `scope='chat'` 的行，下游 ChatNode 要级联查祖先的 brief 时直接走 `GET /api/chatflows/{id}/board_items` + 客户端按 `ChatFlow.ancestors(node_id)` 过滤即可（设计文 §8 给过 server-side endpoint 的备选，实测客户端一行 `.filter(id => ancestors.has(id))` 够用，就没再加新端点）。
+
+### 工程改动
+
+- `backend/agentloom/engine/chatflow_engine.py`：
+  - 新增三个 module 级 helper：
+    - `_chat_board_source_kind(node)` — 根据 `compact_snapshot` / `merge_snapshot` 选 `chat_compact` / `chat_merge` / `chat_turn`。
+    - `_chat_board_description(node)` — 确定性 code template：turn 走 `user asked: <120 chars>; agent: <200 chars>`，compact 写 `compacted N messages into a summary (+M preserved verbatim): <summary>`，merge 写 `merged branches <id8>+<id8> into one reply: <reply>`。纯代码模板，不走 LLM——PR 1 的 tool_call 也是一样策略，成本可预期，后续 PR 可以升级到 LLM 生成简介而无需改调用方。
+    - `_first_line(text)` — 小工具，抓第一非空行。
+  - `ChatFlowEngine._spawn_chat_board_item(chatflow, node)`：复用 `self._inner._board_writer`（PR 1 搭的那套 session-per-write writer），写 `scope='chat'` 行；幂等由底层 `BoardItemRepository.upsert_by_source` 保证；writer 失败吞异常只打 log，ChatNode 自身状态不受影响；`user_message is None && agent_response 空` 的 greeting root 跳过。
+  - 两个接入点：
+    1. 主 turn 完成路径（`_run_chat_node` 尾部）：在 `consumed_pending_id` 解析 future 之后、`cascade` 判断之前调用（覆盖普通 turn + Tier 2 compact ChatNode——后者靠 `compact_snapshot != None` 走 `chat_compact` 分支）。
+    2. 合并 ChatNode 完成路径（`merge_node` finalize 之后、SSE 发事件之前）：走 `chat_merge` 分支。
+- 前端：
+  - `frontend/src/canvas/nodes/ChatFlowNodeCard.tsx`：从 store 读 `boardItems[node.id]`，`scope === "chat"` 才渲染一个小的 indigo 徽章（label 走 i18n `chatflow.chatboard_badge`），hover tooltip 展示完整描述。刻意做最小：WorkBoard bubble 已经是 PR 2 的视觉重头戏，ChatBoard 这里只要「存在性可见」即可。
+  - `frontend/src/i18n/locales/{en-US,zh-CN}.json`：加 `chatflow.chatboard_badge` + `chatflow.chatboard_badge_hint` 两个 key。
+  - `frontend/src/canvas/ChatFlowCanvas.test.tsx`：新 describe `ChatFlowNodeCard — ChatBoard badge (PR 3)` 3 条——有 `scope='chat'` BoardItem 时渲染徽章 + `data-source-kind` 正确 + tooltip 带描述；无 BoardItem 不渲染；`scope='node'`（WorkBoard 行错投到 ChatNode id）也不渲染。
+
+### 测试
+
+`tests/backend/unit/test_chatboard_cascade.py` 9 条：
+
+1. `test_chatboard_item_written_on_chatnode_success` — 普通 turn ChatNode 触发 `_spawn_chat_board_item` 后 writer 拿到 `source_kind='chat_turn'` + `scope='chat'` + `workflow_id=None` + 描述包含 user/agent 文本。
+2. `test_chatboard_item_idempotent` — 同一节点连调两次，两次 payload 完全相等（repo 层的 upsert 负责真正的去重；engine 层只验不自作主张）。
+3. `test_chatboard_item_for_compact_chatnode` — compact ChatNode（`compact_snapshot` 置位、`dropped_count=5`）写出 `chat_compact` + 描述含「compacted 5 messages」。
+4. `test_chatboard_item_for_merge_chatnode` — merge ChatNode（两 parent、`merge_snapshot` 置位）写出 `chat_merge` + 描述含两边 id 前 8 字符 + 合并回复首行。
+5. `test_chatboard_ancestor_cascade` — root→A→B→C 四层链，每层都 spawn（root 被 greeting-root 跳过规则过滤掉），`cf.ancestors(c.id)` 交集 captured 行集合 = {A, B}，验证客户端级联过滤一行搞定。
+6. `test_chat_board_description_chat_turn_shape` — 纯模板：`user asked: <user>; agent: <agent>`。
+7. `test_chat_board_description_truncates_long_inputs` — 500 字符 user/agent 被截到上限（120/200 字符）。
+8. `test_chat_board_description_empty_turn` — 空 turn 返回 `"(empty turn)"` 占位，不抛不空字符串。
+9. `test_spawn_chat_board_item_skips_greeting_root` — 只有 greeting root（user/agent 都空）时 writer 不被调用。
+
+全量跑（继续忽略 `test_citation_fallback.py` / `test_merge_context.py` / `test_chatflow_merge.py`）：后端 **405 passed**（+9，从 PR 2 的 396 起）；前端 `npx vitest run`：**62 passed**（+3，从 PR 2 的 59 起）。
+
+### 坑与决策
+
+- 接入点放在「ChatNode 状态 SUCCEEDED 之后、queue cascade 之前」而非「SSE publish 之后」：这样如果 board 写失败吞异常，也不影响后续 future 解析和 queue 走扁平化。
+- 不做 server-side `ancestor_ids`-过滤 endpoint：设计文 §8 的备选方案，评估后决定客户端一行 `.filter` 更简单（前端已有完整 ChatFlow 在 Zustand store），避免 backend 多一个路径要维护。要是之后 item 数上千就再考虑分页 + server filter。
+- 不走 LLM 写 chat brief：PR 3 明确说 code template MVP 即可；`user asked: …; agent: …` 信息密度够下游做粗筛，LLM 精炼放下一轮。
+- merge 路径的 spawn 放在 runtime lock **外**：保持和 WorkBoard writer 一致的「DB I/O 别占用 chatflow 锁」策略，免得 board 写慢连累排队轮次。
+
+### 收束：三 PR 系列是否闭合
+
+按设计文 `docs/design-memoryboard-brief.md` §8–§10 比对：
+
+- PR 1（brief WorkNode + draft_model 重命名 + BoardItem 表）— 已落。
+- PR 2（reader skill + Postgres 检索 DDL + 前端 bubble/banner）— 已落。
+- PR 3（ChatBoard 级联继承）— 已落：auto-spawn 挂接普通 turn / compact / merge 三类 ChatNode、`scope='chat'` 行写入、前端徽章可见、祖先链查询客户端化。
+
+§10 out-of-scope 的 5 项（`pack` kind / 多索引检索 / 三级细节 / judge 打回标签 / MemoryBoard 编辑 UI）本来就不在这轮范围，符合预期。§8 deferred to PR 2 的 7 项和 §9 deferred to PR 3 的 1 项都交付了。干净闭合，不带 TODO。
+
 

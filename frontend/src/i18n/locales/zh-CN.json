@@ -83,7 +83,9 @@
     "active_work_empty": "当前无节点运行",
     "compact_badge": "压缩",
     "compact_badge_hint": "该 ChatNode 保存了上游对话链的摘要。下游轮次看到的是「摘要 + 近期消息」，而非完整历史。",
-    "compact_summary": "摘要"
+    "compact_summary": "摘要",
+    "chatboard_badge": "看板",
+    "chatboard_badge_hint": "该 ChatNode 已生成 ChatBoardItem — 悬停可查看简介。"
   },
   "workflow": {
     "panel_title": "内部工作流",

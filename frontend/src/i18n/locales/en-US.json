@@ -83,7 +83,9 @@
     "active_work_empty": "Nothing actively running",
     "compact_badge": "Compact",
     "compact_badge_hint": "This ChatNode holds a summary of the chain above it. Downstream turns see the summary + recent turns instead of the full history.",
-    "compact_summary": "Summary"
+    "compact_summary": "Summary",
+    "chatboard_badge": "Board",
+    "chatboard_badge_hint": "A ChatBoardItem is available for this ChatNode — hover to see the brief."
   },
   "workflow": {
     "panel_title": "Inner workflow",
