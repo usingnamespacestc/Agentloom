@@ -35,7 +35,7 @@ plan:
   nodes:
     - id: "worker_root"
       parent_ids: []
-      step_kind: llm_call
+      step_kind: draft
       role: worker
       description:
         text: "Produce the output the planner's atomic brief asks for."

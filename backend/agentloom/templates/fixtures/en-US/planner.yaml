@@ -50,8 +50,8 @@ plan:
   nodes:
     - id: "planner_root"
       parent_ids: []
-      step_kind: llm_call
-      role: planner
+      step_kind: draft
+      role: plan
       description:
         text: "Decide atomic-vs-decompose for the realised trio."
         provenance: pure_agent
@@ -100,7 +100,7 @@ plan:
               surface that back to the user — you don't need to
               front-load everything "just in case".
             - For atomic worker briefs, choose `step_kind`:
-                * "llm_call": natural language / reasoning task.
+                * "draft": natural language / reasoning task.
                 * "tool_call": single tool invocation. Provide
                   `tool_name` and `tool_args`.
                   `tool_name` MUST reference a tool that actually
@@ -111,7 +111,7 @@ plan:
                   keys, not tools). If you're unsure whether a
                   specific tool exists, leave `tool_name` null and let
                   the worker pick at run time, or pick `step_kind:
-                  "llm_call"` so the worker can decide.
+                  "draft"` so the worker can decide.
             - **Fetch full content before answering compacted
               questions.** When `inputs` references node ids from a
               compact summary (e.g. ``(节点: <id>)`` / ``(nodes:
@@ -126,17 +126,17 @@ plan:
                 {"node_id": "<cited node id>"}`.
               * **Multiple nodes** needed, or synthesis / answering
                 still has to happen after retrieval: `step_kind:
-                "llm_call"`, and spell out in `description` that the
+                "draft"`, and spell out in `description` that the
                 worker must call `get_node_context` once per node
                 id (the tool's ``node_id`` argument accepts a single
                 string — loop in the worker, don't try to batch) and
                 then answer from the retrieved text. **Do NOT**
                 split the per-node fetches into separate
-                `sub_agent_delegation` sub-tasks — one llm_call
-                worker can loop through all the fetches and the
-                final synthesis in a single step, whereas splitting
-                makes each nested judge_pre receive an empty
-                conversation and halt on a bogus infeasibility.
+                `delegate` sub-tasks — one draft worker can loop
+                through all the fetches and the final synthesis in
+                a single step, whereas splitting makes each nested
+                judge_pre receive an empty conversation and halt on
+                a bogus infeasibility.
               Do not answer content-specific questions from the
               summary alone — that treats uncertainty as certainty.
 
@@ -150,7 +150,7 @@ plan:
               "reasoning": str | null,
               "mode": "atomic" | "decompose" | "infeasible",
               "atomic": {
-                 "step_kind": "llm_call" | "tool_call",
+                 "step_kind": "draft" | "tool_call",
                  "description": str,
                  "inputs": str,
                  "expected_outcome": str,

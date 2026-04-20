@@ -33,7 +33,7 @@ plan:
   nodes:
     - id: "plan_root"
       parent_ids: []
-      step_kind: llm_call
+      step_kind: draft
       description:
         text: "为给定目标生成一个 DAG plan。"
         provenance: pure_agent

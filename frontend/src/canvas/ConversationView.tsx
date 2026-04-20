@@ -1278,7 +1278,7 @@ function WorkFlowIOBubble({
     (s) => (isRunning ? s.streamingDeltas[node.id] ?? "" : ""),
   );
   const kindColor =
-    node.step_kind === "llm_call"
+    node.step_kind === "draft"
       ? "text-sky-600"
       : node.step_kind === "tool_call"
         ? "text-emerald-700"
@@ -1287,7 +1287,7 @@ function WorkFlowIOBubble({
           : "text-violet-700";
 
   const thinking =
-    node.step_kind === "llm_call" &&
+    node.step_kind === "draft" &&
     typeof node.output_message?.extras?.thinking === "string"
       ? (node.output_message.extras.thinking as string)
       : "";
@@ -1307,7 +1307,7 @@ function WorkFlowIOBubble({
         {t(`node.kind.${node.step_kind}`)}
       </div>
 
-      {node.step_kind === "llm_call" && (
+      {node.step_kind === "draft" && (
         <>
           <NodeInputBlock node={node} t={t} />
           {thinking && (
@@ -1353,9 +1353,9 @@ function WorkFlowIOBubble({
         </>
       )}
 
-      {node.step_kind === "sub_agent_delegation" && (
+      {node.step_kind === "delegate" && (
         <div className="text-[12px] italic text-gray-500">
-          {t("node.kind.sub_agent_delegation")}
+          {t("node.kind.delegate")}
         </div>
       )}
 
@@ -1671,7 +1671,7 @@ function NodeDetailPanel({ node }: { node: WorkFlowNode | null }) {
   }
 
   const hasSubWorkflow =
-    node.step_kind === "sub_agent_delegation" &&
+    node.step_kind === "delegate" &&
     node.sub_workflow != null &&
     Object.keys(node.sub_workflow.nodes).length > 0;
 

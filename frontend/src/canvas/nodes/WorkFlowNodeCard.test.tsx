@@ -36,7 +36,7 @@ function buildWorkNode(overrides: Partial<WorkFlowNode> = {}): WorkFlowNode {
     updated_at: iso,
     started_at: null,
     finished_at: null,
-    step_kind: "llm_call",
+    step_kind: "draft",
     role: null,
     tool_constraints: null,
     model_override: null,
@@ -95,7 +95,7 @@ describe("WorkFlowNodeCard role styling", () => {
   });
 
   it("leaves legacy (role === null) nodes with the step_kind accent and no role badge", () => {
-    renderCard(buildWorkNode({ id: "legacy", role: null, step_kind: "llm_call" }));
+    renderCard(buildWorkNode({ id: "legacy", role: null, step_kind: "draft" }));
     const card = screen.getByTestId("workflow-node-legacy");
     expect(card.getAttribute("data-role")).toBe("none");
     // Legacy llm_call still gets the sky accent it had before M12.1.
@@ -120,14 +120,14 @@ describe("WorkFlowNodeCard — MemoryBoard bubble", () => {
   it("renders a node-brief bubble above a WorkNode when a matching BoardItem exists", () => {
     const node = buildWorkNode({
       id: "bubble-host",
-      step_kind: "llm_call",
+      step_kind: "draft",
     });
     seedBoardItem({
       id: "bi-1",
       chatflow_id: "cf-1",
       workflow_id: "wf-1",
       source_node_id: "bubble-host",
-      source_kind: "llm_call",
+      source_kind: "draft",
       scope: "node",
       description: "Computed the answer in three steps.",
       fallback: false,

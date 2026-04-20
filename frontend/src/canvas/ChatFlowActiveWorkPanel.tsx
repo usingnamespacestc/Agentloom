@@ -37,11 +37,13 @@ interface ActiveEntry {
 }
 
 const STEP_KIND_COLOR: Record<StepKind, string> = {
-  llm_call: "bg-blue-100 text-blue-800",
+  draft: "bg-blue-100 text-blue-800",
   tool_call: "bg-amber-100 text-amber-800",
   judge_call: "bg-purple-100 text-purple-800",
-  sub_agent_delegation: "bg-gray-100 text-gray-700",
-  compact: "bg-teal-100 text-teal-800",
+  delegate: "bg-gray-100 text-gray-700",
+  compress: "bg-teal-100 text-teal-800",
+  merge: "bg-rose-100 text-rose-800",
+  brief: "bg-sky-100 text-sky-800",
 };
 
 function collectActiveWorkNodes(

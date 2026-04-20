@@ -42,7 +42,7 @@ plan:
       parent_ids: []
       step_kind: judge_call
       judge_variant: during
-      role: planner_judge
+      role: plan_judge
       description:
         text: "Decide whether to proceed, revise, or halt the plan."
         provenance: pure_agent

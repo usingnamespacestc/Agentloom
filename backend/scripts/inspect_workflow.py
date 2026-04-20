@@ -51,7 +51,7 @@ def dump_worknode(wn: dict, is_target: bool) -> None:
     if tc and (tc.get("allow") or tc.get("deny")):
         print(f"          tool_constraints: allow={tc.get('allow')} deny={tc.get('deny')}")
 
-    if step == "llm_call":
+    if step == "draft":
         u = wn.get("usage")
         if u:
             print(

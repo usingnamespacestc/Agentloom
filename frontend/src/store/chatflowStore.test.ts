@@ -104,7 +104,7 @@ function seedChatFlow(): ChatFlow {
               updated_at: "2026-04-10T00:00:00Z",
               started_at: null,
               finished_at: null,
-              step_kind: "llm_call",
+              step_kind: "draft",
               role: null,
               tool_constraints: null,
               input_messages: null,
@@ -199,7 +199,7 @@ describe("chatflowStore", () => {
           updated_at: "2026-04-13T00:00:00Z",
           started_at: null,
           finished_at: null,
-          step_kind: "llm_call",
+          step_kind: "draft",
           role: null,
           tool_constraints: null,
           input_messages: null,
@@ -209,7 +209,7 @@ describe("chatflowStore", () => {
       },
     };
     const chat = seedChatFlow();
-    chat.nodes.n1.workflow.nodes.w1.step_kind = "sub_agent_delegation";
+    chat.nodes.n1.workflow.nodes.w1.step_kind = "delegate";
     chat.nodes.n1.workflow.nodes.w1.input_messages = null;
     chat.nodes.n1.workflow.nodes.w1.output_message = null;
     chat.nodes.n1.workflow.nodes.w1.usage = null;

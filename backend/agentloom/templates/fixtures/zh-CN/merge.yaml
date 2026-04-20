@@ -16,7 +16,7 @@ plan:
   nodes:
     - id: "merge_root"
       parent_ids: []
-      step_kind: llm_call
+      step_kind: draft
       description:
         text: "产出一条同时从两条分支连贯延续的 user_message。"
         provenance: pure_agent

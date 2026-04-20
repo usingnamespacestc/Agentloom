@@ -252,7 +252,7 @@ describe("ChatFlowNodeCard — ChatBoard badge (PR 3)", () => {
       chatflow_id: "cf-a",
       workflow_id: "wf-a",
       source_node_id: node.id,
-      source_kind: "llm_call",
+      source_kind: "draft",
       scope: "node",
       description: "wrong scope for a ChatNode",
       fallback: false,

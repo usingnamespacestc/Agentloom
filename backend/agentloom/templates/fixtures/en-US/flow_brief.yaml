@@ -63,7 +63,7 @@ plan:
   nodes:
     - id: "flow_brief_root"
       parent_ids: []
-      step_kind: llm_call
+      step_kind: draft
       description:
         text: "Distill the WorkFlow's run into a short prose description."
         provenance: pure_agent

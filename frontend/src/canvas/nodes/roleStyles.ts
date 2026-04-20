@@ -8,7 +8,7 @@
  *
  * Palette intent:
  *   pre_judge / post_judge   — cool slate (framing / exit gates)
- *   planner / planner_judge  — warm amber (planning side)
+ *   plan / plan_judge        — warm amber (planning side)
  *   worker  / worker_judge   — emerald (execution side)
  *
  * Within each pair the ``_judge`` flavor shares the hue of its non-judge
@@ -34,11 +34,11 @@ const ROLE_STYLES: Record<WorkNodeRole, RoleStyle> = {
     container: "border-2 border-slate-400 bg-slate-100",
     badge: "bg-slate-200 text-slate-800",
   },
-  planner: {
+  plan: {
     container: "border border-amber-300 bg-amber-50",
     badge: "bg-amber-200 text-amber-900",
   },
-  planner_judge: {
+  plan_judge: {
     container: "border-2 border-amber-500 bg-amber-100",
     badge: "bg-amber-300 text-amber-950",
   },

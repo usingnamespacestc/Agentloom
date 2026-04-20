@@ -46,7 +46,7 @@ class WireMessage(BaseModel):
 
 
 class CompactSnapshot(BaseModel):
-    """The structured output of a :attr:`StepKind.COMPACT` WorkNode.
+    """The structured output of a :attr:`StepKind.COMPRESS` WorkNode.
 
     Produced by the compact worker's LLM call and frozen onto the
     WorkNode. Downstream ancestor walks root here: instead of pulling
@@ -191,7 +191,7 @@ class WorkFlowNode(NodeBase):
         ``usage`` with ``llm_call`` (they're still a model invocation under
         the hood) but additionally carry ``judge_variant`` / ``judge_verdict``.
         """
-        if self.step_kind == StepKind.LLM_CALL:
+        if self.step_kind == StepKind.DRAFT:
             if self.tool_name or self.tool_args or self.tool_result:
                 raise ValueError("llm_call node may not carry tool_call fields")
             if self.sub_workflow is not None:
@@ -218,7 +218,7 @@ class WorkFlowNode(NodeBase):
                 raise ValueError("judge_call node requires judge_variant")
             if self.compact_snapshot is not None:
                 raise ValueError("judge_call node may not carry compact fields")
-        elif self.step_kind == StepKind.SUB_AGENT_DELEGATION:
+        elif self.step_kind == StepKind.DELEGATE:
             if self.tool_name or self.tool_args or self.tool_result:
                 raise ValueError("delegation node may not carry tool_call fields")
             if self.input_messages or self.output_message or self.usage:
@@ -227,7 +227,7 @@ class WorkFlowNode(NodeBase):
                 raise ValueError("delegation node may not carry judge_call fields")
             if self.compact_snapshot is not None:
                 raise ValueError("delegation node may not carry compact fields")
-        elif self.step_kind == StepKind.COMPACT:
+        elif self.step_kind == StepKind.COMPRESS:
             # Compact nodes share llm_call's input/output/usage shape
             # (they're a single LLM invocation under the hood) and
             # additionally carry ``compact_snapshot`` as the structured
@@ -276,12 +276,12 @@ class WorkFlowNode(NodeBase):
 
 _ROLE_TO_STEP_KINDS: dict[WorkNodeRole, set[StepKind]] = {
     WorkNodeRole.PRE_JUDGE: {StepKind.JUDGE_CALL},
-    WorkNodeRole.PLANNER: {StepKind.LLM_CALL},
-    WorkNodeRole.PLANNER_JUDGE: {StepKind.JUDGE_CALL},
+    WorkNodeRole.PLAN: {StepKind.DRAFT},
+    WorkNodeRole.PLAN_JUDGE: {StepKind.JUDGE_CALL},
     # Worker is the only role with mechanical flexibility — atomic tasks
     # may be a model call or a direct tool invocation. ``sub_agent_delegation``
     # is explicitly *not* allowed: a worker by definition does not decompose.
-    WorkNodeRole.WORKER: {StepKind.LLM_CALL, StepKind.TOOL_CALL},
+    WorkNodeRole.WORKER: {StepKind.DRAFT, StepKind.TOOL_CALL},
     WorkNodeRole.WORKER_JUDGE: {StepKind.JUDGE_CALL},
     WorkNodeRole.POST_JUDGE: {StepKind.JUDGE_CALL},
 }

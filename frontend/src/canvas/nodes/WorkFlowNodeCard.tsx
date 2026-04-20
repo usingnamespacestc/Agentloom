@@ -31,10 +31,10 @@ export interface WorkFlowNodeData extends Record<string, unknown> {
 }
 
 const KIND_ACCENT: Record<string, string> = {
-  llm_call: "border-sky-300 bg-sky-50",
+  draft: "border-sky-300 bg-sky-50",
   tool_call: "border-emerald-300 bg-emerald-50",
   judge_call: "border-amber-300 bg-amber-50",
-  sub_agent_delegation: "border-violet-300 bg-violet-50",
+  delegate: "border-violet-300 bg-violet-50",
 };
 
 function truncate(text: string, n = 140): string {
@@ -139,7 +139,7 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
         <StatusBadge status={node.status} />
       </div>
 
-      {node.step_kind === "llm_call" && (
+      {node.step_kind === "draft" && (
         <LlmCallBody node={node} maxCtx={maxContextTokens} />
       )}
       {node.step_kind === "tool_call" && (
@@ -148,7 +148,7 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
       {node.step_kind === "judge_call" && (
         <JudgeCallBody node={node} maxCtx={maxContextTokens} />
       )}
-      {node.step_kind === "sub_agent_delegation" && (
+      {node.step_kind === "delegate" && (
         <SubAgentDelegationBody node={node} />
       )}
 

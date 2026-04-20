@@ -48,8 +48,8 @@ plan:
   nodes:
     - id: "planner_root"
       parent_ids: []
-      step_kind: llm_call
-      role: planner
+      step_kind: draft
+      role: plan
       description:
         text: "根据实化 trio 决策采用 atomic 还是 decompose。"
         provenance: pure_agent
@@ -94,7 +94,7 @@ plan:
               出口 judge 会把信息缺口反馈给用户——你不必"以防万一"
               地全量前置。
             - atomic worker 的说明中需要选择 `step_kind`：
-                * "llm_call"：自然语言 / 推理任务。
+                * "draft"：自然语言 / 推理任务。
                 * "tool_call"：单次工具调用。需提供 `tool_name` 和
                   `tool_args`。`tool_name` 必须是运行时工具注册表中
                   实际存在的工具名。不要编造名字，也不要借用引擎
@@ -102,7 +102,7 @@ plan:
                   ``feasibility``、``planner`` 等——它们是 JSON key，
                   不是工具）。如果不确定某个工具是否存在，请把
                   `tool_name` 留为 null 交给运行时的 worker 自行选择，
-                  或改用 `step_kind: "llm_call"` 由 worker 决策。
+                  或改用 `step_kind: "draft"` 由 worker 决策。
             - **压缩上下文优先取全文。** 若 `inputs` 里出现了来自
               压缩摘要的节点 id 引用（例如 ``(节点: <id>)`` 标记、
               或 judge_pre 明确写出的"可用 get_node_context 读取
@@ -114,14 +114,14 @@ plan:
                 "get_node_context"` + `tool_args: {"node_id":
                 "<引用的节点 id>"}`。
               * **需要多个节点**，或取回后还要综合 / 回答：
-                `step_kind: "llm_call"`，`description` 中明确要求
+                `step_kind: "draft"`，`description` 中明确要求
                 worker 依次对每个节点 id 调用
                 `get_node_context`（一次调一个 id——该工具的
                 ``node_id`` 参数只接受单个字符串），再基于取回的
                 原文作答。**不要** 为每个节点 id 拆成独立的
-                `sub_agent_delegation` 子任务——一个 worker 的
-                llm_call 循环里就能做完所有取回和综合，拆子任务
-                反而会让嵌套 judge_pre 拿到空对话被迫乱判。
+                `delegate` 子任务——一个 worker 的 draft 循环
+                里就能做完所有取回和综合，拆子任务反而会让嵌套
+                judge_pre 拿到空对话被迫乱判。
               不要仅凭摘要里的概述来回答具体内容问题——那是
               把不确定当确定。
 
@@ -135,7 +135,7 @@ plan:
               "reasoning": str | null,
               "mode": "atomic" | "decompose" | "infeasible",
               "atomic": {
-                 "step_kind": "llm_call" | "tool_call",
+                 "step_kind": "draft" | "tool_call",
                  "description": str,
                  "inputs": str,
                  "expected_outcome": str,

@@ -25,7 +25,7 @@ class AuditLogEntry(Base):
         String(64), ForeignKey("workspaces.id"), nullable=False
     )
     node_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    kind: Mapped[str] = mapped_column(String(32), nullable=False)  # "llm_call" | "tool_call"
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)  # "draft" | "tool_call"
     details: Mapped[dict[str, Any]] = mapped_column(
         JSONB().with_variant(JSON(), "sqlite"), nullable=False
     )

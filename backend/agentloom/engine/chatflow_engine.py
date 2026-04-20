@@ -1803,7 +1803,7 @@ class ChatFlowEngine:
         else:
             inner.add_node(
                 WorkFlowNode(
-                    step_kind=StepKind.LLM_CALL,
+                    step_kind=StepKind.DRAFT,
                     parent_ids=[],
                     input_messages=list(context_wire),
                     model_override=resolved,
@@ -2007,7 +2007,7 @@ class ChatFlowEngine:
 
             sub_workflow = self._build_sub_workflow_for_subtask(inner, sub)
             delegation = WorkFlowNode(
-                step_kind=StepKind.SUB_AGENT_DELEGATION,
+                step_kind=StepKind.DELEGATE,
                 parent_ids=parent_ids,
                 sub_workflow=sub_workflow,
                 description=EditableText.by_agent(sub.description),
@@ -2194,7 +2194,7 @@ class ChatFlowEngine:
                     )
                     return
                 if node.judge_variant == JudgeVariant.DURING:
-                    if node.role == WorkNodeRole.PLANNER_JUDGE:
+                    if node.role == WorkNodeRole.PLAN_JUDGE:
                         self._after_planner_judge(
                             workflow,
                             node,
@@ -2220,7 +2220,7 @@ class ChatFlowEngine:
                     )
                 return
 
-            if node.step_kind == StepKind.SUB_AGENT_DELEGATION:
+            if node.step_kind == StepKind.DELEGATE:
                 self._after_delegation(
                     workflow,
                     node,
@@ -2229,8 +2229,8 @@ class ChatFlowEngine:
                 )
                 return
 
-            if node.step_kind == StepKind.LLM_CALL:
-                if node.role == WorkNodeRole.PLANNER:
+            if node.step_kind == StepKind.DRAFT:
+                if node.role == WorkNodeRole.PLAN:
                     self._after_planner(workflow, node)
                     return
                 if node.role == WorkNodeRole.WORKER:
@@ -2340,7 +2340,7 @@ class ChatFlowEngine:
         # terminated).
         workflow.add_node(
             WorkFlowNode(
-                step_kind=StepKind.LLM_CALL,
+                step_kind=StepKind.DRAFT,
                 parent_ids=[judge_pre_node.id],
                 input_messages=list(context_wire),
                 model_override=resolved_model,
@@ -2405,7 +2405,7 @@ class ChatFlowEngine:
         except PlannerParseError as exc:
             planner_count = sum(
                 1 for n in workflow.nodes.values()
-                if n.role == WorkNodeRole.PLANNER
+                if n.role == WorkNodeRole.PLAN
             )
             if planner_count < 2:
                 self._spawn_planner(
@@ -2455,7 +2455,7 @@ class ChatFlowEngine:
                     f"registered tool. Available tools: {known_repr}. "
                     "Either pick an actual tool name (or leave "
                     "tool_name null so the worker chooses at run time), "
-                    'or change step_kind to "llm_call" if the task '
+                    'or change step_kind to "draft" if the task '
                     "does not require a specific tool."
                 )
                 if (
@@ -2724,7 +2724,7 @@ class ChatFlowEngine:
         node's ``input_messages`` so it reads the fresh trio.
         """
         for child in workflow.nodes.values():
-            if child.step_kind != StepKind.SUB_AGENT_DELEGATION:
+            if child.step_kind != StepKind.DELEGATE:
                 continue
             if finished_parent.id not in child.parent_ids:
                 continue
@@ -2737,7 +2737,7 @@ class ChatFlowEngine:
                 workflow.nodes[pid]
                 for pid in child.parent_ids
                 if workflow.nodes.get(pid) is not None
-                and workflow.nodes[pid].step_kind == StepKind.SUB_AGENT_DELEGATION
+                and workflow.nodes[pid].step_kind == StepKind.DELEGATE
             ]
             if not delegation_parents:
                 continue
@@ -2903,7 +2903,7 @@ class ChatFlowEngine:
             if original is None:
                 continue
             if (
-                original.step_kind == StepKind.LLM_CALL
+                original.step_kind == StepKind.DRAFT
                 and original.role == WorkNodeRole.WORKER
             ):
                 atomic = _atomic_brief_for_worker(workflow, original)
@@ -2924,7 +2924,7 @@ class ChatFlowEngine:
                     redo_source_id=original.id,
                 )
                 clones.append(clone)
-            elif original.step_kind == StepKind.SUB_AGENT_DELEGATION:
+            elif original.step_kind == StepKind.DELEGATE:
                 # Reconstruct a SubTask from the delegation's trio and
                 # append the judge's critique to its description so the
                 # fresh sub-WorkFlow's planner sees what to fix.
@@ -2950,7 +2950,7 @@ class ChatFlowEngine:
                     workflow, subtask
                 )
                 clone = WorkFlowNode(
-                    step_kind=StepKind.SUB_AGENT_DELEGATION,
+                    step_kind=StepKind.DELEGATE,
                     parent_ids=[judge_post_node.id],
                     sub_workflow=sub_workflow,
                     description=EditableText.by_agent(desc + critique_suffix),
@@ -3753,7 +3753,7 @@ def _decompose_group_planner_judge(
             break
         if (
             ancestor.step_kind == StepKind.JUDGE_CALL
-            and ancestor.role == WorkNodeRole.PLANNER_JUDGE
+            and ancestor.role == WorkNodeRole.PLAN_JUDGE
         ):
             return ancestor
         cursor = ancestor.parent_ids[0] if ancestor.parent_ids else None
@@ -3768,7 +3768,7 @@ def _decompose_group_members(
     that planner_judge."""
     out: list[WorkFlowNode] = []
     for n in workflow.nodes.values():
-        if n.step_kind != StepKind.SUB_AGENT_DELEGATION:
+        if n.step_kind != StepKind.DELEGATE:
             continue
         if planner_judge_id in workflow.ancestors(n.id):
             out.append(n)
@@ -4002,7 +4002,7 @@ def _format_redo_aggregation(
         summary_parts.append(f"{header}\n{label}\n{body}")
 
         kind_desc = (
-            "worker" if surviving.step_kind == StepKind.LLM_CALL
+            "worker" if surviving.step_kind == StepKind.DRAFT
             else "delegation"
         )
         catalog_parts.append(
@@ -4088,7 +4088,7 @@ def _compose_retry_halt_message(
             else ""
         ) or surviving.id
 
-        if surviving.step_kind == StepKind.SUB_AGENT_DELEGATION and surviving.sub_workflow is not None:
+        if surviving.step_kind == StepKind.DELEGATE and surviving.sub_workflow is not None:
             status, _body = _classify_sub_outcome(surviving.sub_workflow)
         else:
             status, _body = _redo_clone_classification(surviving)
@@ -4110,7 +4110,7 @@ def _redo_clone_classification(m: WorkFlowNode) -> tuple[str, str]:
     a worker-specific ``ok`` / ``worker_failed`` / ``empty`` for LLM
     clones.
     """
-    if m.step_kind == StepKind.LLM_CALL:
+    if m.step_kind == StepKind.DRAFT:
         if m.status == NodeStatus.SUCCEEDED and m.output_message is not None:
             return ("ok", m.output_message.content)
         if m.status == NodeStatus.FAILED:
@@ -4119,7 +4119,7 @@ def _redo_clone_classification(m: WorkFlowNode) -> tuple[str, str]:
                 f"worker raised: {m.error or 'unknown error'}",
             )
         return ("empty", "(worker produced no output)")
-    if m.step_kind == StepKind.SUB_AGENT_DELEGATION and m.sub_workflow is not None:
+    if m.step_kind == StepKind.DELEGATE and m.sub_workflow is not None:
         return _classify_sub_outcome(m.sub_workflow)
     return ("empty", "(clone produced no output)")
 
@@ -4260,7 +4260,7 @@ def _classify_sub_outcome(sub: WorkFlow) -> tuple[str, str]:
     # 2. Worker crashed
     for n in sub.nodes.values():
         if (
-            n.step_kind == StepKind.LLM_CALL
+            n.step_kind == StepKind.DRAFT
             and n.role == WorkNodeRole.WORKER
             and n.status == NodeStatus.FAILED
         ):
@@ -4310,7 +4310,7 @@ def _classify_sub_outcome(sub: WorkFlow) -> tuple[str, str]:
 def _latest_worker_output(sub: WorkFlow) -> str:
     """Return the most-recent llm_call output's content, or empty."""
     for n in reversed(list(sub.nodes.values())):
-        if n.step_kind == StepKind.LLM_CALL and n.output_message is not None:
+        if n.step_kind == StepKind.DRAFT and n.output_message is not None:
             return n.output_message.content
     return ""
 
@@ -4370,7 +4370,7 @@ def _format_layer_notes(notes: list) -> str:
     skip the section). Otherwise one line per note, prefixed with the
     ``author_node_id`` so the judge can target redo_targets directly:
 
-        [019d8eaa role=planner kind=node_succeeded]
+        [019d8eaa role=plan kind=node_succeeded]
           plan: decompose 4 — bio_a, bio_b, bio_c (+1 more)
     """
     if not notes:
@@ -4397,9 +4397,9 @@ def _format_redo_eligible(workflow: WorkFlow) -> str:
     lines: list[str] = []
     for n in workflow.nodes.values():
         desc = (n.description.text if n.description else "").strip() or "(no description)"
-        if n.step_kind == StepKind.LLM_CALL and n.role == WorkNodeRole.WORKER:
+        if n.step_kind == StepKind.DRAFT and n.role == WorkNodeRole.WORKER:
             lines.append(f"{n.id}: worker llm_call — {desc}")
-        elif n.step_kind == StepKind.SUB_AGENT_DELEGATION:
+        elif n.step_kind == StepKind.DELEGATE:
             lines.append(f"{n.id}: sub_agent_delegation — {desc}")
     return "\n".join(lines) if lines else "(none — do not request retry with redo_targets; prefer fail)"
 
@@ -4465,8 +4465,8 @@ def _terminal_llm_call(workflow: WorkFlow) -> WorkFlowNode | None:
     llm_calls = [
         n
         for n in workflow.nodes.values()
-        if n.step_kind == StepKind.LLM_CALL
-        and n.role != WorkNodeRole.PLANNER
+        if n.step_kind == StepKind.DRAFT
+        and n.role != WorkNodeRole.PLAN
     ]
     if not llm_calls:
         return None

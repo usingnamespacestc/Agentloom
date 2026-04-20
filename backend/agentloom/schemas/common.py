@@ -56,17 +56,17 @@ class NodeStatus(str, Enum):
 class StepKind(str, Enum):
     """Kind of work a WorkFlowNode does."""
 
-    LLM_CALL = "llm_call"
+    DRAFT = "draft"
     TOOL_CALL = "tool_call"
     JUDGE_CALL = "judge_call"  # pre / during / post — see §3.5
-    SUB_AGENT_DELEGATION = "sub_agent_delegation"
+    DELEGATE = "delegate"
     #: Context compaction — a single LLM call that summarizes an upstream
     #: message sequence into a :class:`CompactSnapshot`, which descendants
     #: use in place of the full ancestor trail. Auto-inserted by the
-    #: engine (Tier 1) when a pending llm_call's estimated context exceeds
+    #: engine (Tier 1) when a pending draft's estimated context exceeds
     #: the configured threshold; explicitly placed by users in ChatFlow
     #: (Tier 2). See compact design in devlog 2026-04-18 夜.
-    COMPACT = "compact"
+    COMPRESS = "compress"
     #: Branch merge — a single LLM call that synthesizes two ChatNode
     #: branches into one follow-up reply, recorded as a
     #: :class:`MergeSnapshot` on the resulting multi-parent ChatNode.
@@ -117,9 +117,9 @@ class WorkNodeRole(str, Enum):
     """
 
     PRE_JUDGE = "pre_judge"          # judge_call — frame the task, decide feasibility
-    PLANNER = "planner"              # llm_call — atomic-or-decompose decision
-    PLANNER_JUDGE = "planner_judge"  # judge_call — review the plan, debate
-    WORKER = "worker"                # llm_call OR tool_call — execute atomic task
+    PLAN = "plan"                    # draft — atomic-or-decompose decision
+    PLAN_JUDGE = "plan_judge"        # judge_call — review the plan, debate
+    WORKER = "worker"                # draft OR tool_call — execute atomic task
     WORKER_JUDGE = "worker_judge"    # judge_call — review the worker's draft, debate
     POST_JUDGE = "post_judge"        # judge_call — verify success, roll up children, handoff
 

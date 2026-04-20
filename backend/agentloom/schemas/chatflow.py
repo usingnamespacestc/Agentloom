@@ -163,7 +163,7 @@ class ChatFlow(BaseModel):
     tags: list[str] = Field(default_factory=list)
     nodes: dict[NodeId, ChatFlowNode] = Field(default_factory=dict)
     root_ids: list[NodeId] = Field(default_factory=list)
-    #: Main turn model — used for every ``StepKind.LLM_CALL`` (draft)
+    #: Main turn model — used for every ``StepKind.DRAFT``
     #: WorkNode in this chatflow unless a node's own ``model_override``
     #: wins. Renamed from ``default_model`` in the MemoryBoard PR
     #: (2026-04-20); alembic migration 0012 rewrites the JSONB key

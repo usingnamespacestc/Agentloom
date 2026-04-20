@@ -34,7 +34,7 @@ plan:
   nodes:
     - id: "worker_root"
       parent_ids: []
-      step_kind: llm_call
+      step_kind: draft
       role: worker
       description:
         text: "产出 planner 的 atomic brief 所要求的内容。"

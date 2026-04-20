@@ -49,7 +49,7 @@ plan:
   nodes:
     - id: "compact_worker"
       parent_ids: []
-      step_kind: llm_call
+      step_kind: draft
       description:
         text: "Produce a compact summary of the supplied messages."
         provenance: pure_agent

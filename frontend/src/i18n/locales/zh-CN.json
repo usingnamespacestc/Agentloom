@@ -35,15 +35,15 @@
       "cancelled": "已取消"
     },
     "kind": {
-      "llm_call": "LLM 调用",
+      "draft": "LLM 调用",
       "tool_call": "工具调用",
       "judge_call": "评审",
-      "sub_agent_delegation": "子代理"
+      "delegate": "子代理"
     },
     "role": {
       "pre_judge": "前置评判",
-      "planner": "规划",
-      "planner_judge": "规划评判",
+      "plan": "规划",
+      "plan_judge": "规划评判",
       "worker": "执行",
       "worker_judge": "执行评判",
       "post_judge": "后置评判"
@@ -218,7 +218,7 @@
     "default_judge_model": "评审模型",
     "default_judge_model_hint": "为 pre/during/post 三种 judge 单独指定模型——在贵的主模型上跑便宜的验证器很合适。「继承」表示与草稿模型相同。",
     "default_tool_call_model": "工具回调模型",
-    "default_tool_call_model_hint": "工具结果回流后跟进的 llm_call 使用此模型。让小模型处理工具调路由，主对话保持便宜。",
+    "default_tool_call_model_hint": "工具结果回流后跟进的 draft 使用此模型。让小模型处理工具调路由，主对话保持便宜。",
     "brief_model": "简介模型（MemoryBoard）",
     "brief_model_hint": "BRIEF WorkNode 使用的模型——即引擎写入 MemoryBoard 的逐节点／整 WorkFlow 简介。该模型的上下文窗口必须不小于草稿模型。不设置即关闭 MemoryBoard 写入（零额外开销）。",
     "brief_model_disabled": "（关闭——不写 MemoryBoard）",
@@ -282,7 +282,7 @@
     "show_gen_speed": "显示生成速度",
     "show_gen_speed_hint": "显示输出 Token 每秒生成速度（completion_tokens / 秒）。",
     "show_worknode_model": "显示 WorkNode 使用模型",
-    "show_worknode_model_hint": "在每个 WorkNode 卡片上显示实际使用的模型（llm_call、judge_call、tool_call）。默认关闭，仅 llm_call 显示。"
+    "show_worknode_model_hint": "在每个 WorkNode 卡片上显示实际使用的模型（draft、judge_call、tool_call）。默认关闭，仅 draft 显示。"
   },
   "providers": {
     "title": "模型服务商",

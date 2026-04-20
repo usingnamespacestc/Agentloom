@@ -51,8 +51,8 @@ class BoardItemRow(Base):
     #: No FK for the same reason: nodes live in JSONB.
     source_node_id: Mapped[str] = mapped_column(String(64), nullable=False)
     #: Node kind label. For WorkNodes this is the :class:`StepKind`
-    #: string (``"llm_call"``, ``"tool_call"``, ``"judge_call"``,
-    #: ``"merge"``, ``"compact"``, ``"sub_agent_delegation"``). For
+    #: string (``"draft"``, ``"tool_call"``, ``"judge_call"``,
+    #: ``"merge"``, ``"compress"``, ``"delegate"``). For
     #: ChatNodes (PR 3) this is ``"chat_turn"``. ``"flow"`` tags the
     #: WorkFlow-level flow-brief produced by a ``scope=FLOW`` brief.
     source_kind: Mapped[str] = mapped_column(String(32), nullable=False)

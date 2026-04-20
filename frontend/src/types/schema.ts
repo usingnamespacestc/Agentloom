@@ -25,11 +25,13 @@ export const NODE_STATUSES = [
 export type NodeStatus = (typeof NODE_STATUSES)[number];
 
 export const STEP_KINDS = [
-  "llm_call",
+  "draft",
   "tool_call",
   "judge_call",
-  "sub_agent_delegation",
-  "compact",
+  "delegate",
+  "compress",
+  "merge",
+  "brief",
 ] as const;
 
 export type StepKind = (typeof STEP_KINDS)[number];
@@ -42,8 +44,8 @@ export type JudgeVariant = "pre" | "during" | "post";
  */
 export const WORK_NODE_ROLES = [
   "pre_judge",
-  "planner",
-  "planner_judge",
+  "plan",
+  "plan_judge",
   "worker",
   "worker_judge",
   "post_judge",
@@ -181,7 +183,7 @@ export interface WorkFlowNode extends NodeBaseFields {
    * retries. Not user-facing. */
   model_override: ProviderModelRef | null;
 
-  // llm_call
+  // draft
   input_messages?: WireMessage[] | null;
   output_message?: WireMessage | null;
   usage?: TokenUsage | null;
@@ -192,7 +194,7 @@ export interface WorkFlowNode extends NodeBaseFields {
   tool_args?: Record<string, unknown> | null;
   tool_result?: ToolResult | null;
 
-  // sub_agent_delegation
+  // delegate
   sub_workflow?: WorkFlow | null;
 
   // judge_call (ADR-018)
@@ -200,7 +202,7 @@ export interface WorkFlowNode extends NodeBaseFields {
   judge_target_id?: NodeId | null;
   judge_verdict?: JudgeVerdict | null;
 
-  // compact (Tier 1)
+  // compress (Tier 1)
   compact_snapshot?: CompactSnapshot | null;
 }
 
@@ -227,7 +229,7 @@ export interface WorkFlow {
    * judges (``default_judge_model`` on ChatFlow is only the default
    * for *new* turns and may drift after submit). */
   judge_model_override?: ProviderModelRef | null;
-  /** Tool-call follow-up llm_call model stamped at submit time. */
+  /** Tool-call follow-up draft model stamped at submit time. */
   tool_call_model_override?: ProviderModelRef | null;
   /**
    * Set by the engine when a judge decides the WorkFlow cannot proceed
@@ -235,7 +237,7 @@ export interface WorkFlow {
    * agent's next turn (§3.5).
    */
   pending_user_prompt?: string | null;
-  /** Hard cap on planner↔planner_judge / worker↔worker_judge debate
+  /** Hard cap on plan↔plan_judge / worker↔worker_judge debate
    * rounds before forcing convergence (§3.4.5). */
   debate_round_budget?: number;
   /** Layer-local blackboard. Engine appends a one-line summary on
@@ -259,7 +261,7 @@ export interface PendingTurn {
 
 /**
  * Mirror of ``agentloom.schemas.workflow.CompactSnapshot``.
- * Populated on WorkFlowNodes with ``step_kind="compact"`` (Tier 1)
+ * Populated on WorkFlowNodes with ``step_kind="compress"`` (Tier 1)
  * and on ChatFlowNodes that serve as compact points for their
  * subtree (Tier 2). ``summary`` empty means the snapshot is stubbed
  * but the compact worker hasn't finished yet.
@@ -355,9 +357,9 @@ export interface ChatFlow {
    * Pydantic side. */
   draft_model: ProviderModelRef | null;
   /** Per-call-type overrides of ``draft_model``. Judge calls use
-   * ``default_judge_model`` when set; tool-call follow-up llm_calls use
+   * ``default_judge_model`` when set; tool-call follow-up drafts use
    * ``default_tool_call_model``. ``null`` means "fall back to the main
-   * turn model" — same model as the user's primary llm_call. */
+   * turn model" — same model as the user's primary draft. */
   default_judge_model: ProviderModelRef | null;
   default_tool_call_model: ProviderModelRef | null;
   /** MemoryBoard brief model pin. When set, BRIEF WorkNodes (the
@@ -373,7 +375,7 @@ export interface ChatFlow {
   judge_retry_budget: number;
   /**
    * Planner-grounding fuse. Halts this ChatFlow (each recursive
-   * sub_agent_delegation level independently) when the fraction of
+   * delegate level independently) when the fraction of
    * completed ``tool_call`` leaves drops below ``min_ground_ratio``
    * after ``ground_ratio_grace_nodes`` leaves have accumulated. ``null``
    * disables the check. Default 5% / 20. See backend §5.4.
@@ -388,7 +390,7 @@ export interface ChatFlow {
    */
   disabled_tool_names: string[];
   /**
-   * Tier 1 pre-llm_call auto-compact threshold: when the pending
+   * Tier 1 pre-draft auto-compact threshold: when the pending
    * message-list footprint crosses this fraction of the target
    * model's context window, the engine inserts a compact WorkNode
    * before the call. ``null`` disables Tier 1 entirely. Default 0.7.

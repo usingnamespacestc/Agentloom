@@ -396,7 +396,7 @@ def _parent_is_fresh_compact(workflow: WorkFlow, node: WorkFlowNode) -> bool:
     for pid in node.parent_ids:
         parent = workflow.get(pid)
         if (
-            parent.step_kind == StepKind.COMPACT
+            parent.step_kind == StepKind.COMPRESS
             and parent.compact_snapshot is not None
             and parent.compact_snapshot.summary
         ):
@@ -494,7 +494,7 @@ def _render_source_output_for_brief(source: WorkFlowNode) -> str:
             return "(no tool_result captured)"
         err = " [error]" if tr.is_error else ""
         return f"{tr.content or ''}{err}".strip() or "(empty tool result)"
-    if source.step_kind == StepKind.COMPACT and source.compact_snapshot is not None:
+    if source.step_kind == StepKind.COMPRESS and source.compact_snapshot is not None:
         return source.compact_snapshot.summary or "(empty compact snapshot)"
     if source.step_kind == StepKind.JUDGE_CALL and source.judge_verdict is not None:
         # The raw verdict is structured JSON; the textual ``output_message``
@@ -880,15 +880,15 @@ class WorkflowEngine:
         )
 
         try:
-            if node.step_kind == StepKind.LLM_CALL:
+            if node.step_kind == StepKind.DRAFT:
                 await self._run_llm_call(workflow, node)
             elif node.step_kind == StepKind.TOOL_CALL:
                 await self._run_tool_call(workflow, node)
             elif node.step_kind == StepKind.JUDGE_CALL:
                 await self._run_judge_call(workflow, node)
-            elif node.step_kind == StepKind.SUB_AGENT_DELEGATION:
+            elif node.step_kind == StepKind.DELEGATE:
                 await self._run_sub_agent_delegation(workflow, node)
-            elif node.step_kind == StepKind.COMPACT:
+            elif node.step_kind == StepKind.COMPRESS:
                 await self._run_compact(workflow, node)
             elif node.step_kind == StepKind.BRIEF:
                 await self._run_brief(workflow, node)
@@ -951,7 +951,7 @@ class WorkflowEngine:
                 if (
                     self._board_writer is not None
                     and node.step_kind != StepKind.BRIEF
-                    and node.step_kind != StepKind.SUB_AGENT_DELEGATION
+                    and node.step_kind != StepKind.DELEGATE
                 ):
                     self._spawn_node_brief(workflow, node)
             elif node.status == NodeStatus.FAILED:
@@ -1023,7 +1023,7 @@ class WorkflowEngine:
         # Re-triggering here would loop indefinitely on pathologically
         # long preserved tails.
         if (
-            node.step_kind != StepKind.COMPACT
+            node.step_kind != StepKind.COMPRESS
             and node.input_messages is None
             and not _parent_is_fresh_compact(workflow, node)
             and self._needs_compact(messages, ref)
@@ -1093,7 +1093,7 @@ class WorkflowEngine:
         # has to heuristically unwrap). Planners are pure "decide how to
         # decompose" nodes — they never actually call a tool — so tools
         # can safely be suppressed on this path.
-        is_planner = node.role == WorkNodeRole.PLANNER
+        is_planner = node.role == WorkNodeRole.PLAN
         planner_schema: dict[str, Any] | None = (
             RecursivePlannerOutput.model_json_schema() if is_planner else None
         )
@@ -1160,7 +1160,7 @@ class WorkflowEngine:
         - Serializes the remaining head into the compact worker's
           ``messages_to_compact`` param.
         - Instantiates :file:`compact.yaml` to borrow the rendered
-          prompt, then builds a single ``StepKind.COMPACT`` node with
+          prompt, then builds a single ``StepKind.COMPRESS`` node with
           that prompt and a pre-populated snapshot holding the
           preserved tail + accounting.
         - ``node.parent_ids`` become ``[compact.id]``; the compact
@@ -1211,7 +1211,7 @@ class WorkflowEngine:
 
         compact_model = self._effective_compact_model or node.model_override or ref
         compact_node = WorkFlowNode(
-            step_kind=StepKind.COMPACT,
+            step_kind=StepKind.COMPRESS,
             parent_ids=list(node.parent_ids),
             description=_compact_description_text(),
             input_messages=prompt,
@@ -2008,13 +2008,13 @@ def _summarize_for_shared_note(node: WorkFlowNode) -> str | None:
     """
     if node.step_kind == StepKind.JUDGE_CALL and node.judge_verdict is not None:
         return _summarize_judge(node)
-    if node.step_kind == StepKind.LLM_CALL and node.output_message is not None:
+    if node.step_kind == StepKind.DRAFT and node.output_message is not None:
         return _summarize_llm(node)
     if node.step_kind == StepKind.TOOL_CALL and node.tool_result is not None:
         return _truncate_one_line(
             f"{node.tool_name or 'tool'} → {node.tool_result.content or '(empty)'}"
         )
-    if node.step_kind == StepKind.SUB_AGENT_DELEGATION and node.sub_workflow is not None:
+    if node.step_kind == StepKind.DELEGATE and node.sub_workflow is not None:
         body = _sub_workflow_summary(node)
         return _truncate_one_line(body) if body else None
     return None
@@ -2050,7 +2050,7 @@ def _summarize_judge(node: WorkFlowNode) -> str:
 def _summarize_llm(node: WorkFlowNode) -> str:
     assert node.output_message is not None  # caller guards
     content = node.output_message.content
-    if node.role == WorkNodeRole.PLANNER:
+    if node.role == WorkNodeRole.PLAN:
         try:
             plan = parse_recursive_planner_output(content)
         except PlannerParseError:
@@ -2118,7 +2118,7 @@ def _sub_workflow_summary(node: WorkFlowNode) -> str:
             return v.user_message
         break
     for n in reversed(list(sub.nodes.values())):
-        if n.step_kind == StepKind.LLM_CALL and n.output_message is not None:
+        if n.step_kind == StepKind.DRAFT and n.output_message is not None:
             return n.output_message.content
     return ""
 
@@ -2169,7 +2169,7 @@ def _assert_tool_loop_budget(
     llm_ancestors = sum(
         1
         for nid in ancestors
-        if workflow.get(nid).step_kind == StepKind.LLM_CALL
+        if workflow.get(nid).step_kind == StepKind.DRAFT
     )
     if llm_ancestors >= effective_budget:
         raise RuntimeError(
@@ -2197,7 +2197,7 @@ def _compute_ground_ratio(workflow: WorkFlow) -> tuple[int, int]:
     leaves = 0
     tools = 0
     for node in workflow.nodes.values():
-        if node.step_kind == StepKind.SUB_AGENT_DELEGATION:
+        if node.step_kind == StepKind.DELEGATE:
             continue
         # MemoryBoard brief nodes are off-axis: they don't represent
         # real work toward the user's request and must not count as
@@ -2289,7 +2289,7 @@ def _spawn_tool_loop_children(workflow: WorkFlow, parent_llm: WorkFlowNode) -> N
     # WorkFlow.tool_call_model_override). Falls back to the parent
     # llm_call's pin so direct-mode chats keep their existing behavior.
     follow_up = WorkFlowNode(
-        step_kind=StepKind.LLM_CALL,
+        step_kind=StepKind.DRAFT,
         parent_ids=tool_call_ids,
         tool_constraints=parent_llm.tool_constraints,
         model_override=workflow.tool_call_model_override or parent_llm.model_override,
@@ -2403,7 +2403,7 @@ def _build_tagged_context_from_ancestors(
     for i, aid in enumerate(ancestors):
         a = workflow.get(aid)
         if (
-            a.step_kind == StepKind.COMPACT
+            a.step_kind == StepKind.COMPRESS
             and a.compact_snapshot is not None
             and a.compact_snapshot.summary
         ):
@@ -2434,7 +2434,7 @@ def _build_tagged_context_from_ancestors(
         seed_idx: int | None = None
         for i, aid in enumerate(ancestors):
             a = workflow.get(aid)
-            if a.step_kind == StepKind.LLM_CALL and a.input_messages:
+            if a.step_kind == StepKind.DRAFT and a.input_messages:
                 seed_idx = i
         if seed_idx is not None:
             seed_owner = workflow.get(ancestors[seed_idx])
@@ -2448,7 +2448,7 @@ def _build_tagged_context_from_ancestors(
 
     for aid in ancestors[start_idx:]:
         a = workflow.get(aid)
-        if a.step_kind == StepKind.LLM_CALL:
+        if a.step_kind == StepKind.DRAFT:
             if a.output_message is not None:
                 for m in _wire_to_provider([a.output_message]):
                     tagged.append((a.id, m))
