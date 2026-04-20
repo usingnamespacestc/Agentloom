@@ -152,9 +152,10 @@ export interface ChatFlowStoreState {
     title?: string | null;
     description?: string | null;
     tags?: string[];
-    default_model?: ProviderModelRef | null;
+    draft_model?: ProviderModelRef | null;
     default_judge_model?: ProviderModelRef | null;
     default_tool_call_model?: ProviderModelRef | null;
+    brief_model?: ProviderModelRef | null;
     default_execution_mode?: ExecutionMode;
     judge_retry_budget?: number;
     min_ground_ratio?: number | null;
@@ -546,11 +547,12 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     if ("title" in patch) updated.title = patch.title ?? null;
     if ("description" in patch) updated.description = patch.description ?? null;
     if ("tags" in patch) updated.tags = patch.tags ?? [];
-    if ("default_model" in patch) updated.default_model = patch.default_model ?? null;
+    if ("draft_model" in patch) updated.draft_model = patch.draft_model ?? null;
     if ("default_judge_model" in patch)
       updated.default_judge_model = patch.default_judge_model ?? null;
     if ("default_tool_call_model" in patch)
       updated.default_tool_call_model = patch.default_tool_call_model ?? null;
+    if ("brief_model" in patch) updated.brief_model = patch.brief_model ?? null;
     if ("default_execution_mode" in patch && patch.default_execution_mode !== undefined) {
       updated.default_execution_mode = patch.default_execution_mode;
     }

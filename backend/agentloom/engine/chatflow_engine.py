@@ -129,7 +129,7 @@ def _chat_inherited_model(
         if ancestor.resolved_model is not None:
             return ancestor.resolved_model
         cursor = ancestor.parent_ids[0] if ancestor.parent_ids else None
-    return chatflow.default_model
+    return chatflow.draft_model
 
 
 #: Optional persistence hook. When supplied, the engine calls it with
@@ -227,6 +227,67 @@ class ChatFlowRuntime:
             await asyncio.gather(*pending, return_exceptions=True)
 
 
+def _make_board_writer(
+    tool_context: ToolContext | None,
+) -> Callable[..., Awaitable[None]]:
+    """Build the :data:`BoardWriter` closure that :meth:`WorkflowEngine.
+    _run_brief` hands its distilled descriptions to.
+
+    Opens a fresh session per write via ``get_session_maker()`` — same
+    pattern used by ``GetNodeContextTool`` — so the closure doesn't
+    have to thread a session through the engine's signatures, and
+    two concurrent briefs don't deadlock on a shared connection.
+    Workspace scoping comes from *tool_context*; when the caller
+    didn't supply one (pure unit tests), the writer falls back to
+    ``DEFAULT_WORKSPACE_ID`` so the repo's ADR-015 filter has
+    something coherent to match.
+    """
+    from agentloom.db.base import get_session_maker
+    from agentloom.db.models.tenancy import DEFAULT_WORKSPACE_ID
+    from agentloom.db.repositories.board_item import BoardItemRepository
+
+    workspace_id = (
+        tool_context.workspace_id if tool_context is not None else DEFAULT_WORKSPACE_ID
+    )
+
+    async def write(
+        *,
+        chatflow_id: str | None,
+        workflow_id: str,
+        source_node_id: str,
+        source_kind: str,
+        scope: str,
+        description: str,
+        fallback: bool,
+    ) -> None:
+        if chatflow_id is None:
+            # Without a chatflow id we can't satisfy the board_items
+            # NOT NULL FK; the engine still keeps the description on
+            # the WorkNode so consumers in-memory see the brief text.
+            return
+        try:
+            async with get_session_maker()() as session:
+                repo = BoardItemRepository(session, workspace_id=workspace_id)
+                await repo.upsert_by_source(
+                    chatflow_id=chatflow_id,
+                    workflow_id=workflow_id,
+                    source_node_id=source_node_id,
+                    source_kind=source_kind,
+                    scope=scope,
+                    description=description,
+                    fallback=fallback,
+                )
+                await session.commit()
+        except Exception:  # noqa: BLE001 — board is best-effort
+            log.exception(
+                "BoardItemRepository upsert failed for source=%s scope=%s",
+                source_node_id,
+                scope,
+            )
+
+    return write
+
+
 class ChatFlowEngine:
     """Scheduler for ChatFlow turns.
 
@@ -258,6 +319,7 @@ class ChatFlowEngine:
             tool_registry=tool_registry,
             tool_context=tool_context,
             context_window_lookup=_ctx_lookup,
+            board_writer=_make_board_writer(tool_context),
         )
         self._runtimes: dict[str, ChatFlowRuntime] = {}
         self._registry_lock = asyncio.Lock()
@@ -728,6 +790,7 @@ class ChatFlowEngine:
                 # ChatFlow turns re-read the chatflow settings on their
                 # own execute() and re-enable Tier 1 normally.
                 chatflow_compact_trigger_pct=None,
+                chatflow_id=chatflow.id,
                 disabled_tool_names=effective_disabled,
             )
         except Exception as exc:  # noqa: BLE001 — engine boundary
@@ -934,7 +997,7 @@ class ChatFlowEngine:
             # but the wire snapshots are immutable and the source_ids
             # only need to still exist when we re-enter the lock.
             merge_model_ref = (
-                model or chatflow.compact_model or chatflow.default_model
+                model or chatflow.compact_model or chatflow.draft_model
             )
             trigger_pct = (
                 chatflow.compact_trigger_pct
@@ -1102,6 +1165,7 @@ class ChatFlowEngine:
                 # would fire on a prompt that isn't shaped like a
                 # conversation (it's templated as two big text blobs).
                 chatflow_compact_trigger_pct=None,
+                chatflow_id=chatflow.id,
                 disabled_tool_names=effective_disabled,
             )
         except Exception as exc:  # noqa: BLE001 — engine boundary
@@ -1637,6 +1701,10 @@ class ChatFlowEngine:
                 or chatflow.default_tool_call_model
                 or resolved
             ),
+            # MemoryBoard brief pin (PR 1). ``None`` means "brief falls
+            # back to the source node's resolved_model"; we only stamp
+            # when the ChatFlow explicitly set a brief_model.
+            brief_model_override=chatflow.brief_model,
         )
 
         if switches.judge_pre:
@@ -1887,6 +1955,9 @@ class ChatFlowEngine:
             judge_retry_budget=parent.judge_retry_budget,
             judge_model_override=parent.judge_model_override,
             tool_call_model_override=parent.tool_call_model_override,
+            # Inherit the MemoryBoard brief pin so nested sub-WorkFlows
+            # honor the enclosing ChatFlow's brief_model.
+            brief_model_override=parent.brief_model_override,
         )
         # judge_pre is the universal entry gate; the post-node hook then
         # spawns the planner / worker chain when it votes OK.
@@ -3029,6 +3100,7 @@ class ChatFlowEngine:
                 chatflow_compact_target_pct=chatflow.compact_target_pct,
                 chatflow_compact_preserve_recent_turns=chatflow.compact_preserve_recent_turns,
                 chatflow_compact_model=chatflow.compact_model,
+                chatflow_id=chatflow.id,
                 post_node_hook=(
                     None
                     if is_compact_node

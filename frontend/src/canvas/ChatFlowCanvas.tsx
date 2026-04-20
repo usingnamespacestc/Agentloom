@@ -785,7 +785,7 @@ export function buildGraph(
         contextTokens: ctxTokens[node.id] ?? 0,
         maxContextTokens: resolveContextWindow(
           node.resolved_model,
-          chatflow.default_model,
+          chatflow.draft_model,
           contextWindowByModel,
         ),
       },

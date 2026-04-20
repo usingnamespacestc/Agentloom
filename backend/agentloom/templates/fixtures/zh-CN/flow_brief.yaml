@@ -1,0 +1,109 @@
+builtin_id: flow_brief
+name: "流简介"
+description: >
+  MemoryBoard 流简介 worker。基于 WorkFlow 的 pre-check 上游输入、
+  内部各节点的 node-brief 串联，以及 post-check 终态输出，把整条
+  WorkFlow 浓缩为一句简短的散文描述，写入该 WorkFlow
+  ``MemoryBoardItem.description``（对 delegate 而言，这句话即父层
+  读取 delegate 板块时看到的文本）。每次 WorkFlow 到终态时同步触发
+  一次。
+params_schema:
+  workflow_id:
+    type: string
+    required: true
+    description: 所在 WorkFlow 的 id。
+  workflow_description:
+    type: string
+    required: false
+    description: >
+      WorkFlow 的 trio.description 文本（它的任务设定）。
+  workflow_expected_outcome:
+    type: string
+    required: false
+    description: >
+      WorkFlow 的 trio.expected_outcome 文本（何谓"完成"）。
+  upstream_inputs:
+    type: string
+    required: false
+    description: >
+      触发本次 WorkFlow 的 pre-check 上下文——用户输入 / 上游
+      ChatNode / judge_pre 结论等。若无额外上游则留空。
+  node_briefs:
+    type: string
+    required: false
+    description: >
+      WorkFlow 内部所有参与 brief 的 WorkNode 的 node-brief 描述串联，
+      每行一条，格式为
+      ``[<node_id> | <kind>] <description>``。若 WorkFlow 在任何
+      brief 触发前就已终止，此项为空。
+  terminal_output:
+    type: string
+    required: true
+    description: >
+      WorkFlow 的终态输出——最终 llm_call / judge_post 的
+      merged_response，或 halt 时的 ``pending_user_prompt`` 文本。
+      若父层只看尾部，这就是它唯一能看到的内容。
+  terminal_state:
+    type: string
+    required: true
+    description: >
+      ``succeeded`` / ``halted`` / ``cancelled`` 之一。给出框架：
+      halt 的流简介应写"因为 X 未能完成"，而不是当作正常结束。
+plan:
+  description:
+    text: "为整条 WorkFlow 写一到两句简介。"
+    provenance: pure_agent
+  execution_mode: native_react
+  nodes:
+    - id: "flow_brief_root"
+      parent_ids: []
+      step_kind: llm_call
+      description:
+        text: "把整条 WorkFlow 的运行凝练成简短散文描述。"
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            你是 WorkFlow 级别的 MemoryBoard 总结器。任务：把一条
+            WorkFlow 的完整运行——它被要求做什么、内部节点产出了
+            什么、以什么结局收尾——改写成一句简短的散文描述，父
+            层靠它就能掌握内情，不必走进内部 DAG。
+
+            硬性规则：
+              - 只涵盖三件事：WorkFlow 的任务意图、实际产出的要点，
+                以及——若 ``terminal_state`` 为 ``halted`` 或
+                ``cancelled``——未能收尾的原因。总共一到两句。
+              - 不要列表、不要标题、不要 markdown、不要 JSON、不要
+                代码围栏。纯散文。
+              - 保留具体锚点：工具名、文件路径、数字、id、决策、
+                错误名。过程叙述一律省掉。
+              - 不要推测下游用途。
+              - 不要编造内容。若 ``node_briefs`` 为空且
+                ``terminal_output`` 是 halt 消息，就据实写 halt，
+                不要假装内部做过工作。
+              - 用中立第三人称书写。
+        - role: user
+          content: |
+            WorkFlow id：{{ workflow_id }}
+            终态：{{ terminal_state }}
+
+            描述：{{ workflow_description }}
+            预期结果：{{ workflow_expected_outcome }}
+
+            上游输入（pre-check 上下文）：
+            ---
+            {{ upstream_inputs }}
+            ---
+
+            节点简介（每节点一行）：
+            ---
+            {{ node_briefs }}
+            ---
+
+            终态输出：
+            ---
+            {{ terminal_output }}
+            ---
+
+            现在写出一到两句流简介。只输出正文——不要开场白、不要结语。
+  root_ids: ["flow_brief_root"]

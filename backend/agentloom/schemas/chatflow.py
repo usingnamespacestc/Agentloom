@@ -77,7 +77,7 @@ class PendingTurn(BaseModel):
     spawn_model: ProviderModelRef | None = None
     #: Per-kind composer overrides for this turn. ``None`` falls back
     #: through chatflow.default_judge_model / default_tool_call_model
-    #: → spawn_model → default_model. Lets the user route a single turn's
+    #: → spawn_model → draft_model. Lets the user route a single turn's
     #: judges/tool-call follow-ups to a different model than the main
     #: turn without touching ChatFlow defaults.
     judge_spawn_model: ProviderModelRef | None = None
@@ -163,15 +163,30 @@ class ChatFlow(BaseModel):
     tags: list[str] = Field(default_factory=list)
     nodes: dict[NodeId, ChatFlowNode] = Field(default_factory=dict)
     root_ids: list[NodeId] = Field(default_factory=list)
-    default_model: ProviderModelRef | None = None
-    #: Per-call-type overrides of ``default_model``. When set, judge
+    #: Main turn model — used for every ``StepKind.LLM_CALL`` (draft)
+    #: WorkNode in this chatflow unless a node's own ``model_override``
+    #: wins. Renamed from ``default_model`` in the MemoryBoard PR
+    #: (2026-04-20); alembic migration 0012 rewrites the JSONB key
+    #: inside persisted chatflow payloads, and ``_legacy_default_model``
+    #: below lets in-flight JSON deserialization accept either name.
+    draft_model: ProviderModelRef | None = None
+    #: Per-call-type overrides of ``draft_model``. When set, judge
     #: calls (pre/during/post) use ``default_judge_model``; tool-call
     #: follow-up LLM calls use ``default_tool_call_model``. Falls back
-    #: to ``default_model`` when ``None``. Lets a chatflow run a cheap
+    #: to ``draft_model`` when ``None``. Lets a chatflow run a cheap
     #: model for verification/tool-routing while keeping a strong model
     #: for the main LLM step.
     default_judge_model: ProviderModelRef | None = None
     default_tool_call_model: ProviderModelRef | None = None
+    #: Optional pin for ``StepKind.BRIEF`` WorkNodes (MemoryBoard
+    #: producer — see design doc 2026-04-20). When set, every brief
+    #: call in this chatflow's WorkFlows runs on this model regardless
+    #: of the main turn model. ``None`` → brief runs fall back to the
+    #: per-WorkNode ``model_override`` → source node's resolved_model.
+    #: Invariant (enforced below): the brief_model's context_window
+    #: must be at least as large as draft_model's, so a flow-brief
+    #: summarizing a long draft context never silently truncates.
+    brief_model: ProviderModelRef | None = None
     #: ReAct inner-loop cap shared by every WorkFlow in this ChatFlow.
     #: ``None`` means unlimited. Per-WorkFlow and per-WorkNode overrides
     #: are planned. See §5.4 FR-EX-6.
@@ -263,6 +278,58 @@ class ChatFlow(BaseModel):
     chatnode_compact_target_pct: float = 0.4
     sticky_notes: dict[str, StickyNote] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utcnow)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_default_model(cls, data: Any) -> Any:
+        """Backwards-compat: accept the pre-MemoryBoard ``default_model``
+        JSON key as an alias for ``draft_model``. Migration 0012 rewrites
+        persisted payloads, but in-flight API calls and older test
+        fixtures may still carry the old name; we translate on ingest so
+        a mixed runtime (old code paths writing, new code reading) never
+        loses the field. When both are present, ``draft_model`` wins —
+        the new key is the authoritative one going forward.
+        """
+        if isinstance(data, dict):
+            if "default_model" in data and "draft_model" not in data:
+                data = {**data, "draft_model": data["default_model"]}
+            # Tolerate both being present: drop the legacy so the
+            # validator doesn't complain about an unknown key. We
+            # deliberately keep this silent — logging would spam every
+            # API hit during the migration window.
+            if "default_model" in data and "draft_model" in data:
+                data = {k: v for k, v in data.items() if k != "default_model"}
+        return data
+
+    @model_validator(mode="after")
+    def _check_brief_model_context_window(self) -> "ChatFlow":
+        """``brief_model``'s context window must be ≥ ``draft_model``'s.
+
+        Reason: a flow-brief must fit the full upstream context of any
+        draft node it summarizes — routing briefs to a smaller window
+        would silently truncate. Lookup goes through the in-memory
+        ``provider_context_cache``; if either model is unknown to the
+        cache (lookup returns None) the validator passes silently so
+        an unseeded test fixture or a fresh process doesn't error on
+        every construction. The runtime cache gets populated by the
+        API lifespan hook once a provider repository is available.
+        """
+        if self.brief_model is None or self.draft_model is None:
+            return self
+        try:
+            from agentloom.engine.provider_context_cache import lookup
+        except Exception:  # pragma: no cover — defensive for unusual import orders
+            return self
+        brief_cw = lookup(self.brief_model)
+        draft_cw = lookup(self.draft_model)
+        if brief_cw is None or draft_cw is None:
+            return self
+        if brief_cw < draft_cw:
+            raise ValueError(
+                "brief_model's context window must be >= draft_model's "
+                f"(brief={brief_cw} tokens, draft={draft_cw} tokens)"
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_compact_invariants(self) -> "ChatFlow":

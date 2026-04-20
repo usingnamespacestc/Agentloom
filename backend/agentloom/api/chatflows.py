@@ -62,7 +62,7 @@ def _provider_repo(session: AsyncSession) -> ProviderRepository:
     return ProviderRepository(session, workspace_id=DEFAULT_WORKSPACE_ID)
 
 
-async def _resolve_default_model(
+async def _resolve_draft_model(
     prov_repo: ProviderRepository,
     current: ProviderModelRef | None,
 ) -> ProviderModelRef | None:
@@ -273,7 +273,7 @@ async def create_chatflow(
 ) -> CreateChatFlowResponse:
     chat = make_chatflow(title=(body.title if body else None))
     prov_repo = _provider_repo(session)
-    chat.default_model = await _resolve_default_model(prov_repo, None)
+    chat.draft_model = await _resolve_draft_model(prov_repo, None)
     # Pre-fill disabled_tool_names from the workspace tool_states so
     # tools marked ``available`` or ``disabled`` stay unchecked in the
     # ChatFlow settings picker. ``default_allow`` tools are omitted so
@@ -311,10 +311,10 @@ async def get_chatflow(
     # Lazy-rehydrate stale default (provider/model may have been
     # deleted since the chatflow was last opened).
     prov_repo = _provider_repo(session)
-    new_model = await _resolve_default_model(prov_repo, chat.default_model)
-    if new_model != chat.default_model:
-        chat.default_model = new_model
-        await repo.patch_metadata(chatflow_id, default_model=new_model)
+    new_model = await _resolve_draft_model(prov_repo, chat.draft_model)
+    if new_model != chat.draft_model:
+        chat.draft_model = new_model
+        await repo.patch_metadata(chatflow_id, draft_model=new_model)
         await session.commit()
     return chat.model_dump(mode="json")
 
@@ -344,7 +344,8 @@ class PatchChatFlowRequest(BaseModel):
     title: str | None = None
     description: str | None = None
     tags: list[str] | None = None
-    default_model: ProviderModelRef | None = None
+    draft_model: ProviderModelRef | None = None
+    brief_model: ProviderModelRef | None = None
     default_judge_model: ProviderModelRef | None = None
     default_tool_call_model: ProviderModelRef | None = None
     default_execution_mode: ExecutionMode | None = None
@@ -377,8 +378,10 @@ async def patch_chatflow(
         kwargs["description"] = body.description
     if "tags" in provided:
         kwargs["tags"] = body.tags
-    if "default_model" in provided:
-        kwargs["default_model"] = body.default_model
+    if "draft_model" in provided:
+        kwargs["draft_model"] = body.draft_model
+    if "brief_model" in provided:
+        kwargs["brief_model"] = body.brief_model
     if "default_judge_model" in provided:
         kwargs["default_judge_model"] = body.default_judge_model
     if "default_tool_call_model" in provided:
@@ -424,8 +427,10 @@ async def patch_chatflow(
             rt_chat.description = body.description
         if "tags" in provided:
             rt_chat.tags = body.tags or []
-        if "default_model" in provided:
-            rt_chat.default_model = body.default_model
+        if "draft_model" in provided:
+            rt_chat.draft_model = body.draft_model
+        if "brief_model" in provided:
+            rt_chat.brief_model = body.brief_model
         if "default_judge_model" in provided:
             rt_chat.default_judge_model = body.default_judge_model
         if "default_tool_call_model" in provided:

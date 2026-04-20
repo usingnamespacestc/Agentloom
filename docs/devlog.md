@@ -1403,4 +1403,71 @@ while current is not None:
 - 合并预览：点击 pending 节点显示"如果和 X 合并会产生什么"的 diff 视图
 - Merge 触发自动 title_gen：和 compact 一样，让 title 能体现 merge 后的主题
 
+---
+
+## 第 N 轮 — MemoryBoard 简介基础（PR 1/3）— 2026-04-20
+
+把 MemoryBoard 系列的地基铺上。三 PR 路线（见 `docs/design-memoryboard-brief.md`）：本 PR 只落「WorkNode 完成后自动生成简介 + 写入 `board_items` 表 + ChatFlow 层 brief_model 配置」，PR 2/3 留给读路径 skill 和 ChatBoard 继承。
+
+### 核心落点
+
+- **Schema**：
+  - `StepKind.BRIEF`（新）+ `NodeScope { NODE, FLOW }`（新）。BRIEF WorkNode 必须带 `scope`，其它 kind 必须没有。
+  - `WorkFlow.brief_model_override: ProviderModelRef | None`（新，与 `judge_model_override` / `tool_call_model_override` 并列）。
+  - `ChatFlow.default_model` → `ChatFlow.draft_model`（重命名）；旧 payload 通过 `@model_validator(mode="before")` 平滑迁移。
+  - `ChatFlow.brief_model: ProviderModelRef | None`（新）。`@model_validator(mode="after")` 校验 `brief_model.context_window >= draft_model.context_window`（走 `provider_context_cache`）；cache miss 时静默放行，避免启动失败。
+- **持久化**：
+  - `board_items` 表（alembic 0012）：`id / workspace_id / chatflow_id / workflow_id / source_node_id / source_kind / scope / description / produced_tags / consumed_tags / fallback / forget_counter / created_at / updated_at`；唯一键 `(workspace_id, source_node_id)` 让重跑 idempotent。
+  - `BoardItemRepository`（workspace-scoped，ADR-015）+ `upsert_by_source` 一把事务。
+- **引擎 `_run_brief`**：
+  - tool_call 源走确定性 code template（`tool_call <name>[ error]: <first line>`），不进 provider——ReAct 循环里每个 shell 输出都跑一次 LLM 会烧钱。
+  - 其它 kind 用 `node_brief.yaml` / `flow_brief.yaml` 拼 prompt，走 LLM；失败（provider 挂、reply 空）落到同一个 code template，`fallback=True` 打标。
+  - brief 本身永远 SUCCEEDED——从不把自己的失败抛给 source WorkNode。
+- **自动挂载**：
+  - 每个非 BRIEF、非 SUB_AGENT_DELEGATION 的 WorkNode 进 SUCCEEDED 后，引擎自动挂一个 `scope=NODE` 的 brief，`parent_ids=[source.id]`。
+  - WorkFlow 终态（succeeded / halted / cancelled 任意一种）同步挂一个 `scope=FLOW` 的 brief，parents 是所有终态 main-axis 节点；`pending_user_prompt` 文本进 `terminal_output` 让 halt 也有 brief。
+  - 递归守卫：brief 不再被 brief；delegate 不生 node-brief（它的 sub-WorkFlow 自己有 flow-brief）。
+- **Opt-in 闸门**：两条挂载路径都要求 `workflow.brief_model_override is not None`。用户不设 `brief_model` 就等于关闭 MemoryBoard 写入——全盘零额外开销。这是为了不破坏现有两百多条 scripted-provider 测试——它们按 reply 数精确计数，如果默认开启 brief 会全线爆。设计文档里 brief_model 本来就是「pin」，这里把「未 pin 视为关闭」明确写进引擎。
+- **Fixtures**：`templates/fixtures/{en-US,zh-CN}/{node_brief,flow_brief}.yaml` 各一份。两份 yaml 各是单节点 ReAct plan，system prompt 约束「1-2 句散文、不要 markdown、保留 tool name / file path / id / error name 这类具体锚点」。
+- **ChatFlowEngine 胶水**：
+  - `_make_board_writer(tool_context)` 返回一个 closure：拿 `get_session_maker()` 开会话，工作区从 `ToolContext` 继承（缺省走 `DEFAULT_WORKSPACE_ID`），调 `upsert_by_source` 然后 commit；全程捕获异常写 `log.exception`，确保 brief 写失败不影响主流程。
+  - 每个 `self._inner.execute(...)` 站点都传 `chatflow_id=chatflow.id`；writer 在 `chatflow_id is None` 时静默跳过（`_precompact_branch_for_merge` 那个站点没有 chatflow 上下文，就走这条路）。
+
+### 前端
+
+- `types/schema.ts`：`default_model` → `draft_model`，新增 `brief_model`。
+- `store/chatflowStore.ts` / `lib/api.ts` / `canvas/*`：同步改名 + 新增 `brief_model` 字段。
+- `components/ChatFlowSettings.tsx`：tool_call_model 下方新增 brief_model 下拉，默认 `(disabled — no MemoryBoard)`。
+- `i18n/{en-US,zh-CN}.json`：Default model → Draft model（中文「草稿模型」）、新增 brief_model / brief_model_hint / brief_model_disabled。
+- 测试夹具（`store/chatflowStore.test.ts` / `canvas/ChatFlowCanvas.test.tsx` / `canvas/ConversationView.test.tsx`）统一换字段。
+
+### 测试
+
+后端：`tests/backend/unit/test_memoryboard_brief.py` 10 条：
+
+1. `test_brief_scope_validator` — BRIEF 必须带 scope；非 BRIEF 不得带 scope。
+2. `test_draft_model_rename` — 旧 key `default_model` 通过后仍落到 `draft_model`；双键并存时 `draft_model` 赢。
+3. `test_brief_model_context_window_invariant` — `brief_cw >= draft_cw` 通过；小于抛错；未知模型静默。
+4. `test_brief_spawn_on_success` — `brief_model_override` 开关下，单节点 workflow 跑完后有 1 个 node-brief + 1 个 flow-brief，BoardItem 写了两行。
+5. `test_brief_recursion_guard` — brief 不再挂 brief。
+6. `test_brief_tool_call_code_template` — tool_call 源 brief **零 provider 调用**，输出以 `tool_call shell:` 开头，`fallback=True`。
+7. `test_brief_llm_failure_fallback` — provider raise 时，brief 仍 SUCCEEDED，用 code template，`fallback=True`。
+8. `test_brief_flow_scope_spawn` — flow-brief 只跑一次，BoardItem 的 `source_node_id == workflow.id`、`source_kind="flow"`。
+9. `test_brief_flow_spawn_on_halt` — 预置 `pending_user_prompt` 也生 flow-brief（halt 故事最值得写入 MemoryBoard）。
+10. `test_brief_delegate_has_no_node_brief` — delegate WorkNode 不长 node-brief；外层 flow-brief 仍在。
+
+全量跑（忽略 3 份 LCA-merge stash 遗留的损坏文件 `test_citation_fallback.py` / `test_merge_context.py` / `test_chatflow_merge.py`）：**387 passed, 4 skipped**。前端 `npx vitest run`：**55 passed**。
+
+### 坑与决策
+
+- 第一次跑全量测试有 35 条失败，排查：`_make_board_writer` 因为测试里 chatflow 没落库，`board_items.chatflow_id` FK 撞红线——但 writer 自己已有 try/except 吞掉。真正的问题是**briefs 占用了 scripted-provider 的 reply 计数**，第二轮 turn 的主 llm_call 拿不到回复而 FAIL。最终方案：把 brief 挂载改成「opt-in by brief_model」，既不破坏既有测试，也没违背设计文档（brief_model 本来就是 pin 字段）。
+- alembic 迁移 0012：`board_items` 的 produced_tags / consumed_tags 列用 `JSONB().with_variant(JSON(), "sqlite")` 保证 SQLite 测试库能跑；生产跑 Postgres。
+- `_compute_ground_ratio` 显式跳过 `StepKind.BRIEF`——brief 是 off-axis 节点，不该扰动 planner-grounding fuse。
+
+### 未做 / 后续
+
+- **PR 2**：MemoryBoard 读路径——新增一个 skill/tool 让 agent 按需拉 BoardItem 描述（类似 `get_node_context` 但只读 brief）。
+- **PR 3**：ChatBoard 级联——ChatNode 向上游走时带上祖先 brief 的摘要视图，让对话压缩不必每次都走 compact。
+- Forget counter：当前 `board_items.forget_counter` 留了字段但没人写；PR 2 读路径起来之后可以接「最近被读过」计数。
+
 

@@ -349,13 +349,25 @@ export interface ChatFlow {
   tags: string[];
   nodes: Record<NodeId, ChatFlowNode>;
   root_ids: NodeId[];
-  default_model: ProviderModelRef | null;
-  /** Per-call-type overrides of ``default_model``. Judge calls use
+  /** Renamed from ``default_model`` in the MemoryBoard PR (2026-04-20).
+   * The backend migration rewrote existing rows to use the new key;
+   * any payload still carrying ``default_model`` is translated on the
+   * Pydantic side. */
+  draft_model: ProviderModelRef | null;
+  /** Per-call-type overrides of ``draft_model``. Judge calls use
    * ``default_judge_model`` when set; tool-call follow-up llm_calls use
    * ``default_tool_call_model``. ``null`` means "fall back to the main
    * turn model" — same model as the user's primary llm_call. */
   default_judge_model: ProviderModelRef | null;
   default_tool_call_model: ProviderModelRef | null;
+  /** MemoryBoard brief model pin. When set, BRIEF WorkNodes (the
+   * per-node + per-WorkFlow summaries the engine writes into the
+   * MemoryBoard) route through this model regardless of the main turn
+   * model. ``null`` disables MemoryBoard writing entirely — the
+   * engine skips brief auto-spawn so the ChatFlow is zero-cost.
+   * Invariant: ``brief_model``'s context_window must be >=
+   * ``draft_model``'s. */
+  brief_model: ProviderModelRef | null;
   default_execution_mode: ExecutionMode;
   /** Hard cap on judge_post retry rounds. ``-1`` means unlimited. */
   judge_retry_budget: number;

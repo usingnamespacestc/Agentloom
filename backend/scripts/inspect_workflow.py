@@ -135,7 +135,7 @@ def main() -> None:
     cf, kind, target = locate(args.uid, args.url.rstrip("/"))
     print(f"Resolved {args.uid[:8]}… as {kind} in ChatFlow {cf['id'][:8]}…")
     print(f"  title: {cf.get('title') or '(untitled)'}")
-    print(f"  default_model: {cf.get('default_model')}")
+    print(f"  draft_model: {cf.get('draft_model')}")
     print()
 
     if kind == "chatflow":

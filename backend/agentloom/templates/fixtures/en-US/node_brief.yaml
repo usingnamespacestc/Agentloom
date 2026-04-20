@@ -1,0 +1,98 @@
+builtin_id: node_brief
+name: "Node brief"
+description: >
+  MemoryBoard node-brief worker. Summarizes one source WorkNode
+  (ChatNode in PR 3) into a single short prose description that
+  populates the node's ``MemoryBoardItem.description`` field. Invoked
+  by the engine's auto-spawn hook after any non-brief, non-delegate
+  WorkNode reaches SUCCEEDED. The output is read later by MemoryBoard
+  consumers — keep it compact and referential, not narrative.
+params_schema:
+  source_node_id:
+    type: string
+    required: true
+    description: The id of the WorkNode being summarized.
+  source_kind:
+    type: string
+    required: true
+    description: >
+      The source WorkNode's step_kind (``llm_call``, ``judge_call``,
+      ``merge``, ``compact``, ``planner``, etc.) — ``tool_call``
+      sources bypass this fixture entirely.
+  source_description:
+    type: string
+    required: false
+    description: >
+      The source node's human-visible description (what it was set up
+      to do). Empty when no description was attached.
+  source_inputs:
+    type: string
+    required: false
+    description: >
+      Rendered input messages, one per line with role prefix. May be
+      empty when the node has no explicit ``input_messages`` (context
+      built from ancestors at run time).
+  source_output:
+    type: string
+    required: true
+    description: >
+      The source node's output — ``output_message.content`` for llm /
+      judge, ``tool_result.content`` for tool_call, ``compact_snapshot
+      .summary`` for compact, etc. The summarizer writes against this.
+plan:
+  description:
+    text: "Produce a one-to-two-sentence node-brief."
+    provenance: pure_agent
+  execution_mode: native_react
+  nodes:
+    - id: "node_brief_root"
+      parent_ids: []
+      step_kind: llm_call
+      description:
+        text: "Distill the source WorkNode into a short prose description."
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            You are a MemoryBoard summarizer. Your job: rewrite ONE
+            WorkNode's inputs and outputs into a single short prose
+            description — one or two sentences — that a downstream
+            reader can scan instead of re-reading the full node.
+
+            Hard rules:
+              - Cover exactly two things: what the source did
+                (intent), and what it produced (the takeaway).
+              - One or two sentences total. No bullet points, no
+                headings, no markdown, no JSON, no code fences. Just
+                plain prose.
+              - Preserve concrete anchors the reader will need to
+                find things again: tool names, file paths, numbers,
+                ids, explicit decisions, error names. Drop everything
+                else.
+              - Do not speculate about downstream use ("this will
+                help with…"). Describe only what happened here.
+              - Do not restate the system prompt, the user question,
+                or process narration. Conclusions and key facts only.
+              - Never invent content the source doesn't contain.
+              - Write in neutral third person.
+        - role: user
+          content: |
+            Source node id: {{ source_node_id }}
+            Source node kind: {{ source_kind }}
+
+            Source description:
+            {{ source_description }}
+
+            Source inputs:
+            ---
+            {{ source_inputs }}
+            ---
+
+            Source output:
+            ---
+            {{ source_output }}
+            ---
+
+            Write the one-to-two-sentence brief now. Output the brief
+            text only — no preamble, no postscript.
+  root_ids: ["node_brief_root"]

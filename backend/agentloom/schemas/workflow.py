@@ -19,6 +19,7 @@ from agentloom.schemas.common import (
     NodeBase,
     NodeHasReferencesError,
     NodeId,
+    NodeScope,
     ProviderModelRef,
     SharedNote,
     StepKind,
@@ -124,6 +125,11 @@ class WorkFlowNode(NodeBase):
     #: legacy (pre-recursive-planner) nodes; the engine reads this field
     #: only when the enclosing WorkFlow runs in ``semi_auto`` or ``auto``.
     role: WorkNodeRole | None = None
+    #: MemoryBoard brief scope. Populated only when ``step_kind ==
+    #: StepKind.BRIEF`` — NODE means the brief summarizes a single
+    #: source WorkNode; FLOW means it summarizes the enclosing WorkFlow.
+    #: Must be None for every other step_kind. See MemoryBoard design.
+    scope: NodeScope | None = None
     tool_constraints: ToolConstraints | None = None
     #: Pin for the model this specific WorkNode's LLM call uses. Set by
     #: the engine at spawn time (from the enclosing ChatNode's
@@ -232,6 +238,27 @@ class WorkFlowNode(NodeBase):
                 raise ValueError("compact node may not carry a sub_workflow")
             if self.judge_variant or self.judge_verdict:
                 raise ValueError("compact node may not carry judge_call fields")
+        elif self.step_kind == StepKind.BRIEF:
+            # Brief nodes are llm_call-shaped: they carry input_messages /
+            # output_message / usage and nothing else. ``scope`` must
+            # be populated to distinguish node-brief from flow-brief.
+            if self.scope is None:
+                raise ValueError("brief node requires scope (node or flow)")
+            if self.tool_name or self.tool_args or self.tool_result:
+                raise ValueError("brief node may not carry tool_call fields")
+            if self.sub_workflow is not None:
+                raise ValueError("brief node may not carry a sub_workflow")
+            if self.judge_variant or self.judge_verdict:
+                raise ValueError("brief node may not carry judge_call fields")
+            if self.compact_snapshot is not None:
+                raise ValueError("brief node may not carry compact fields")
+
+        # Non-brief nodes may not carry a scope — scope is a brief-only
+        # marker. Prevents accidental contamination across kinds.
+        if self.step_kind != StepKind.BRIEF and self.scope is not None:
+            raise ValueError(
+                f"scope is only valid on brief nodes, got step_kind={self.step_kind.value}"
+            )
 
         # ADR-024: role and step_kind are orthogonal but constrained to a
         # whitelist of compatible pairings. ``role=None`` is always valid
@@ -318,6 +345,12 @@ class WorkFlow(BaseModel):
     #: so the whole nested tree honors the same defaults.
     judge_model_override: ProviderModelRef | None = None
     tool_call_model_override: ProviderModelRef | None = None
+    #: Snapshotted MemoryBoard brief pin. The engine stamps every
+    #: ``StepKind.BRIEF`` WorkNode's ``model_override`` from this field
+    #: so brief runs go to the ChatFlow's brief_model regardless of the
+    #: main turn model. ``None`` → brief falls back to the per-node
+    #: ``model_override`` (which is itself the ChatNode's resolved_model).
+    brief_model_override: ProviderModelRef | None = None
 
     #: Set by the engine when a judge pass decides the WorkFlow cannot
     #: proceed without user clarification (judge_pre says non-OK, or

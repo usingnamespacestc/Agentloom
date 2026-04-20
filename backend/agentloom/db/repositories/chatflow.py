@@ -119,7 +119,8 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         title: str | None = ...,  # type: ignore[assignment]
         description: str | None = ...,  # type: ignore[assignment]
         tags: list[str] | None = ...,  # type: ignore[assignment]
-        default_model: ProviderModelRef | None = ...,  # type: ignore[assignment]
+        draft_model: ProviderModelRef | None = ...,  # type: ignore[assignment]
+        brief_model: ProviderModelRef | None = ...,  # type: ignore[assignment]
         default_judge_model: ProviderModelRef | None = ...,  # type: ignore[assignment]
         default_tool_call_model: ProviderModelRef | None = ...,  # type: ignore[assignment]
         default_execution_mode: ExecutionMode | None = ...,  # type: ignore[assignment]
@@ -140,7 +141,7 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         ``title`` / ``description`` / ``tags`` live on top-level columns
         (for efficient sidebar queries) AND inside the ``payload`` JSON
         (so ``get()`` which reads only the payload stays in sync).
-        ``default_model`` / ``default_execution_mode`` / ``judge_retry_budget``
+        ``draft_model`` / ``default_execution_mode`` / ``judge_retry_budget``
         live only in the payload.
         """
         stmt = (
@@ -163,9 +164,13 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         if tags is not ...:
             row.tags = tags
             payload["tags"] = tags or []
-        if default_model is not ...:
-            payload["default_model"] = (
-                default_model.model_dump(mode="json") if default_model else None
+        if draft_model is not ...:
+            payload["draft_model"] = (
+                draft_model.model_dump(mode="json") if draft_model else None
+            )
+        if brief_model is not ...:
+            payload["brief_model"] = (
+                brief_model.model_dump(mode="json") if brief_model else None
             )
         if default_judge_model is not ...:
             payload["default_judge_model"] = (

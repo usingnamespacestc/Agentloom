@@ -49,6 +49,12 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
   const [modelKey, setModelKey] = useState("");
   const [judgeModelKey, setJudgeModelKey] = useState("");
   const [toolCallModelKey, setToolCallModelKey] = useState("");
+  // MemoryBoard brief pin. Empty string means ``null`` on the wire,
+  // which disables MemoryBoard writing entirely — the engine skips
+  // brief auto-spawn. The context-window invariant (brief_cw >=
+  // draft_cw) is enforced on the backend at save time, so users see
+  // any violation as a 400 from the PATCH call.
+  const [briefModelKey, setBriefModelKey] = useState("");
   const [retryBudgetStr, setRetryBudgetStr] = useState("");
   const [minGroundRatioPctStr, setMinGroundRatioPctStr] = useState("");
   const [groundGraceStr, setGroundGraceStr] = useState("");
@@ -109,9 +115,10 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
       void loadProviders();
       void loadMcpServers();
       void loadTools();
-      setModelKey(refKey(chatflow?.default_model ?? null));
+      setModelKey(refKey(chatflow?.draft_model ?? null));
       setJudgeModelKey(refKey(chatflow?.default_judge_model ?? null));
       setToolCallModelKey(refKey(chatflow?.default_tool_call_model ?? null));
+      setBriefModelKey(refKey(chatflow?.brief_model ?? null));
       setRetryBudgetStr(String(chatflow?.judge_retry_budget ?? 3));
       // min_ground_ratio is stored as a 0-1 fraction but surfaced to
       // the user as a 0-100 percentage. ``null`` means "fuse disabled"
@@ -304,9 +311,10 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
           ? chatnodeTgtParsed / 100
           : (chatflow?.chatnode_compact_target_pct ?? 0.4);
       await patchChatFlow({
-        default_model: parseRefKey(modelKey),
+        draft_model: parseRefKey(modelKey),
         default_judge_model: parseRefKey(judgeModelKey),
         default_tool_call_model: parseRefKey(toolCallModelKey),
+        brief_model: parseRefKey(briefModelKey),
         judge_retry_budget: budget,
         min_ground_ratio: minGroundRatio,
         ground_ratio_grace_nodes: groundGrace,
@@ -400,6 +408,14 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
                   options={modelOptions}
                   onChange={setToolCallModelKey}
                   inheritOption={t("chatflow_settings.inherit_main_model")}
+                />
+                <ModelPicker
+                  label={t("chatflow_settings.brief_model")}
+                  hint={t("chatflow_settings.brief_model_hint")}
+                  value={briefModelKey}
+                  options={modelOptions}
+                  onChange={setBriefModelKey}
+                  inheritOption={t("chatflow_settings.brief_model_disabled")}
                 />
               </div>
             )}

@@ -1,0 +1,92 @@
+builtin_id: node_brief
+name: "节点简介"
+description: >
+  MemoryBoard 节点简介 worker。把单个 source WorkNode（PR 3 起还包括
+  ChatNode）浓缩成一句简短的散文描述，写入该节点
+  ``MemoryBoardItem.description`` 字段。引擎在任意非 brief、非
+  delegate 的 WorkNode 变为 SUCCEEDED 后自动挂起本节点。输出供
+  MemoryBoard 消费方查阅——请写得紧凑、可指认，不要讲故事。
+params_schema:
+  source_node_id:
+    type: string
+    required: true
+    description: 被总结的 WorkNode id。
+  source_kind:
+    type: string
+    required: true
+    description: >
+      源 WorkNode 的 step_kind（``llm_call`` / ``judge_call`` /
+      ``merge`` / ``compact`` / ``planner`` 等）。``tool_call``
+      根本不会进入本 fixture。
+  source_description:
+    type: string
+    required: false
+    description: >
+      源节点的人类可读描述（用于说明它的任务）。没有描述时为空。
+  source_inputs:
+    type: string
+    required: false
+    description: >
+      渲染后的输入消息，每行一条（带 role 前缀）。若节点没有显式的
+      ``input_messages``（上下文由祖先链运行时构造），此项可能为空。
+  source_output:
+    type: string
+    required: true
+    description: >
+      源节点的输出——llm / judge 读 ``output_message.content``，
+      tool_call 读 ``tool_result.content``，compact 读
+      ``compact_snapshot.summary`` 等。总结器针对它写作。
+plan:
+  description:
+    text: "为源 WorkNode 写一到两句简介。"
+    provenance: pure_agent
+  execution_mode: native_react
+  nodes:
+    - id: "node_brief_root"
+      parent_ids: []
+      step_kind: llm_call
+      description:
+        text: "把源 WorkNode 凝练为简短散文描述。"
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            你是 MemoryBoard 总结器。任务：把**一个**WorkNode 的输入
+            与输出改写成一句简短的散文描述——一到两句话——让下游读者
+            不必再通读原节点即可掌握要点。
+
+            硬性规则：
+              - 只涵盖两件事：该节点做了什么（意图），产出了什么
+                （结论/要点）。
+              - 总共一到两句。不要列表、不要标题、不要 markdown、
+                不要 JSON、不要代码围栏。纯散文。
+              - 保留读者后续回查时需要锚定的具体信息：工具名、文
+                件路径、数字、id、明确作出的决策、错误名。其它过
+                程性细节一律省掉。
+              - 不要推测下游用途（"这将有助于…"）。只描述发生了
+                什么。
+              - 不要复述系统提示、用户原问或流程叙述。只写结论与
+                关键事实。
+              - 不要编造原节点里没有的内容。
+              - 用中立的第三人称书写。
+        - role: user
+          content: |
+            源节点 id：{{ source_node_id }}
+            源节点 kind：{{ source_kind }}
+
+            源节点描述：
+            {{ source_description }}
+
+            源节点输入：
+            ---
+            {{ source_inputs }}
+            ---
+
+            源节点输出：
+            ---
+            {{ source_output }}
+            ---
+
+            现在写出一到两句简介。只输出简介正文——不要开场白、不要
+            结语。
+  root_ids: ["node_brief_root"]

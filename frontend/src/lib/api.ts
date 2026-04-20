@@ -83,9 +83,10 @@ export const api = {
       title?: string | null;
       description?: string | null;
       tags?: string[];
-      default_model?: ProviderModelRef | null;
+      draft_model?: ProviderModelRef | null;
       default_judge_model?: ProviderModelRef | null;
       default_tool_call_model?: ProviderModelRef | null;
+      brief_model?: ProviderModelRef | null;
       default_execution_mode?: ExecutionMode;
       judge_retry_budget?: number;
       min_ground_ratio?: number | null;

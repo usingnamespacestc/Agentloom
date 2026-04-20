@@ -11,6 +11,7 @@ per ADR-015 / ADR-017.
 """
 
 from agentloom.db.models.audit_log import AuditLogEntry
+from agentloom.db.models.board_item import BoardItemRow
 from agentloom.db.models.channel_binding import ChannelBinding
 from agentloom.db.models.chatflow import ChatFlowRow, ChatFlowShare
 from agentloom.db.models.dashed_node_lock import DashedNodeLock
@@ -24,6 +25,7 @@ from agentloom.db.models.workflow_template import WorkflowTemplateRow
 
 __all__ = [
     "AuditLogEntry",
+    "BoardItemRow",
     "ChannelBinding",
     "ChatFlowRow",
     "ChatFlowShare",

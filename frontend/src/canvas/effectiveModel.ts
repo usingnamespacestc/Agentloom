@@ -166,7 +166,7 @@ export function edgeModel(
   if (!child) return null;
   switch (kind) {
     case "llm":
-      return child.resolved_model ?? chatflow.default_model;
+      return child.resolved_model ?? chatflow.draft_model;
     case "judge":
       // Prefer the stamp on the child's WorkFlow — that's what
       // actually ran. ``default_judge_model`` is the composer default

@@ -73,6 +73,28 @@ class StepKind(str, Enum):
     #: Downstream context walks stop at the merge node exactly like they
     #: stop at a compact node.
     MERGE = "merge"
+    #: MemoryBoard producer — a one-shot WorkNode that distills either
+    #: another WorkNode (``scope=NODE``) or the enclosing WorkFlow
+    #: (``scope=FLOW``) into a single short prose description. Auto-
+    #: spawned by the engine on every non-brief / non-delegate WorkNode
+    #: success and once at WorkFlow terminal time. The description is
+    #: written to a ``BoardItem`` row. See MemoryBoard design 2026-04-20.
+    BRIEF = "brief"
+
+
+class NodeScope(str, Enum):
+    """Distinguishes the two kinds of ``StepKind.BRIEF`` WorkNode.
+
+    - ``NODE`` — brief summarizes a single source WorkNode (sibling in
+      the same WorkFlow). Parent is the source node.
+    - ``FLOW`` — brief summarizes the enclosing WorkFlow as a whole.
+      Parents are every terminal node in the flow; the output becomes
+      the WorkFlow's own WorkBoardItem so the parent layer can read it
+      via the sub_agent_delegation container.
+    """
+
+    NODE = "node"
+    FLOW = "flow"
 
 
 class JudgeVariant(str, Enum):
