@@ -938,20 +938,19 @@ class WorkflowEngine:
                         data={"usage": node.usage.model_dump() if node.usage else None},
                     )
                 )
-                # MemoryBoard node-brief auto-spawn (PR 1). Two gates:
+                # MemoryBoard node-brief auto-spawn (PR 1). Gates:
                 # (1) ``_board_writer`` is wired (chatflow layer will
-                # persist); (2) source is not BRIEF / SUB_AGENT_DELEGATION
-                # (recursion guard + delegate is already covered by its
-                # inner flow-brief). brief is a core MemoryBoard
-                # primitive and runs whenever persistence is wired —
-                # ``brief_model_override`` is now a quality override,
-                # not an on/off switch. When unset, brief falls back
-                # to the source node's resolved_model (see
-                # ``_spawn_node_brief``).
+                # persist); (2) source kind is briefable. BRIEF is the
+                # recursion guard; DELEGATE is already covered by its
+                # inner flow-brief; COMPRESS writes its board_item
+                # directly in ``_run_compact`` because the snapshot
+                # summary IS the brief (PR 4.2.a — no LLM cost for
+                # briefing a summary of a summary).
                 if (
                     self._board_writer is not None
                     and node.step_kind != StepKind.BRIEF
                     and node.step_kind != StepKind.DELEGATE
+                    and node.step_kind != StepKind.COMPRESS
                 ):
                     self._spawn_node_brief(workflow, node)
             elif node.status == NodeStatus.FAILED:
@@ -1279,6 +1278,16 @@ class WorkflowEngine:
         )
         node.compact_snapshot = node.compact_snapshot.model_copy(
             update={"summary": summary, "compacted_tokens": compacted_tokens}
+        )
+        # PR 4.2.a: the compact's summary IS a MemoryBoard brief — write
+        # the board_item directly instead of spawning a secondary BRIEF
+        # WorkNode to summarize the summary.
+        await self._persist_board_item(
+            workflow=workflow,
+            source=node,
+            scope=NodeScope.NODE,
+            description=summary,
+            fallback=False,
         )
 
     # --------------------------------------------------------------- brief (MemoryBoard PR 1)
