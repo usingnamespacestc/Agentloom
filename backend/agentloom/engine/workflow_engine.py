@@ -438,6 +438,23 @@ def _render_messages_to_compact(
     return "\n".join(lines)
 
 
+def _any_resolved_model(workflow: WorkFlow) -> ProviderModelRef | None:
+    """Pick any main-axis node's ``resolved_model`` as a fallback brief
+    model. Used by flow-brief when ``brief_model_override`` is unset —
+    WorkFlow-level briefs have no ``source`` node to lean on, so we
+    borrow the ChatFlow's draft model via whatever was stamped onto
+    the nodes at spawn time. ``None`` if the WorkFlow is empty or no
+    non-BRIEF node carries a ``resolved_model`` (pure-stub tests)."""
+    for node in workflow.nodes.values():
+        if node.step_kind == StepKind.BRIEF:
+            continue
+        if node.resolved_model is not None:
+            return node.resolved_model
+        if node.model_override is not None:
+            return node.model_override
+    return None
+
+
 def _render_source_inputs_for_brief(source: WorkFlowNode) -> str:
     """Render *source*'s ``input_messages`` into the prose block a
     node-brief template expects.
@@ -785,17 +802,13 @@ class WorkflowEngine:
         # Fires regardless of *how* the WorkFlow terminated (succeeded
         # via an empty ready set, halted via pending_user_prompt, or
         # cancelled by an upstream failure) — the brief writer captures
-        # the full story even on halt. Same two-gate policy as
-        # node-brief: ``_board_writer`` must be wired *and*
-        # ``workflow.brief_model_override`` must be set (explicit
-        # opt-in). This keeps the default ChatFlow — one without a
-        # configured brief_model — zero-cost, so the hundreds of
-        # existing scripted-provider tests don't grow a phantom
-        # flow_brief call per run.
-        if (
-            self._board_writer is not None
-            and workflow.brief_model_override is not None
-        ):
+        # the full story even on halt. Brief is a core MemoryBoard
+        # primitive and is always on when persistence is wired; the
+        # only gate is ``_board_writer``. Model selection falls back
+        # to any resolved main-axis model when ``brief_model_override``
+        # is unset, so configuring ``brief_model`` at the ChatFlow level
+        # is purely a quality override, not an on/off switch.
+        if self._board_writer is not None:
             await self._spawn_and_run_flow_brief(workflow)
 
         await self._bus.publish(
@@ -925,20 +938,18 @@ class WorkflowEngine:
                         data={"usage": node.usage.model_dump() if node.usage else None},
                     )
                 )
-                # MemoryBoard node-brief auto-spawn (PR 1). Three gates:
+                # MemoryBoard node-brief auto-spawn (PR 1). Two gates:
                 # (1) ``_board_writer`` is wired (chatflow layer will
-                # persist); (2) ``workflow.brief_model_override`` is
-                # configured (opt-in — the chatflow's owner explicitly
-                # picked a brief_model); (3) source is not BRIEF /
-                # SUB_AGENT_DELEGATION (recursion guard + delegate is
-                # already covered by its inner flow-brief). Leaving
-                # ``brief_model`` unset on a ChatFlow disables the
-                # MemoryBoard entirely, which is the default so existing
-                # tests / callers see no behavior change until they
-                # explicitly opt in.
+                # persist); (2) source is not BRIEF / SUB_AGENT_DELEGATION
+                # (recursion guard + delegate is already covered by its
+                # inner flow-brief). brief is a core MemoryBoard
+                # primitive and runs whenever persistence is wired —
+                # ``brief_model_override`` is now a quality override,
+                # not an on/off switch. When unset, brief falls back
+                # to the source node's resolved_model (see
+                # ``_spawn_node_brief``).
                 if (
                     self._board_writer is not None
-                    and workflow.brief_model_override is not None
                     and node.step_kind != StepKind.BRIEF
                     and node.step_kind != StepKind.SUB_AGENT_DELEGATION
                 ):
@@ -1290,11 +1301,15 @@ class WorkflowEngine:
             or source.model_override
         )
 
-        if source.step_kind == StepKind.TOOL_CALL:
+        if source.step_kind == StepKind.TOOL_CALL or brief_model is None:
             # Deterministic code template — no LLM, so no fixture
             # rendering needed. ``_run_brief`` sees
             # ``input_messages is None`` and bypasses the provider
-            # entirely.
+            # entirely. Also taken when no ``brief_model`` is
+            # resolvable (e.g. bare in-memory engines in tests, or any
+            # chatflow with no draft/brief model configured): brief
+            # remains always-on as a WorkFlow node, but skips the LLM
+            # it has no model for.
             brief = WorkFlowNode(
                 step_kind=StepKind.BRIEF,
                 scope=NodeScope.NODE,
@@ -1452,23 +1467,7 @@ class WorkflowEngine:
             return
         from agentloom.templates.instantiate import instantiate_fixture
 
-        brief_model = workflow.brief_model_override
-        brief_wf = instantiate_fixture(
-            plan,
-            {
-                "workflow_id": workflow.id,
-                "workflow_description": description_text,
-                "workflow_expected_outcome": expected_text,
-                "upstream_inputs": "",
-                "node_briefs": node_briefs_rendered,
-                "terminal_output": terminal_output,
-                "terminal_state": terminal_state,
-            },
-            includes=includes,
-        )
-        (inner,) = brief_wf.nodes.values()
-        assert inner.input_messages is not None
-        prompt = list(inner.input_messages)
+        brief_model = workflow.brief_model_override or _any_resolved_model(workflow)
 
         # Parent ids = every terminal main-axis node (not other briefs).
         # A brief with no parents (empty WorkFlow) still runs — rare,
@@ -1480,40 +1479,58 @@ class WorkflowEngine:
             if n.status in (NodeStatus.SUCCEEDED, NodeStatus.FAILED, NodeStatus.CANCELLED)
             and n.step_kind != StepKind.BRIEF
         ]
-        flow_brief_node = WorkFlowNode(
-            step_kind=StepKind.BRIEF,
-            scope=NodeScope.FLOW,
-            parent_ids=terminal_ids,
-            description=_brief_description_text(NodeScope.FLOW),
-            input_messages=prompt,
-            model_override=brief_model,
-            resolved_model=brief_model,
-        )
+
+        if brief_model is None:
+            # No model resolvable anywhere in the WorkFlow — take the
+            # deterministic code template path. ``_run_brief`` sees
+            # ``input_messages is None`` and bypasses the provider.
+            # Keeps flow-brief always-on as a WorkFlow node without
+            # consuming provider replies in tests that don't configure
+            # models.
+            flow_brief_node = WorkFlowNode(
+                step_kind=StepKind.BRIEF,
+                scope=NodeScope.FLOW,
+                parent_ids=terminal_ids,
+                description=_brief_description_text(NodeScope.FLOW),
+                model_override=brief_model,
+                resolved_model=brief_model,
+            )
+        else:
+            brief_wf = instantiate_fixture(
+                plan,
+                {
+                    "workflow_id": workflow.id,
+                    "workflow_description": description_text,
+                    "workflow_expected_outcome": expected_text,
+                    "upstream_inputs": "",
+                    "node_briefs": node_briefs_rendered,
+                    "terminal_output": terminal_output,
+                    "terminal_state": terminal_state,
+                },
+                includes=includes,
+            )
+            (inner,) = brief_wf.nodes.values()
+            assert inner.input_messages is not None
+            prompt = list(inner.input_messages)
+
+            flow_brief_node = WorkFlowNode(
+                step_kind=StepKind.BRIEF,
+                scope=NodeScope.FLOW,
+                parent_ids=terminal_ids,
+                description=_brief_description_text(NodeScope.FLOW),
+                input_messages=prompt,
+                model_override=brief_model,
+                resolved_model=brief_model,
+            )
         workflow.add_node(flow_brief_node)
         if flow_brief_node.id in workflow.root_ids and flow_brief_node.parent_ids:
             workflow.root_ids.remove(flow_brief_node.id)
 
         description: str
         fallback: bool
-        try:
-            await self._invoke_and_freeze(workflow, flow_brief_node, expose_tools=False)
-            assert flow_brief_node.output_message is not None
-            description = (flow_brief_node.output_message.content or "").strip()
-            fallback = False
-            if not description:
-                description = (
-                    terminal_output.splitlines()[0] if terminal_output else ""
-                ) or f"flow terminated with state={terminal_state}"
-                fallback = True
-                flow_brief_node.output_message = WireMessage(
-                    role="assistant", content=description
-                )
-        except Exception as exc:  # noqa: BLE001 — flow-brief never fails
-            log.warning(
-                "flow_brief LLM call failed for workflow=%s — falling back: %s",
-                workflow.id,
-                exc,
-            )
+        if flow_brief_node.input_messages is None:
+            # brief_model unresolvable → code-template path; skip the
+            # provider entirely, matching ``_run_brief``'s short-circuit.
             description = (
                 terminal_output.splitlines()[0] if terminal_output else ""
             ) or f"flow terminated with state={terminal_state}"
@@ -1521,6 +1538,35 @@ class WorkflowEngine:
             flow_brief_node.output_message = WireMessage(
                 role="assistant", content=description
             )
+        else:
+            try:
+                await self._invoke_and_freeze(
+                    workflow, flow_brief_node, expose_tools=False
+                )
+                assert flow_brief_node.output_message is not None
+                description = (flow_brief_node.output_message.content or "").strip()
+                fallback = False
+                if not description:
+                    description = (
+                        terminal_output.splitlines()[0] if terminal_output else ""
+                    ) or f"flow terminated with state={terminal_state}"
+                    fallback = True
+                    flow_brief_node.output_message = WireMessage(
+                        role="assistant", content=description
+                    )
+            except Exception as exc:  # noqa: BLE001 — flow-brief never fails
+                log.warning(
+                    "flow_brief LLM call failed for workflow=%s — falling back: %s",
+                    workflow.id,
+                    exc,
+                )
+                description = (
+                    terminal_output.splitlines()[0] if terminal_output else ""
+                ) or f"flow terminated with state={terminal_state}"
+                fallback = True
+                flow_brief_node.output_message = WireMessage(
+                    role="assistant", content=description
+                )
 
         flow_brief_node.status = NodeStatus.SUCCEEDED
         flow_brief_node.finished_at = utcnow()

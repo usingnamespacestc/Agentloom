@@ -1788,10 +1788,12 @@ class ChatFlowEngine:
                 or chatflow.default_tool_call_model
                 or resolved
             ),
-            # MemoryBoard brief pin (PR 1). ``None`` means "brief falls
-            # back to the source node's resolved_model"; we only stamp
-            # when the ChatFlow explicitly set a brief_model.
-            brief_model_override=chatflow.brief_model,
+            # MemoryBoard brief pin (PR 1). brief is always on when a
+            # board writer is wired; the pin is a *quality override*,
+            # not an on/off switch. Fall back to ``draft_model`` when
+            # the ChatFlow didn't explicitly set a brief_model so the
+            # MemoryBoard always has *some* model to reach for.
+            brief_model_override=chatflow.brief_model or chatflow.draft_model,
         )
 
         if switches.judge_pre:
@@ -3814,12 +3816,16 @@ def _redo_group_members(
     """All direct redo clones of ``judge_post_id`` — i.e. every non-judge
     child whose immediate parent is that judge_post. The re-aggregation
     judge_post is also a child of the original, but it's excluded from
-    the redo group (it's the aggregator, not a member)."""
+    the redo group (it's the aggregator, not a member). BRIEF children
+    are observability nodes (MemoryBoard PR 1), not redo clones, and
+    must not gate re-aggregation."""
     out: list[WorkFlowNode] = []
     for n in workflow.nodes.values():
         if not n.parent_ids or n.parent_ids[0] != judge_post_id:
             continue
         if n.step_kind == StepKind.JUDGE_CALL:
+            continue
+        if n.step_kind == StepKind.BRIEF:
             continue
         out.append(n)
     return out
@@ -4414,17 +4420,23 @@ def _trio_params(workflow: WorkFlow) -> dict[str, str]:
 
 
 def _single_node(workflow: WorkFlow) -> WorkFlowNode:
-    """Pluck the single node out of a freshly-instantiated judge template.
+    """Pluck the single main-axis node out of a judge/compact template.
 
     Both ``judge_pre`` and ``judge_post`` fixtures define exactly one
-    judge_call node. We don't keep the surrounding WorkFlow shell — the
-    inner WorkFlow already exists.
+    judge_call node. Compact/merge templates likewise produce a single
+    llm_call. MemoryBoard briefs auto-spawn on terminal WorkFlows and
+    are off-main-axis, so this helper filters them out before asserting
+    the single-node invariant.
     """
-    if len(workflow.nodes) != 1:
+    from agentloom.schemas.common import StepKind as _StepKind
+
+    mains = [n for n in workflow.nodes.values() if n.step_kind != _StepKind.BRIEF]
+    if len(mains) != 1:
         raise ValueError(
-            f"expected single-node template, got {len(workflow.nodes)} nodes"
+            f"expected single-node template, got {len(mains)} main-axis nodes "
+            f"(total including briefs: {len(workflow.nodes)})"
         )
-    return next(iter(workflow.nodes.values()))
+    return mains[0]
 
 
 def _terminal_llm_call(workflow: WorkFlow) -> WorkFlowNode | None:
