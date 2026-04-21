@@ -377,7 +377,7 @@ function FlowBriefBanner({ flowBriefNode }: { flowBriefNode: WorkFlowNode | null
       data-testid="flow-brief-banner"
       data-fallback={fallback ? "true" : "false"}
       className={[
-        "absolute left-3 right-3 top-3 z-20",
+        "absolute left-3 right-3 top-14 z-20",
         "rounded-lg border border-sky-200 bg-white/95",
         "px-4 py-3 text-sm leading-relaxed text-gray-800 shadow-md",
         "cursor-pointer select-none",
