@@ -22,7 +22,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -73,8 +73,6 @@ class BoardItemRow(Base):
     #: template (tool_call source or LLM failure fallback) rather than
     #: a live LLM call. Lets downstream consumers weigh reliability.
     fallback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    #: Reserved for PR 2 — not decremented this PR.
-    forget_counter: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow
     )

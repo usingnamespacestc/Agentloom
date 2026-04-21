@@ -64,6 +64,13 @@ class CompactSnapshot(BaseModel):
     #: the historical Tier-2 compact semantics (preserved_messages are
     #: the recent-tail carried past the cutoff).
     preserved_before_summary: bool = False
+    #: Forget-counter state for nodes that were pulled back into the
+    #: post-compact context via ``get_node_context``. Keys are the
+    #: source node ids whose full context is currently "sticky" on this
+    #: compact snapshot; values are the remaining counter (n = memory
+    #: capacity, decremented once per turn the node isn't re-fetched,
+    #: dropped when it hits 0). Empty dict means no sticky restores.
+    sticky_restored: dict[str, int] = Field(default_factory=dict)
 
 
 class WorkFlowNode(NodeBase):

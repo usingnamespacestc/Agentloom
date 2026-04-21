@@ -1417,7 +1417,7 @@ while current is not None:
   - `ChatFlow.default_model` → `ChatFlow.draft_model`（重命名）；旧 payload 通过 `@model_validator(mode="before")` 平滑迁移。
   - `ChatFlow.brief_model: ProviderModelRef | None`（新）。`@model_validator(mode="after")` 校验 `brief_model.context_window >= draft_model.context_window`（走 `provider_context_cache`）；cache miss 时静默放行，避免启动失败。
 - **持久化**：
-  - `board_items` 表（alembic 0012）：`id / workspace_id / chatflow_id / workflow_id / source_node_id / source_kind / scope / description / produced_tags / consumed_tags / fallback / forget_counter / created_at / updated_at`；唯一键 `(workspace_id, source_node_id)` 让重跑 idempotent。
+  - `board_items` 表（alembic 0012）：`id / workspace_id / chatflow_id / workflow_id / source_node_id / source_kind / scope / description / produced_tags / consumed_tags / fallback / created_at / updated_at`；唯一键 `(workspace_id, source_node_id)` 让重跑 idempotent。（原设计里的 `forget_counter` 列在 2026-04-21 被 alembic 0017 删除——遗忘计数器改为挂在 `CompactSnapshot.sticky_restored` 上按源节点计数。）
   - `BoardItemRepository`（workspace-scoped，ADR-015）+ `upsert_by_source` 一把事务。
 - **引擎 `_run_brief`**：
   - tool_call 源走确定性 code template（`tool_call <name>[ error]: <first line>`），不进 provider——ReAct 循环里每个 shell 输出都跑一次 LLM 会烧钱。
@@ -1468,7 +1468,7 @@ while current is not None:
 
 - **PR 2**：MemoryBoard 读路径——新增一个 skill/tool 让 agent 按需拉 BoardItem 描述（类似 `get_node_context` 但只读 brief）。
 - **PR 3**：ChatBoard 级联——ChatNode 向上游走时带上祖先 brief 的摘要视图，让对话压缩不必每次都走 compact。
-- Forget counter：当前 `board_items.forget_counter` 留了字段但没人写；PR 2 读路径起来之后可以接「最近被读过」计数。
+- Forget counter：PR 1.2（2026-04-21）把它从 `board_items` 搬到 `CompactSnapshot.sticky_restored: dict[source_node_id, int]`——粘滞在压缩快照上按源节点计数，衰减到 0 才移出 context。后续 PR 再接 `get_node_context` 调用作为 used-signal + 每轮衰减 + merge 时两边取 MAX。
 
 ---
 
