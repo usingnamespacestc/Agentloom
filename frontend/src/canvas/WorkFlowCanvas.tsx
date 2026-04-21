@@ -161,6 +161,7 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [nodes, setNodes] = useState<Node<any>[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
+  const [flowBriefNode, setFlowBriefNode] = useState<WorkFlowNode | null>(null);
   const dragPositions = useRef<Record<string, { x: number; y: number }>>({});
   const dirtyPositions = useRef<Set<string>>(new Set());
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -216,6 +217,7 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
     }));
     setNodes([...merged, ...stickyNodes]);
     setEdges(laid.edges);
+    setFlowBriefNode(laid.flowBriefNode);
   }, [workflow, workflowSelectedNodeId, ctxWindowByModel, stickyNotes, editingStickyId, selectedStickyId, onNoteTitleChange, onNoteTextChange, onNoteDelete, syncTick]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
@@ -301,7 +303,7 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
 
   return (
     <div data-testid="workflow-canvas" className="relative h-full w-full" onClick={() => { setCtxMenu(null); setStickyCtxMenu(null); }}>
-      <FlowBriefBanner workflowId={workflow.id} />
+      <FlowBriefBanner flowBriefNode={flowBriefNode} />
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -347,34 +349,48 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
 }
 
 /**
- * Top-of-frame banner showing the WorkFlow's flow-brief description
- * once the engine has produced one (i.e. the enclosing WorkFlow has
- * reached a terminal state — succeeded, halted, or cancelled). The
- * banner is rendered absolutely-positioned so it doesn't push the
- * React Flow viewport around.
- *
- * When no flow-brief exists for this WorkFlow yet (in-flight runs,
- * older WorkFlows that predate the MemoryBoard), the banner stays
- * hidden.
+ * Top-of-frame banner promoted from the WorkFlow's flow-brief
+ * WorkNode. The brief WorkNode itself is dropped from the canvas
+ * layout (see ``buildWorkflowGraph``) so the only surface carrying
+ * its content is this enlarged banner — expand-on-click reveals the
+ * full description. Hidden until the engine produces the flow-brief.
  */
-function FlowBriefBanner({ workflowId }: { workflowId: string }) {
-  // scope=flow briefs have source_node_id == workflow_id by the
-  // BoardItem contract, so a direct lookup in the flat map works.
-  const boardItem = useChatFlowStore((s) => s.boardItems[workflowId]);
-  if (!boardItem || boardItem.scope !== "flow") return null;
+function FlowBriefBanner({ flowBriefNode }: { flowBriefNode: WorkFlowNode | null }) {
+  const [expanded, setExpanded] = useState(false);
+  const workflowId = flowBriefNode?.parent_ids[0];
+  // The matching BoardItem (source_node_id == workflow_id) carries
+  // the authoritative description + fallback flag once persisted;
+  // fall back to the node's own ``output_message.content`` for the
+  // brief window between node completion and store sync.
+  const boardItem = useChatFlowStore((s) =>
+    workflowId ? s.boardItems[workflowId] : undefined,
+  );
+  if (!flowBriefNode) return null;
+  const text =
+    boardItem?.description ??
+    flowBriefNode.output_message?.content ??
+    "";
+  if (!text) return null;
+  const fallback = boardItem?.fallback ?? false;
   return (
     <div
       data-testid="flow-brief-banner"
-      data-fallback={boardItem.fallback ? "true" : "false"}
+      data-fallback={fallback ? "true" : "false"}
       className={[
         "absolute left-3 right-3 top-3 z-20",
-        "rounded-md border border-sky-200 bg-white/95",
-        "px-3 py-1.5 text-[11px] text-gray-800 shadow-sm",
-        "pointer-events-auto",
+        "rounded-lg border border-sky-200 bg-white/95",
+        "px-4 py-3 text-sm leading-relaxed text-gray-800 shadow-md",
+        "cursor-pointer select-none",
       ].join(" ")}
-      title={boardItem.description}
+      onClick={(e) => {
+        e.stopPropagation();
+        setExpanded((v) => !v);
+      }}
+      title={text}
     >
-      {boardItem.description}
+      <div className="break-words">
+        {expanded ? text : text.length > 240 ? `${text.slice(0, 239)}…` : text}
+      </div>
     </div>
   );
 }
@@ -384,25 +400,40 @@ export function buildWorkflowGraph(
   workflow: WorkFlow | null,
   selectedNodeId: string | null = null,
   contextWindowByModel: Record<string, number> = {},
-): { nodes: Node<WorkFlowNodeData>[]; edges: Edge[] } {
-  if (!workflow) return { nodes: [], edges: [] };
+): {
+  nodes: Node<WorkFlowNodeData>[];
+  edges: Edge[];
+  flowBriefNode: WorkFlowNode | null;
+} {
+  if (!workflow) return { nodes: [], edges: [], flowBriefNode: null };
   const wf = workflow;
+  // The flow-brief is promoted to a top-of-frame banner and dropped
+  // from the canvas; pull it out first so it never enters layout.
+  let flowBriefNode: WorkFlowNode | null = null;
+  const graphNodes: Record<string, WorkFlowNode> = {};
+  for (const [id, n] of Object.entries(wf.nodes)) {
+    if (n.step_kind === "brief" && n.scope === "flow") {
+      flowBriefNode = n;
+      continue;
+    }
+    graphNodes[id] = n;
+  }
   const briefIds = new Set<string>();
   const briefParentIds = new Set<string>();
-  for (const [id, n] of Object.entries(wf.nodes)) {
+  for (const [id, n] of Object.entries(graphNodes)) {
     if (n.step_kind === "brief") {
       briefIds.add(id);
       for (const pid of n.parent_ids) briefParentIds.add(pid);
     }
   }
-  const laidOut = layoutDag<WorkFlowNode>(wf.nodes, wf.root_ids, {
+  const laidOut = layoutDag<WorkFlowNode>(graphNodes, wf.root_ids, {
     columnWidth: 240,
     rowHeight: 160,
     stackAboveIds: briefIds,
   });
   const rootSet = new Set(wf.root_ids);
   const hasChild = new Set<string>();
-  for (const n of Object.values(wf.nodes)) {
+  for (const n of Object.values(graphNodes)) {
     for (const pid of n.parent_ids) hasChild.add(pid);
   }
   const rfNodes: Node<WorkFlowNodeData>[] = laidOut.map(({ node, position }) => {
@@ -430,7 +461,7 @@ export function buildWorkflowGraph(
   const rfEdges: Edge[] = [];
   for (const { node } of laidOut) {
     for (const parentId of node.parent_ids) {
-      if (!(parentId in wf.nodes)) continue;
+      if (!(parentId in graphNodes)) continue;
       const isBriefEdge = briefIds.has(node.id);
       rfEdges.push({
         id: `${parentId}->${node.id}`,
@@ -447,5 +478,5 @@ export function buildWorkflowGraph(
       });
     }
   }
-  return { nodes: rfNodes, edges: rfEdges };
+  return { nodes: rfNodes, edges: rfEdges, flowBriefNode };
 }

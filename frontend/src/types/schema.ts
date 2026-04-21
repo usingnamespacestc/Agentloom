@@ -169,6 +169,9 @@ export interface WorkFlowNode extends NodeBaseFields {
   /** Structural role in the recursive planner flow. ``null`` outside
    * semi_auto/auto modes. See §3.4.4. */
   role: WorkNodeRole | null;
+  /** MemoryBoard brief scope: ``"node"`` or ``"flow"``. Populated
+   * only on BRIEF WorkNodes; null for every other kind. */
+  scope?: "node" | "flow" | null;
   tool_constraints: ToolConstraints | null;
   /** Pin for this WorkNode's LLM call. Set by the engine at spawn time
    * from the enclosing ChatNode's resolved_model and propagated across
