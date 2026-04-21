@@ -102,6 +102,18 @@ ContextWindowLookup = Callable[[ProviderModelRef | None], int | None]
 #: running against their existing fixtures.
 BoardWriter = Callable[..., Awaitable[None]]
 
+#: MemoryBoard read path. Consumers downstream of a brief (judge_post's
+#: layer-notes, flow_brief's node_briefs block) pull the distilled
+#: ``description`` rows from the board rather than walking the DAG's
+#: brief WorkNodes, so briefs keep a single-edge topology (parent →
+#: brief only) and never show up as synthetic parents of other nodes.
+#: The closure takes ``workflow_id`` and returns the list of
+#: ``dict``-shaped rows (at minimum: ``source_kind``, ``scope``,
+#: ``description``). ``None`` means "no board configured" — the engine
+#: then renders an empty layer-notes block, matching the pre-PR-A
+#: fallback on workflows that ran without a writer.
+BoardReader = Callable[..., Awaitable[list[dict[str, Any]]]]
+
 #: Sentinel so we can distinguish ``chatflow_tool_loop_budget=None``
 #: ("chatflow exists and says unlimited") from "no chatflow was passed
 #: at all".
@@ -540,73 +552,12 @@ def _flow_terminal_snapshot(workflow: WorkFlow) -> tuple[str, str]:
     return "succeeded", "(no textual output produced)"
 
 
-def _render_node_briefs_for_flow(workflow: WorkFlow) -> str:
-    """Serialize every already-SUCCEEDED node-brief into the prose
-    block flow-brief's template expects — one line per brief as
-    ``[<kind>] <description>``.
-
-    Node ids are deliberately NOT rendered into the prompt; the system
-    tracks source_node_id in MemoryBoard metadata so descriptions stay
-    id-free (the model shouldn't echo raw ids into its prose)."""
-    lines: list[str] = []
-    for node in workflow.nodes.values():
-        if node.step_kind != StepKind.BRIEF:
-            continue
-        if node.scope != NodeScope.NODE:
-            continue
-        if node.status != NodeStatus.SUCCEEDED:
-            continue
-        if node.output_message is None:
-            continue
-        src_id = node.parent_ids[0] if node.parent_ids else None
-        src_kind = (
-            workflow.get(src_id).step_kind.value
-            if src_id and src_id in workflow.nodes
-            else "?"
-        )
-        desc = (node.output_message.content or "").strip().replace("\n", " ")
-        lines.append(f"[{src_kind}] {desc}")
-    return "\n".join(lines)
-
-
 #: Sentinel embedded in the runtime-injected layer_notes system message
 #: so a judge clone (spawned by ``_after_judge_failed`` after a parse
 #: crash) can detect that its copied input_messages already carry the
 #: block and skip re-appending it. The marker isn't user-facing — it
 #: sits on its own line at the top of the appended content.
 _LAYER_NOTES_MARKER = "[__layer_notes__]"
-
-
-def _inject_layer_notes_for_post_judge(
-    workflow: WorkFlow, node: WorkFlowNode
-) -> None:
-    """Append a ``Layer notes`` system message to a POST judge's input.
-
-    Replaces the ADR-era spawn-time ``shared_notes`` rendering (PR
-    4.2.c). ``_spawn_judge_post`` extends ``parent_ids`` with every
-    scope=NODE brief in the WorkFlow, so every brief is SUCCEEDED when
-    this runs — the trail judge_post sees is the real post-hoc one.
-    Idempotent via ``_LAYER_NOTES_MARKER``: a crash-clone's copied
-    input_messages already carries the block and we must not duplicate.
-    """
-    if not node.input_messages:
-        return
-    for msg in node.input_messages:
-        if msg.role == "system" and _LAYER_NOTES_MARKER in msg.content:
-            return
-    rendered = _render_node_briefs_for_flow(workflow)
-    if not rendered:
-        return
-    body = (
-        f"{_LAYER_NOTES_MARKER}\n"
-        "Layer notes (sibling WorkNode briefs; cite ids in redo_targets)\n"
-        "---------------------------------------------------------------\n"
-        f"{rendered}"
-    )
-    node.input_messages = [
-        *node.input_messages,
-        WireMessage(role="system", content=body),
-    ]
 
 
 class WorkflowEngine:
@@ -623,6 +574,7 @@ class WorkflowEngine:
         compact_preserve_recent_turns: int = DEFAULT_PRESERVE_RECENT_TURNS,
         compact_model: ProviderModelRef | None = None,
         board_writer: BoardWriter | None = None,
+        board_reader: BoardReader | None = None,
     ) -> None:
         self._provider_call = provider_call
         self._bus = event_bus
@@ -636,6 +588,11 @@ class WorkflowEngine:
         #: auto-spawn off wholesale so bare-engine tests don't grow
         #: phantom brief children they never asked for.
         self._board_writer = board_writer
+        #: MemoryBoard read path. Used by judge_post's layer-notes and
+        #: flow_brief's ``node_briefs`` block so downstream consumers
+        #: read brief text from the board instead of treating brief
+        #: WorkNodes as synthetic parents (PR A, 2026-04-21).
+        self._board_reader = board_reader
         #: Populated per ``execute()`` from the ``chatflow_id`` kwarg.
         #: The brief writer stamps it onto every BoardItem row.
         self._chatflow_id: str | None = None
@@ -782,6 +739,27 @@ class WorkflowEngine:
                 # Parents that are still planned/running in a later
                 # batch will let this node appear in a future pass.
                 if not all(p in done for p in node.parent_ids):
+                    continue
+
+                # PR A (2026-04-21): judge_post is the WorkFlow's exit
+                # gate and needs every sibling NODE-brief rendered into
+                # its layer-notes. Briefs used to live in its
+                # ``parent_ids``; that violated the "brief has one edge"
+                # invariant, so we gate here instead. If any scope=NODE
+                # brief is still planned/running, defer judge_post to
+                # the next pass. Briefs never FAIL (``_run_brief`` always
+                # falls back to a code template), so this terminates.
+                if (
+                    node.step_kind == StepKind.JUDGE_CALL
+                    and node.judge_variant == JudgeVariant.POST
+                    and any(
+                        n.step_kind == StepKind.BRIEF
+                        and n.scope == NodeScope.NODE
+                        and n.status
+                        in (NodeStatus.PLANNED, NodeStatus.RUNNING)
+                        for n in workflow.nodes.values()
+                    )
+                ):
                     continue
 
                 ready.append(node)
@@ -1322,6 +1300,68 @@ class WorkflowEngine:
 
     # --------------------------------------------------------------- brief (MemoryBoard PR 1)
 
+    async def _render_node_briefs_from_board(self, workflow_id: str) -> str:
+        """Pull scope=node MemoryBoard rows for *workflow_id* and format
+        them into the prose block flow-brief / layer-notes expects —
+        one line per row as ``[<source_kind>] <description>``.
+
+        PR A (2026-04-21): flow-brief's ``node_briefs`` block and
+        judge_post's layer-notes both used to walk ``workflow.nodes``
+        and pick out BRIEF WorkNodes. That treated the brief WorkNode
+        as a synthetic parent of its consumer — the exact architectural
+        deviation PR A is undoing. Read the same content from
+        MemoryBoard instead so briefs keep a single-edge topology.
+        Node ids are deliberately NOT rendered; the system tracks
+        source_node_id in board metadata so descriptions stay id-free.
+        """
+        if self._board_reader is None:
+            return ""
+        rows = await self._board_reader(workflow_id=workflow_id)
+        lines: list[str] = []
+        for row in rows:
+            if row.get("scope") != NodeScope.NODE.value:
+                continue
+            kind = row.get("source_kind") or "?"
+            desc = (row.get("description") or "").strip().replace("\n", " ")
+            if not desc:
+                continue
+            lines.append(f"[{kind}] {desc}")
+        return "\n".join(lines)
+
+    async def _inject_layer_notes_for_post_judge(
+        self, workflow: WorkFlow, node: WorkFlowNode
+    ) -> None:
+        """Append a ``Layer notes`` system message to a POST judge's input.
+
+        Replaces the ADR-era spawn-time ``shared_notes`` rendering (PR
+        4.2.c) and the short-lived DAG-walk renderer (PR 4.2.c → PR A).
+        Briefs are scope=NODE WorkNodes with exactly one edge to their
+        source; the scheduler gates this judge_post's ready state on
+        every sibling brief reaching a terminal status (see the ready
+        loop's BRIEF gate), so by the time this runs the board rows
+        we read are the full post-hoc trail. Idempotent via
+        ``_LAYER_NOTES_MARKER``: a crash-clone's copied input_messages
+        already carries the block and we must not duplicate.
+        """
+        if not node.input_messages:
+            return
+        for msg in node.input_messages:
+            if msg.role == "system" and _LAYER_NOTES_MARKER in msg.content:
+                return
+        rendered = await self._render_node_briefs_from_board(workflow.id)
+        if not rendered:
+            return
+        body = (
+            f"{_LAYER_NOTES_MARKER}\n"
+            "Layer notes (sibling WorkNode briefs; cite ids in redo_targets)\n"
+            "---------------------------------------------------------------\n"
+            f"{rendered}"
+        )
+        node.input_messages = [
+            *node.input_messages,
+            WireMessage(role="system", content=body),
+        ]
+
     def _spawn_node_brief(self, workflow: WorkFlow, source: WorkFlowNode) -> WorkFlowNode:
         """Attach a ``scope=NODE`` brief WorkNode whose only parent is
         the freshly-succeeded *source*.
@@ -1485,7 +1525,7 @@ class WorkflowEngine:
                 return
 
         terminal_state, terminal_output = _flow_terminal_snapshot(workflow)
-        node_briefs_rendered = _render_node_briefs_for_flow(workflow)
+        node_briefs_rendered = await self._render_node_briefs_from_board(workflow.id)
         description_text = (
             workflow.description.text if workflow.description is not None else ""
         )
@@ -1744,6 +1784,7 @@ class WorkflowEngine:
             compact_preserve_recent_turns=self._effective_compact_preserve_recent_turns,
             compact_model=self._effective_compact_model,
             board_writer=self._board_writer,
+            board_reader=self._board_reader,
         )
         forward_queue = self._bus.open_subscription(sub.id)
         forward_task = asyncio.create_task(
@@ -1842,13 +1883,16 @@ class WorkflowEngine:
         if node.judge_variant is None:
             raise ValueError(f"judge_call node {node.id} missing judge_variant")
 
-        # PR 4.2.c: judge_post waits on every sibling NODE-brief via its
-        # spawn-time ``parent_ids``, so by the time we reach here those
-        # briefs have SUCCEEDED. Render them into a trailing system
-        # message so the exit gate sees the actual sibling trail (the
-        # old spawn-time ``shared_notes`` blackboard is gone).
+        # PR A (2026-04-21): judge_post no longer lists sibling briefs in
+        # its parent_ids — briefs keep a single-edge topology to their
+        # source. The scheduler gates judge_post's ready state on every
+        # scope=NODE brief in the WorkFlow reaching a terminal status
+        # (see the ready loop), so by the time we reach here the
+        # MemoryBoard rows we read are the full post-hoc trail. The
+        # rendered block is appended as a trailing system message so
+        # the exit gate sees the actual sibling trail.
         if node.judge_variant == JudgeVariant.POST:
-            _inject_layer_notes_for_post_judge(workflow, node)
+            await self._inject_layer_notes_for_post_judge(workflow, node)
 
         tool_def = judge_verdict_tool_def(node.judge_variant)
         # Defense-in-depth for judge structured output (ADR 2026-04-18):

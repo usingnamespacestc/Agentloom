@@ -229,6 +229,52 @@ class ChatFlowRuntime:
             await asyncio.gather(*pending, return_exceptions=True)
 
 
+def _make_board_reader(
+    tool_context: ToolContext | None,
+) -> Callable[..., Awaitable[list[dict[str, Any]]]]:
+    """Build the :data:`BoardReader` closure that :meth:`WorkflowEngine.
+    _render_node_briefs_from_board` (PR A, 2026-04-21) calls when it
+    needs judge_post's layer-notes or flow_brief's ``node_briefs`` block.
+
+    Same fresh-session pattern as ``_make_board_writer`` — one session
+    per read via ``get_session_maker()`` — so we don't have to thread
+    a session through the engine's signatures or worry about concurrent
+    readers sharing state. Workspace scoping comes from *tool_context*;
+    bare engines fall back to ``DEFAULT_WORKSPACE_ID``.
+    """
+    from agentloom.db.base import get_session_maker
+    from agentloom.db.models.tenancy import DEFAULT_WORKSPACE_ID
+    from agentloom.db.repositories.board_item import BoardItemRepository
+
+    workspace_id = (
+        tool_context.workspace_id if tool_context is not None else DEFAULT_WORKSPACE_ID
+    )
+
+    async def read(*, workflow_id: str) -> list[dict[str, Any]]:
+        try:
+            async with get_session_maker()() as session:
+                repo = BoardItemRepository(session, workspace_id=workspace_id)
+                rows = await repo.list_by_workflow(workflow_id)
+                return [
+                    {
+                        "source_node_id": row.source_node_id,
+                        "source_kind": row.source_kind,
+                        "scope": row.scope,
+                        "description": row.description,
+                        "fallback": row.fallback,
+                    }
+                    for row in rows
+                ]
+        except Exception:  # noqa: BLE001 — board is best-effort
+            log.exception(
+                "BoardItemRepository list_by_workflow failed for workflow=%s",
+                workflow_id,
+            )
+            return []
+
+    return read
+
+
 def _make_board_writer(
     tool_context: ToolContext | None,
 ) -> Callable[..., Awaitable[None]]:
@@ -401,6 +447,7 @@ class ChatFlowEngine:
             tool_context=tool_context,
             context_window_lookup=_ctx_lookup,
             board_writer=_make_board_writer(tool_context),
+            board_reader=_make_board_reader(tool_context),
         )
         self._runtimes: dict[str, ChatFlowRuntime] = {}
         self._registry_lock = asyncio.Lock()
@@ -2105,16 +2152,14 @@ class ChatFlowEngine:
             includes=self._fixture_includes,
         )
         node = _single_node(templated)
-        # PR 4.2.c: wait on every sibling NODE-brief so the exit gate
-        # sees the full post-hoc trail. ``_run_judge_call`` injects a
-        # ``Layer notes`` system message from those briefs at run time;
-        # the old spawn-time ``shared_notes`` rendering is gone.
-        sibling_briefs = [
-            n.id
-            for n in inner.nodes.values()
-            if n.step_kind == StepKind.BRIEF and n.scope == NodeScope.NODE
-        ]
-        node.parent_ids = [parent_node.id, *sibling_briefs]
+        # PR A (2026-04-21): briefs keep a single edge to their source
+        # and are NOT listed here. The WorkflowEngine scheduler gates
+        # judge_post on every scope=NODE brief in the WorkFlow reaching
+        # a terminal status, and ``_run_judge_call`` fills in the
+        # ``Layer notes`` system message by reading the MemoryBoard at
+        # run time. This restores the architectural rule that a brief
+        # WorkNode has exactly one edge — to its parent source.
+        node.parent_ids = [parent_node.id]
         node.judge_target_id = parent_node.id
         node.input_messages = [*(node.input_messages or []), *context_wire]
         node.model_override = inner.judge_model_override
