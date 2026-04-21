@@ -103,12 +103,14 @@ class ToolContext:
     env: dict[str, str] = field(default_factory=dict)
     #: Node ids that tools have pulled into the current ChatNode's view
     #: via ``get_node_context``. The engine reads this after each
-    #: ChatNode turn to update :attr:`CompactSnapshot.sticky_restored` —
+    #: ChatNode turn to update :attr:`ChatFlowNode.sticky_restored` —
     #: every hit becomes (or refreshes) a sticky entry with counter =
     #: compact_preserve_recent_turns; every turn that doesn't re-touch
     #: an entry decrements its counter. Empty set means "nothing was
-    #: restored this turn". Managed by the engine per-ChatNode: reset
-    #: to a fresh set before each turn, drained after.
+    #: restored this turn". Concurrent sibling ChatNodes use the
+    #: ``accessed_scope`` contextvar to keep their per-turn sets
+    #: isolated even though the inner WorkFlowEngine's tool_ctx is
+    #: shared; this field is the fallback path for bare-test usage.
     accessed_node_ids: set[str] = field(default_factory=set)
 
 

@@ -117,6 +117,17 @@ class ChatFlowNode(NodeBase):
     #: when the compaction was explicit; engine-triggered compacts
     #: leave it ``None``.
     compact_snapshot: CompactSnapshot | None = None
+    #: Forget-counter state for pre-compact ChatNodes the agent has
+    #: pulled back via ``get_node_context``. Keys are source ChatNode
+    #: ids; values are the remaining counter (n = memory capacity,
+    #: decremented once per turn the source isn't re-fetched, dropped
+    #: when it hits 0). Inherited from the primary parent at spawn time
+    #: — fork siblings therefore evolve their sticky state independently,
+    #: and a merge ChatNode takes MAX over both sources (so content that
+    #: was fresh on either branch survives the merge). Empty on greeting
+    #: roots and on nodes that never invoked ``get_node_context`` below
+    #: an active compact ancestor.
+    sticky_restored: dict[str, int] = Field(default_factory=dict)
     #: Estimated tokens in the chain context this ChatNode was spawned
     #: with — i.e. ``_build_chat_context`` output at creation time,
     #: including this node's own user turn (if any). The engine stamps
