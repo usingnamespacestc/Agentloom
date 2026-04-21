@@ -1586,3 +1586,72 @@ while current is not None:
 §10 out-of-scope 的 5 项（`pack` kind / 多索引检索 / 三级细节 / judge 打回标签 / MemoryBoard 编辑 UI）本来就不在这轮范围，符合预期。§8 deferred to PR 2 的 7 项和 §9 deferred to PR 3 的 1 项都交付了。干净闭合，不带 TODO。
 
 
+## 第 N+3 轮 — MemoryBoard PR 4 系列：命名重命名 + 历史快照迁移 — 2026-04-20
+
+设计文 §8 把 `blackboard` / `CompactSnapshot` / `MergeSnapshot` 迁移、Layer-2 枚举重命名、`capabilities`/`assigned_resources` 字段和 embedding 写入一起推到 PR 4。本轮把**前三项 + 枚举**全部收敛，PR 4.1 / 4.2 / 4.3 一共 6 个提交落在 main。`capabilities` 和 embedding writer **显式延后**——它们不是快照迁移的依赖，也不阻塞 LCA-merge 下一步。
+
+### PR 4.1（e961276）— Layer-2 枚举重命名
+
+一次性把 StepKind / WorkNodeRole 的对外 token 统一到 §3.4 命名表：
+
+```
+StepKind.LLM_CALL              -> DRAFT
+StepKind.SUB_AGENT_DELEGATION  -> DELEGATE
+StepKind.COMPACT               -> COMPRESS
+WorkNodeRole.PLANNER           -> PLAN
+WorkNodeRole.PLANNER_JUDGE     -> PLAN_JUDGE
+```
+
+改面：schemas 枚举 + 引擎/fixtures/前端 mirror + KIND_ACCENT/STEP_KIND_COLOR + i18n role keys + Alembic 0014（chatflows / workflows / workflow_templates 的 JSONB 文本替换 + `board_items.source_kind`）。后续 9c14f7b 修了一个 `plan/planner` fixture builtin_id 碰撞的小尾巴。
+
+### PR 4.2.a（52a0dd4）— CompactSnapshot 直写 BoardItem
+
+`_run_compact` 结束时直接 `_persist_board_item(scope=NODE, description=summary)`，不再额外 spawn 一个 BRIEF WorkNode。语义上 compact summary **就是**一个节点级 brief，再套一层 LLM 精炼是重复劳动，还多一跳 $。代价：brief 描述就是 summary 原文，不经 "压成三句话" 的打磨。
+
+### PR 4.2.c（b54c7e4）— blackboard 下线，post-check 读 briefs
+
+`judge_post` 之前从独立 `blackboard` 结构里拉"工作区笔记"；现在直接检索 BoardItems 中的 flow-brief + node-brief。删的代码：blackboard schema + read/write helpers + 相关 reader skill 分支。MemoryBoard 接手了语义，blackboard 只是临时容器。
+
+### PR 4.3（db04a11）— 历史 ChatFlow 数据 wipe
+
+4.3.a/b 要改 ChatFlowNode 的快照 schema。本地 + staging 的旧数据里带着即将被删除的 `MergeSnapshot` / 五个 `CompactSnapshot` 字段，与其写兼容 loader 只读、不读，不如直接 wipe——单人项目 + pre-alpha 窗口，没有用户数据要照顾。
+
+### PR 4.3.a（dcf776d）— MergeSnapshot 整体删除
+
+`len(node.parent_ids) >= 2` **结构上**就是 merge ChatNode 的判据，再维护一个带 token 计数 + 预压缩标记的 metadata 类是第二个真相源。`_chat_board_source_kind` / `_build_chat_context` / `_build_tagged_chat_context_for_compact` 的 boundary check 全部切到 parent_ids 长度。UI 损失：merge bubble 不再显示 "X → Y tokens" / 预压缩徽章；来源列表改从 `node.parent_ids` 读、指令改从 `node.user_message.text` 读。交换：少一个类 + 一个 validator + 三个 i18n key。
+
+### PR 4.3.b（e8a0184）— CompactSnapshot 瘦身到两个字段
+
+砍掉 `source_range` / `dropped_count` / `original_tokens` / `compacted_tokens` / `compact_instruction`，只留 `summary` + `preserved_messages`。砍的字段只服务 UI stats ribbon 和两行 log，reader 真正依赖的就是 summary 原文 + verbatim tail。`compact_instruction` 作为**引擎参数**留着（还要喂 compact worker 的 LLM 模板），只是不再存进快照；用户还能在 ChatNode 的 `user_message.text` 里看到自己敲进去的指令。UI 损失：compact bubble 不再显示 stats ribbon 和独立的 instruction label。
+
+`_chat_board_description` 的 chat_compact 文案从 "compacted N messages" 改成 "compacted prior chain"——N 是被砍的 `dropped_count`，改用更笼统但仍有 `+N preserved verbatim` 信息量的描述。
+
+### 数据兼容
+
+Pydantic 默认 `extra="ignore"`，schemas/workflow.py 和 schemas/chatflow.py 没有 override——旧 JSONB payload 里残留的 `source_range` / `compact_instruction` 等字段会被安静丢弃，不会抛 `ValidationError`。加上 db04a11 已经 wipe 掉本地/staging 旧数据，这一路没有显性迁移成本。
+
+### 测试
+
+- 后端 unit：266 passed（忽略预存损坏的 `test_citation_fallback.py` / `test_merge_context.py`）。
+- 后端 integration（不含 `test_chatflow_merge.py`）：141 passed。
+- 后端 `test_chatflow_merge.py`：5 failed（4 个 `/merge/preview` endpoint 未实现 404 + 1 个 `board_items.chatflow_id` FK 违反——in-memory chatflow 没落库但 PR 3 writer 试图插 board_items。stash 回 PR 4.3.a 前的 baseline 跑同样复现，确认**预存非回归**）。
+- 前端 vitest：62 passed。
+
+### 坑与决策
+
+- **枚举重命名必须带 Alembic 数据迁移**：StepKind / WorkNodeRole 存在 JSONB payload 里，不是独立列；drop 了 Python enum 但没重写 JSONB 文本的话，旧行 load 会炸。Alembic 0014 的重头戏是 `UPDATE ... jsonb_set` 扫全表。
+- **CompactSnapshot 没彻底干掉，只瘦身**：`preserved_messages` 是真实运行时依赖（`_build_chat_context` 在 compact cutoff 之后要原样拼回这段 verbatim 消息），不是 metadata。硬推成 BoardItem 扩展字段要折腾 reader，收益不抵。留一个两字段的轻类比继续拆干净更务实。
+- **MergeSnapshot 能整体删**：merge 判据在结构里（多父），metadata 只服务 UI，UI 损失可接受；和 CompactSnapshot 的"半留"是不对称的。
+- **`compact_instruction` 的两条命**：engine 参数留（喂 LLM 模板），snapshot 字段删，显示改走 `user_message.text`——这条设计在 merge path 上也适用（`node.user_message.text` 承载用户输入的 merge 指令）。
+- **数据 wipe 先于 schema 改**：本来想写 loader 兼容，但 pre-alpha 单人项目场景下 wipe 比 compat code 更快更干净。后面有真实用户数据就得反过来——先写读兼容再改写路径。
+- **FK 违反不是我引入的**：`test_merge_chain_produces_merge_chatnode_and_downstream_sees_summary` 在 baseline 就挂，PR 3 ChatBoard writer 对 in-memory chatflow 的假设与 `board_items` 的 FK 约束冲突，测试 harness 缺一个"写前确保 chatflow 已落库" step。列为后续 bugfix，不阻塞 PR 4 收口。
+
+### 未做 / 后续
+
+- **`capabilities` / `assigned_resources` 字段**（设计文 §8 残项）：judge_pre 产出能力清单、plan 消费、worker spawn 按 assigned slice 裁上下文——这是一个 _新功能_，不是迁移。需要单独一轮设计对齐。
+- **Embedding writer**：PR 2 Alembic 0013 已建 `description_embedding vector(1536)` + `ivfflat`，writer 路径 + embedding provider 选型（Ollama nomic-embed-text / volcengine / OpenAI）还没接。写入时机（同步 vs 后台 backfill）也没决。
+- **`test_chatflow_merge.py` 的 5 个 failure**：4 个 preview endpoint + 1 个 FK，都是 pre-existing；merge preview 端点本身是下一步 LCA-merge 工作的入口，一并重做。
+- **UI 侧验证**：merge bubble 少了 stats / 预压缩徽章，compact bubble 少了 stats ribbon / instruction label。代码面能过 vitest，但 "用户真打开这几个节点看到的体验是什么" 需要跑一次前端，本轮没做。
+
+
+
