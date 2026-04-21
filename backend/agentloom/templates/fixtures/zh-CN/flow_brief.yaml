@@ -8,10 +8,6 @@ description: >
   读取 delegate 板块时看到的文本）。每次 WorkFlow 到终态时同步触发
   一次。
 params_schema:
-  workflow_id:
-    type: string
-    required: true
-    description: 所在 WorkFlow 的 id。
   workflow_description:
     type: string
     required: false
@@ -33,9 +29,9 @@ params_schema:
     required: false
     description: >
       WorkFlow 内部所有参与 brief 的 WorkNode 的 node-brief 描述串联，
-      每行一条，格式为
-      ``[<node_id> | <kind>] <description>``。若 WorkFlow 在任何
-      brief 触发前就已终止，此项为空。
+      每行一条，格式为 ``[<kind>] <description>``。节点 id 不进入
+      prompt —— 它们由系统在 MemoryBoard 元数据里另行维护。若
+      WorkFlow 在任何 brief 触发前就已终止，此项为空。
   terminal_output:
     type: string
     required: true
@@ -75,8 +71,9 @@ plan:
                 ``cancelled``——未能收尾的原因。总共一到两句。
               - 不要列表、不要标题、不要 markdown、不要 JSON、不要
                 代码围栏。纯散文。
-              - 保留具体锚点：工具名、文件路径、数字、id、决策、
-                错误名。过程叙述一律省掉。
+              - 保留具体锚点：工具名、文件路径、数字、决策、错误名。
+                过程叙述一律省掉。不要在正文里写出节点 id 或 WorkFlow
+                id —— 它们由系统在写入 MemoryBoard 时以元数据形式附加。
               - 不要推测下游用途。
               - 不要编造内容。若 ``node_briefs`` 为空且
                 ``terminal_output`` 是 halt 消息，就据实写 halt，
@@ -84,7 +81,6 @@ plan:
               - 用中立第三人称书写。
         - role: user
           content: |
-            WorkFlow id：{{ workflow_id }}
             终态：{{ terminal_state }}
 
             描述：{{ workflow_description }}

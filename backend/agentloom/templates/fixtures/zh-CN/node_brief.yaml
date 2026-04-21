@@ -7,10 +7,6 @@ description: >
   delegate 的 WorkNode 变为 SUCCEEDED 后自动挂起本节点。输出供
   MemoryBoard 消费方查阅——请写得紧凑、可指认，不要讲故事。
 params_schema:
-  source_node_id:
-    type: string
-    required: true
-    description: 被总结的 WorkNode id。
   source_kind:
     type: string
     required: true
@@ -61,8 +57,9 @@ plan:
               - 总共一到两句。不要列表、不要标题、不要 markdown、
                 不要 JSON、不要代码围栏。纯散文。
               - 保留读者后续回查时需要锚定的具体信息：工具名、文
-                件路径、数字、id、明确作出的决策、错误名。其它过
-                程性细节一律省掉。
+                件路径、数字、明确作出的决策、错误名。其它过程性
+                细节一律省掉。不要在正文里写出节点 id —— 节点 id 由
+                系统在写入 MemoryBoard 时以元数据形式附加。
               - 不要推测下游用途（"这将有助于…"）。只描述发生了
                 什么。
               - 不要复述系统提示、用户原问或流程叙述。只写结论与
@@ -71,7 +68,6 @@ plan:
               - 用中立的第三人称书写。
         - role: user
           content: |
-            源节点 id：{{ source_node_id }}
             源节点 kind：{{ source_kind }}
 
             源节点描述：

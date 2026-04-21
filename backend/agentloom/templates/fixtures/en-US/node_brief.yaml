@@ -8,10 +8,6 @@ description: >
   WorkNode reaches SUCCEEDED. The output is read later by MemoryBoard
   consumers — keep it compact and referential, not narrative.
 params_schema:
-  source_node_id:
-    type: string
-    required: true
-    description: The id of the WorkNode being summarized.
   source_kind:
     type: string
     required: true
@@ -67,8 +63,10 @@ plan:
                 plain prose.
               - Preserve concrete anchors the reader will need to
                 find things again: tool names, file paths, numbers,
-                ids, explicit decisions, error names. Drop everything
-                else.
+                explicit decisions, error names. Drop everything
+                else. Do NOT write node ids in the prose — the system
+                attaches node ids as metadata when it persists the
+                brief to MemoryBoard.
               - Do not speculate about downstream use ("this will
                 help with…"). Describe only what happened here.
               - Do not restate the system prompt, the user question,
@@ -77,7 +75,6 @@ plan:
               - Write in neutral third person.
         - role: user
           content: |
-            Source node id: {{ source_node_id }}
             Source node kind: {{ source_kind }}
 
             Source description:

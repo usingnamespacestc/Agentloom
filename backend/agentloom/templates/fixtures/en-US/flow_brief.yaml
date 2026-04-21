@@ -9,10 +9,6 @@ description: >
   the parent layer sees when it consumes the delegate's board item).
   Fires once per WorkFlow run, synchronously at terminal state.
 params_schema:
-  workflow_id:
-    type: string
-    required: true
-    description: The enclosing WorkFlow's id.
   workflow_description:
     type: string
     required: false
@@ -38,8 +34,9 @@ params_schema:
     description: >
       Concatenated node-brief descriptions from every brief-eligible
       WorkNode in this WorkFlow, one line per brief formatted as
-      ``[<node_id> | <kind>] <description>``. Empty when the WorkFlow
-      halted before any brief ran.
+      ``[<kind>] <description>``. Node ids are NOT passed into the
+      prompt — the system tracks them separately in MemoryBoard
+      metadata. Empty when the WorkFlow halted before any brief ran.
   terminal_output:
     type: string
     required: true
@@ -86,8 +83,10 @@ plan:
               - No bullet points, no headings, no markdown, no
                 JSON, no code fences. Plain prose.
               - Preserve concrete anchors: tool names, file paths,
-                numbers, ids, decisions, error names. Drop process
-                narration.
+                numbers, decisions, error names. Drop process
+                narration. Do NOT write node ids or the WorkFlow id
+                in the prose — the system attaches them as MemoryBoard
+                metadata when it persists the brief.
               - Do not speculate about downstream use.
               - Never invent content. If ``node_briefs`` is empty
                 and ``terminal_output`` is a halt message, describe
@@ -96,7 +95,6 @@ plan:
               - Write in neutral third person.
         - role: user
           content: |
-            WorkFlow id: {{ workflow_id }}
             Terminal state: {{ terminal_state }}
 
             Description: {{ workflow_description }}

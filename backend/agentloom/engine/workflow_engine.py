@@ -542,8 +542,12 @@ def _flow_terminal_snapshot(workflow: WorkFlow) -> tuple[str, str]:
 
 def _render_node_briefs_for_flow(workflow: WorkFlow) -> str:
     """Serialize every already-SUCCEEDED node-brief into the prose
-    block flow-brief's template expects — one line per brief with its
-    source id / kind / description."""
+    block flow-brief's template expects — one line per brief as
+    ``[<kind>] <description>``.
+
+    Node ids are deliberately NOT rendered into the prompt; the system
+    tracks source_node_id in MemoryBoard metadata so descriptions stay
+    id-free (the model shouldn't echo raw ids into its prose)."""
     lines: list[str] = []
     for node in workflow.nodes.values():
         if node.step_kind != StepKind.BRIEF:
@@ -554,14 +558,14 @@ def _render_node_briefs_for_flow(workflow: WorkFlow) -> str:
             continue
         if node.output_message is None:
             continue
-        src_id = node.parent_ids[0] if node.parent_ids else "?"
+        src_id = node.parent_ids[0] if node.parent_ids else None
         src_kind = (
             workflow.get(src_id).step_kind.value
-            if src_id in workflow.nodes
+            if src_id and src_id in workflow.nodes
             else "?"
         )
         desc = (node.output_message.content or "").strip().replace("\n", " ")
-        lines.append(f"[{src_id} | {src_kind}] {desc}")
+        lines.append(f"[{src_kind}] {desc}")
     return "\n".join(lines)
 
 
@@ -1363,7 +1367,6 @@ class WorkflowEngine:
             brief_wf = instantiate_fixture(
                 plan,
                 {
-                    "source_node_id": source.id,
                     "source_kind": source.step_kind.value,
                     "source_description": description_text,
                     "source_inputs": inputs_rendered,
@@ -1534,7 +1537,6 @@ class WorkflowEngine:
             brief_wf = instantiate_fixture(
                 plan,
                 {
-                    "workflow_id": workflow.id,
                     "workflow_description": description_text,
                     "workflow_expected_outcome": expected_text,
                     "upstream_inputs": "",
