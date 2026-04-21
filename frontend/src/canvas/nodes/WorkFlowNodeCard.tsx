@@ -48,51 +48,6 @@ function truncate(text: string, n = 140): string {
   return `${text.slice(0, n - 1)}…`;
 }
 
-/**
- * Floating MemoryBoardItem bubble shown above a WorkNode on the
- * WorkFlow canvas.
- *
- * Renders the node-brief's ``description`` truncated to one short
- * line; the full text is available on click (native ``title`` +
- * expand-on-click toggle). The visual is deliberately minimal —
- * rounded container, soft shadow, no emoji — so the canvas stays
- * readable at typical zoom levels.
- *
- * The bubble is absolutely positioned so it attaches to the WorkNode
- * without affecting flow layout. It sits just above the card with a
- * small arrow-style notch mark.
- */
-function NodeBriefBubble({
-  description,
-  fallback,
-}: {
-  description: string;
-  fallback: boolean;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  return (
-    <div
-      data-testid="node-brief-bubble"
-      data-fallback={fallback ? "true" : "false"}
-      className={[
-        "absolute left-2 right-2 -top-8 z-10",
-        "rounded-md px-2 py-1 text-[10px] leading-snug shadow-sm",
-        "border border-sky-200 bg-white/95 text-gray-700",
-        "cursor-pointer select-none",
-      ].join(" ")}
-      onClick={(e) => {
-        e.stopPropagation();
-        setExpanded((v) => !v);
-      }}
-      title={description}
-    >
-      <div className="break-words">
-        {expanded ? description : truncate(description, 80)}
-      </div>
-    </div>
-  );
-}
-
 export function WorkFlowNodeCard({ data }: NodeProps) {
   const { t } = useTranslation();
   const { node, isSelected, isRoot, isLeaf, maxContextTokens, hasBriefChild } =
@@ -107,15 +62,6 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
     KIND_ACCENT[node.step_kind] ??
     "border border-gray-300 bg-white";
 
-  // MemoryBoardItem lookup — keyed by source_node_id. node-brief bubbles
-  // hang above their WorkNode; a brief WorkNode itself never shows its
-  // own bubble (would be infinite regression).
-  const boardItem = useChatFlowStore((s) => s.boardItems[node.id]);
-  const showBubble =
-    boardItem !== undefined &&
-    boardItem.scope === "node" &&
-    node.step_kind !== "brief";
-
   return (
     <div
       data-testid={`workflow-node-${node.id}`}
@@ -129,7 +75,6 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
         isSelected ? "ring-2 ring-blue-300" : "",
       ].join(" ")}
     >
-      {showBubble && <NodeBriefBubble description={boardItem.description} fallback={boardItem.fallback} />}
       {!isRoot && !isBrief && <Handle type="target" position={Position.Left} />}
       {isBrief && (
         <Handle id="brief-target" type="target" position={Position.Bottom} />

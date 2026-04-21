@@ -9,14 +9,13 @@
  */
 
 import { render, screen } from "@testing-library/react";
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { ReactFlowProvider } from "@xyflow/react";
 
 import { WorkFlowNodeCard, type WorkFlowNodeData } from "./WorkFlowNodeCard";
 import type { NodeProps } from "@xyflow/react";
-import type { BoardItem, WorkFlowNode, WorkNodeRole } from "@/types/schema";
+import type { WorkFlowNode, WorkNodeRole } from "@/types/schema";
 import { WORK_NODE_ROLES } from "@/types/schema";
-import { useChatFlowStore } from "@/store/chatflowStore";
 
 function buildWorkNode(overrides: Partial<WorkFlowNode> = {}): WorkFlowNode {
   const iso = "2026-04-13T00:00:00Z";
@@ -106,81 +105,3 @@ describe("WorkFlowNodeCard role styling", () => {
   });
 });
 
-describe("WorkFlowNodeCard — MemoryBoard bubble", () => {
-  afterEach(() => {
-    // Wipe the store between tests so a seeded BoardItem doesn't leak
-    // into the next render.
-    useChatFlowStore.setState({ boardItems: {} });
-  });
-
-  function seedBoardItem(item: BoardItem) {
-    useChatFlowStore.setState({ boardItems: { [item.source_node_id]: item } });
-  }
-
-  it("renders a node-brief bubble above a WorkNode when a matching BoardItem exists", () => {
-    const node = buildWorkNode({
-      id: "bubble-host",
-      step_kind: "draft",
-    });
-    seedBoardItem({
-      id: "bi-1",
-      chatflow_id: "cf-1",
-      workflow_id: "wf-1",
-      source_node_id: "bubble-host",
-      source_kind: "draft",
-      scope: "node",
-      description: "Computed the answer in three steps.",
-      fallback: false,
-      created_at: "2026-04-20T00:00:00Z",
-    });
-    renderCard(node);
-    const bubble = screen.getByTestId("node-brief-bubble");
-    expect(bubble).toBeInTheDocument();
-    // The truncated text shows the first 80 chars of the description.
-    expect(bubble.textContent).toContain("Computed the answer");
-    expect(bubble.getAttribute("data-fallback")).toBe("false");
-  });
-
-  it("hides the bubble when no BoardItem is seeded for this node", () => {
-    renderCard(buildWorkNode({ id: "no-bubble" }));
-    expect(screen.queryByTestId("node-brief-bubble")).toBeNull();
-  });
-
-  it("does not render a bubble on a brief WorkNode itself (recursion guard)", () => {
-    const node = buildWorkNode({
-      id: "brief-node",
-      step_kind: "brief" as WorkFlowNode["step_kind"],
-    });
-    seedBoardItem({
-      id: "bi-2",
-      chatflow_id: "cf-1",
-      workflow_id: "wf-1",
-      source_node_id: "brief-node",
-      source_kind: "brief",
-      scope: "node",
-      description: "would be a brief-of-brief",
-      fallback: false,
-      created_at: "2026-04-20T00:00:00Z",
-    });
-    renderCard(node);
-    expect(screen.queryByTestId("node-brief-bubble")).toBeNull();
-  });
-
-  it("passes through the fallback flag as a data attribute", () => {
-    seedBoardItem({
-      id: "bi-3",
-      chatflow_id: "cf-1",
-      workflow_id: "wf-1",
-      source_node_id: "fallback-host",
-      source_kind: "tool_call",
-      scope: "node",
-      description: "tool_call shell: ls /tmp",
-      fallback: true,
-      created_at: "2026-04-20T00:00:00Z",
-    });
-    renderCard(buildWorkNode({ id: "fallback-host", step_kind: "tool_call" }));
-    expect(
-      screen.getByTestId("node-brief-bubble").getAttribute("data-fallback"),
-    ).toBe("true");
-  });
-});
