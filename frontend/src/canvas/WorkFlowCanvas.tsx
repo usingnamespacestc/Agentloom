@@ -434,10 +434,10 @@ export function buildWorkflowGraph(
   return { nodes: rfNodes, edges: rfEdges };
 }
 
-function sortBoardItemsDesc(a: BoardItem, b: BoardItem): number {
+function sortBoardItemsAsc(a: BoardItem, b: BoardItem): number {
   const ta = a.created_at ? Date.parse(a.created_at) : 0;
   const tb = b.created_at ? Date.parse(b.created_at) : 0;
-  return tb - ta;
+  return ta - tb;
 }
 
 /** WorkFlow-layer MemoryBoard panel — lists scope='node' briefs for the
@@ -458,7 +458,7 @@ function WorkBoardPanel({
     if (!workflow) return [];
     return Object.values(boardItems)
       .filter((item) => item.scope === "node" && item.workflow_id === workflow.id)
-      .sort(sortBoardItemsDesc);
+      .sort(sortBoardItemsAsc);
   }, [workflow, boardItems]);
   return (
     <MemoryBoardPanel

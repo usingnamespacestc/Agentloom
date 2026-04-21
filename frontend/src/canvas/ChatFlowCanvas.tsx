@@ -792,11 +792,13 @@ export function contextWindowMap(
  * handlers can cheaply skip them. */
 export const CHAT_BRIEF_NODE_PREFIX = "_chat_brief_";
 
-/** Sort BoardItems newest-first; undefined ``created_at`` sorts last. */
-function sortByCreatedDesc(a: BoardItem, b: BoardItem): number {
+/** Sort BoardItems oldest-first so the list reads top→bottom in the
+ * same direction the canvas flows — later turns sit at the bottom,
+ * matching the user's reading order. */
+function sortByCreatedAsc(a: BoardItem, b: BoardItem): number {
   const ta = a.created_at ? Date.parse(a.created_at) : 0;
   const tb = b.created_at ? Date.parse(b.created_at) : 0;
-  return tb - ta;
+  return ta - tb;
 }
 
 /** ChatFlow-layer MemoryBoard panel — lists scope='chat' briefs and
@@ -813,7 +815,7 @@ function ChatBoardPanel({
     () =>
       Object.values(boardItems)
         .filter((item) => item.scope === "chat")
-        .sort(sortByCreatedDesc),
+        .sort(sortByCreatedAsc),
     [boardItems],
   );
   return (
