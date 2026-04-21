@@ -36,6 +36,12 @@ export interface LayoutOptions {
   offsetX?: number;
   offsetY?: number;
   direction?: LayoutDirection;
+  /** IDs that render stacked directly above their (first) parent
+   * rather than taking a sibling slot. Used for BRIEF WorkNodes so
+   * the brief card sits above its source instead of behind/beside it.
+   * Each such node must have exactly one parent in ``nodes``; nodes
+   * violating that fall back to normal layout. */
+  stackAboveIds?: ReadonlySet<NodeId>;
 }
 
 /** Approximate card dimensions (w-52 = 208px, typical height ~160px). */
@@ -48,6 +54,7 @@ const DEFAULTS: Required<LayoutOptions> = {
   offsetX: 40,
   offsetY: 40,
   direction: "horizontal",
+  stackAboveIds: new Set<NodeId>(),
 };
 
 /**
@@ -123,8 +130,13 @@ export function layoutDag<T extends NodeBaseFields>(
   }
 
   // Build a children map (parent → sorted children list).
+  // Nodes flagged in ``stackAboveIds`` are excluded — they don't
+  // allocate a sibling slot on their source; we place them above
+  // the source explicitly after the main pass.
+  const stackAbove = opts.stackAboveIds ?? new Set<NodeId>();
   const children = new Map<NodeId, NodeId[]>();
   for (const [id, node] of Object.entries(nodes)) {
+    if (stackAbove.has(id)) continue;
     for (const p of node.parent_ids) {
       if (p in nodes) {
         const list = children.get(p) ?? [];
@@ -198,6 +210,28 @@ export function layoutDag<T extends NodeBaseFields>(
     const lvl = levels.get(rid) ?? 0;
     placeSubtree(rid, lvl, rootCursor);
     rootCursor += subtreeSpan(rid);
+  }
+
+  // Place stackAbove nodes directly above (or left of, in vertical
+  // mode) their primary parent. Multiple stackAbove children on the
+  // same source stack outward in creation order. Level is overridden
+  // to match the source so final-pass sorting groups them visually.
+  const STACK_GAP = 24;
+  const stackCounts = new Map<NodeId, number>();
+  const stackIds = Object.keys(nodes).filter((id) => stackAbove.has(id));
+  stackIds.sort((a, b) => compareForStability(nodes[a], nodes[b]));
+  for (const id of stackIds) {
+    const src = primaryParent.get(id);
+    if (src == null || !positions.has(src)) continue;
+    const srcPos = positions.get(src)!;
+    const slot = (stackCounts.get(src) ?? 0) + 1;
+    stackCounts.set(src, slot);
+    const pos =
+      opts.direction === "horizontal"
+        ? { x: srcPos.x, y: srcPos.y - (NODE_HEIGHT + STACK_GAP) * slot }
+        : { x: srcPos.x - (NODE_WIDTH + STACK_GAP) * slot, y: srcPos.y };
+    positions.set(id, pos);
+    levels.set(id, levels.get(src) ?? 0);
   }
 
   // Place merge nodes that weren't placed by their primary parent

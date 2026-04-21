@@ -387,9 +387,14 @@ export function buildWorkflowGraph(
 ): { nodes: Node<WorkFlowNodeData>[]; edges: Edge[] } {
   if (!workflow) return { nodes: [], edges: [] };
   const wf = workflow;
+  const briefIds = new Set<string>();
+  for (const [id, n] of Object.entries(wf.nodes)) {
+    if (n.step_kind === "brief") briefIds.add(id);
+  }
   const laidOut = layoutDag<WorkFlowNode>(wf.nodes, wf.root_ids, {
     columnWidth: 240,
     rowHeight: 160,
+    stackAboveIds: briefIds,
   });
   const rootSet = new Set(wf.root_ids);
   const hasChild = new Set<string>();

@@ -121,4 +121,69 @@ describe("layoutDag", () => {
     expect(result).toHaveLength(1);
     expect(result[0].level).toBe(0);
   });
+
+  it("stacks stackAboveIds nodes directly above their source", () => {
+    const nodes = {
+      a: makeNode("a", []),
+      brief: makeNode("brief", ["a"]),
+    };
+    const result = layoutDag(nodes, ["a"], {
+      columnWidth: 100,
+      rowHeight: 50,
+      offsetX: 0,
+      offsetY: 0,
+      direction: "horizontal",
+      stackAboveIds: new Set(["brief"]),
+    });
+    const byId = Object.fromEntries(result.map((r) => [r.node.id, r]));
+    // Brief shares source's x (same column) and its level.
+    expect(byId.brief.position.x).toBe(byId.a.position.x);
+    expect(byId.brief.level).toBe(byId.a.level);
+    // Brief sits above source (smaller y) by at least NODE_HEIGHT.
+    expect(byId.brief.position.y).toBeLessThan(byId.a.position.y);
+  });
+
+  it("stackAbove children don't displace regular siblings", () => {
+    const nodes = {
+      root: makeNode("root", []),
+      child: makeNode("child", ["root"]),
+      brief: makeNode("brief", ["root"]),
+    };
+    const baseline = layoutDag(
+      { root: nodes.root, child: nodes.child },
+      ["root"],
+      { columnWidth: 100, rowHeight: 50, offsetX: 0, offsetY: 0 },
+    );
+    const withBrief = layoutDag(nodes, ["root"], {
+      columnWidth: 100,
+      rowHeight: 50,
+      offsetX: 0,
+      offsetY: 0,
+      stackAboveIds: new Set(["brief"]),
+    });
+    const baseChild = baseline.find((r) => r.node.id === "child")!.position;
+    const newChild = withBrief.find((r) => r.node.id === "child")!.position;
+    // Brief is hoisted out of the sibling slot, so child keeps its spot.
+    expect(newChild).toEqual(baseChild);
+  });
+
+  it("stacks multiple stackAbove children outward in creation order", () => {
+    const nodes = {
+      src: makeNode("src", []),
+      b1: makeNode("b1", ["src"], "2026-04-10T00:00:00Z"),
+      b2: makeNode("b2", ["src"], "2026-04-10T00:00:01Z"),
+    };
+    const result = layoutDag(nodes, ["src"], {
+      columnWidth: 100,
+      rowHeight: 50,
+      offsetX: 0,
+      offsetY: 0,
+      stackAboveIds: new Set(["b1", "b2"]),
+    });
+    const byId = Object.fromEntries(result.map((r) => [r.node.id, r]));
+    // Both share the source x; b2 (younger) stacks further above than b1.
+    expect(byId.b1.position.x).toBe(byId.src.position.x);
+    expect(byId.b2.position.x).toBe(byId.src.position.x);
+    expect(byId.b2.position.y).toBeLessThan(byId.b1.position.y);
+  });
 });
