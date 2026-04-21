@@ -388,8 +388,12 @@ export function buildWorkflowGraph(
   if (!workflow) return { nodes: [], edges: [] };
   const wf = workflow;
   const briefIds = new Set<string>();
+  const briefParentIds = new Set<string>();
   for (const [id, n] of Object.entries(wf.nodes)) {
-    if (n.step_kind === "brief") briefIds.add(id);
+    if (n.step_kind === "brief") {
+      briefIds.add(id);
+      for (const pid of n.parent_ids) briefParentIds.add(pid);
+    }
   }
   const laidOut = layoutDag<WorkFlowNode>(wf.nodes, wf.root_ids, {
     columnWidth: 240,
@@ -418,6 +422,7 @@ export function buildWorkflowGraph(
         isRoot: rootSet.has(node.id),
         isLeaf: !hasChild.has(node.id),
         maxContextTokens: contextWindowByModel[ctxKey] ?? null,
+        hasBriefChild: briefParentIds.has(node.id),
       },
       selectable: false,
     };
@@ -426,10 +431,14 @@ export function buildWorkflowGraph(
   for (const { node } of laidOut) {
     for (const parentId of node.parent_ids) {
       if (!(parentId in wf.nodes)) continue;
+      const isBriefEdge = briefIds.has(node.id);
       rfEdges.push({
         id: `${parentId}->${node.id}`,
         source: parentId,
         target: node.id,
+        ...(isBriefEdge
+          ? { sourceHandle: "brief-source", targetHandle: "brief-target" }
+          : {}),
         animated: node.status === "running",
         style: {
           stroke: node.status === "planned" ? "#9ca3af" : "#374151",

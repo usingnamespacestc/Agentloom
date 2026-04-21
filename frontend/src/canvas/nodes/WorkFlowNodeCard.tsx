@@ -28,6 +28,11 @@ export interface WorkFlowNodeData extends Record<string, unknown> {
   isRoot: boolean;
   isLeaf: boolean;
   maxContextTokens: number | null;
+  /** True when this node is the source of at least one BRIEF child —
+   * renders an extra top-side source handle so the brief-edge
+   * connects vertically instead of looping out of the right-side
+   * handle that feeds regular children. */
+  hasBriefChild?: boolean;
 }
 
 const KIND_ACCENT: Record<string, string> = {
@@ -89,7 +94,9 @@ function NodeBriefBubble({
 
 export function WorkFlowNodeCard({ data }: NodeProps) {
   const { t } = useTranslation();
-  const { node, isSelected, isRoot, isLeaf, maxContextTokens } = data as WorkFlowNodeData;
+  const { node, isSelected, isRoot, isLeaf, maxContextTokens, hasBriefChild } =
+    data as WorkFlowNodeData;
+  const isBrief = node.step_kind === "brief";
   // Role-based styling takes precedence over step_kind — see roleStyles.ts.
   // Legacy (direct-mode) nodes have role === null and fall back to the
   // original step_kind accent so the MVP look is preserved.
@@ -122,7 +129,13 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
       ].join(" ")}
     >
       {showBubble && <NodeBriefBubble description={boardItem.description} fallback={boardItem.fallback} />}
-      {!isRoot && <Handle type="target" position={Position.Left} />}
+      {!isRoot && !isBrief && <Handle type="target" position={Position.Left} />}
+      {isBrief && (
+        <Handle id="brief-target" type="target" position={Position.Bottom} />
+      )}
+      {hasBriefChild && (
+        <Handle id="brief-source" type="source" position={Position.Top} />
+      )}
 
       <div className="flex items-center justify-between mb-1.5 gap-1">
         <span className="font-semibold text-gray-700">
