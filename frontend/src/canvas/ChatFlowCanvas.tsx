@@ -314,16 +314,30 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
       lastChatflowId.current = chatflow?.id ?? null;
     }
     const laid = buildGraph(chatflow, selectedNodeId, contextWindowByModel, boardItems);
-    const merged = laid.nodes.map((n) => ({
-      ...n,
-      // Synthetic chat-brief nodes aren't draggable and don't persist
-      // positions — they always sit above their source. Everything else
-      // honours the stored drag position.
-      position:
-        n.type === "chatBrief"
-          ? n.position
-          : (dragPositions.current[n.id] ?? n.position),
-    }));
+    // Two-pass position merge: first resolve each real ChatNode's
+    // effective position (drag override wins over laid-out), then snap
+    // every brief to ``source.effective + offset`` so briefs behave
+    // like bubbles attached to their parent — one-to-one, always in
+    // the same relative slot.
+    const effectivePos = new Map<string, { x: number; y: number }>();
+    for (const n of laid.nodes) {
+      if (n.type === "chatBrief") continue;
+      effectivePos.set(n.id, dragPositions.current[n.id] ?? n.position);
+    }
+    const merged = laid.nodes.map((n) => {
+      if (n.type === "chatBrief") {
+        const srcId = (n.data as ChatBriefNodeData).sourceNodeId;
+        const srcPos = effectivePos.get(srcId);
+        if (srcPos) {
+          return {
+            ...n,
+            position: { x: srcPos.x, y: srcPos.y - CHAT_BRIEF_STACK_OFFSET },
+          };
+        }
+        return n;
+      }
+      return { ...n, position: effectivePos.get(n.id) ?? n.position };
+    });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const stickyNodes: Node<any>[] = Object.values(stickyNotes).map((note) => ({
       id: note.id,
@@ -365,8 +379,30 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
         updateStickyNote(c.id, { width: c.dimensions.width, height: c.dimensions.height });
       }
     }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    setNodes((ns) => applyNodeChanges(filtered, ns) as Node<any>[]);
+    // Keep briefs glued to their source while the source is being dragged:
+    // React Flow only emits position changes for the dragged node, so
+    // without this we'd get a laggy brief that snaps only on drag-stop.
+    const sourceMoves = new Map<string, { x: number; y: number }>();
+    for (const c of filtered) {
+      if (c.type === "position" && c.position) {
+        sourceMoves.set(String(c.id), c.position);
+      }
+    }
+    setNodes((ns) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const after = applyNodeChanges(filtered, ns) as Node<any>[];
+      if (sourceMoves.size === 0) return after;
+      return after.map((n) => {
+        if (n.type !== "chatBrief") return n;
+        const srcId = (n.data as ChatBriefNodeData).sourceNodeId;
+        const src = sourceMoves.get(srcId);
+        if (!src) return n;
+        return {
+          ...n,
+          position: { x: src.x, y: src.y - CHAT_BRIEF_STACK_OFFSET },
+        };
+      });
+    });
 
     if (dirtyPositions.current.size > 0) {
       if (saveTimer.current) clearTimeout(saveTimer.current);

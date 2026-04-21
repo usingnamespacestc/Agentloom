@@ -165,6 +165,12 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
   const [edges, setEdges] = useState<Edge[]>([]);
   const dragPositions = useRef<Record<string, { x: number; y: number }>>({});
   const dirtyPositions = useRef<Set<string>>(new Set());
+  /** Per-brief static offset from its source node (captured at layout
+   * time). Briefs stay glued to their source by applying this offset
+   * to the source's live position. */
+  const briefOffsets = useRef<
+    Record<string, { sourceId: string; dx: number; dy: number }>
+  >({});
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastWorkflowId = useRef<string | null>(null);
   // Mid-drag, SSE-driven ``setNodes([...])`` replacements disrupt React
@@ -192,13 +198,42 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
     if (workflow?.id !== lastWorkflowId.current) {
       dragPositions.current = {};
       dirtyPositions.current.clear();
+      briefOffsets.current = {};
       lastWorkflowId.current = workflow?.id ?? null;
     }
     const laid = buildWorkflowGraph(workflow, workflowSelectedNodeId, ctxWindowByModel);
-    const merged = laid.nodes.map((n) => ({
-      ...n,
-      position: dragPositions.current[n.id] ?? n.position,
-    }));
+    // Brief WorkNodes (step_kind === "brief") are bubbles attached to
+    // their source: capture the laid-out delta so they glide with the
+    // source as it moves, and drop any stale drag positions on them so
+    // a legacy drag can't leave the brief stranded.
+    const effectivePos = new Map<string, { x: number; y: number }>();
+    for (const n of laid.nodes) {
+      if (n.data.node.step_kind === "brief") continue;
+      effectivePos.set(n.id, dragPositions.current[n.id] ?? n.position);
+    }
+    for (const n of laid.nodes) {
+      if (n.data.node.step_kind !== "brief") continue;
+      const srcId = n.data.node.parent_ids[0];
+      const srcLaid = laid.nodes.find((m) => m.id === srcId);
+      if (!srcLaid) continue;
+      briefOffsets.current[n.id] = {
+        sourceId: srcId,
+        dx: n.position.x - srcLaid.position.x,
+        dy: n.position.y - srcLaid.position.y,
+      };
+      delete dragPositions.current[n.id];
+    }
+    const merged = laid.nodes.map((n) => {
+      if (n.data.node.step_kind === "brief") {
+        const off = briefOffsets.current[n.id];
+        const srcPos = off ? effectivePos.get(off.sourceId) : undefined;
+        if (off && srcPos) {
+          return { ...n, position: { x: srcPos.x + off.dx, y: srcPos.y + off.dy } };
+        }
+        return n;
+      }
+      return { ...n, position: effectivePos.get(n.id) ?? n.position };
+    });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const stickyNodes: Node<any>[] = Object.values(stickyNotes).map((note) => ({
       id: note.id,
@@ -225,6 +260,10 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
     if (filtered.length === 0) return;
     for (const c of filtered) {
       if (c.type === "position" && c.position) {
+        // Briefs aren't draggable (set in buildWorkflowGraph), but a
+        // programmatic change could still arrive for one — never
+        // persist a brief's position so it can't drift from its source.
+        if (c.id in briefOffsets.current) continue;
         dragPositions.current[c.id] = c.position;
         if (isSticky(String(c.id))) {
           updateStickyNote(c.id, { x: c.position.x, y: c.position.y });
@@ -236,8 +275,27 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
         updateStickyNote(c.id, { width: c.dimensions.width, height: c.dimensions.height });
       }
     }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    setNodes((ns) => applyNodeChanges(filtered, ns) as Node<any>[]);
+    // Glide briefs with their source during a live drag: build a map
+    // of (sourceId → newPosition) from the incoming changes and apply
+    // each brief's stored offset so it tracks the cursor frame-by-frame.
+    const sourceMoves = new Map<string, { x: number; y: number }>();
+    for (const c of filtered) {
+      if (c.type === "position" && c.position) {
+        sourceMoves.set(String(c.id), c.position);
+      }
+    }
+    setNodes((ns) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const after = applyNodeChanges(filtered, ns) as Node<any>[];
+      if (sourceMoves.size === 0) return after;
+      return after.map((n) => {
+        const off = briefOffsets.current[n.id];
+        if (!off) return n;
+        const src = sourceMoves.get(off.sourceId);
+        if (!src) return n;
+        return { ...n, position: { x: src.x + off.dx, y: src.y + off.dy } };
+      });
+    });
 
     if (dirtyPositions.current.size > 0) {
       if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -251,6 +309,11 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
 
   const handleNodeDragStop: OnNodeDrag = useCallback((_event, node) => {
     isDragging.current = false;
+    // Briefs ride their source — don't record or persist their position.
+    if (node.id in briefOffsets.current) {
+      setSyncTick((t) => t + 1);
+      return;
+    }
     dragPositions.current[node.id] = { x: node.position.x, y: node.position.y };
     if (isSticky(String(node.id))) {
       updateStickyNote(node.id, { x: node.position.x, y: node.position.y });
@@ -391,8 +454,11 @@ export function buildWorkflowGraph(
     for (const pid of n.parent_ids) hasChild.add(pid);
   }
   const rfNodes: Node<WorkFlowNodeData>[] = laidOut.map(({ node, position }) => {
+    const isBrief = briefIds.has(node.id);
+    // Brief positions are always derived from their source; skip any
+    // stored position_x/y (legacy rows) so briefs stay attached.
     const pos =
-      node.position_x != null && node.position_y != null
+      !isBrief && node.position_x != null && node.position_y != null
         ? { x: node.position_x, y: node.position_y }
         : position;
     const ref = node.model_override;
@@ -410,6 +476,7 @@ export function buildWorkflowGraph(
         hasBriefChild: briefParentIds.has(node.id),
       },
       selectable: false,
+      draggable: !isBrief,
     };
   });
   const rfEdges: Edge[] = [];
