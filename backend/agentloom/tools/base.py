@@ -53,6 +53,15 @@ class ToolContext:
     workspace_id: str = "default"
     cwd: str = "."
     env: dict[str, str] = field(default_factory=dict)
+    #: Node ids that tools have pulled into the current ChatNode's view
+    #: via ``get_node_context``. The engine reads this after each
+    #: ChatNode turn to update :attr:`CompactSnapshot.sticky_restored` —
+    #: every hit becomes (or refreshes) a sticky entry with counter =
+    #: compact_preserve_recent_turns; every turn that doesn't re-touch
+    #: an entry decrements its counter. Empty set means "nothing was
+    #: restored this turn". Managed by the engine per-ChatNode: reset
+    #: to a fresh set before each turn, drained after.
+    accessed_node_ids: set[str] = field(default_factory=set)
 
 
 class Tool(ABC):

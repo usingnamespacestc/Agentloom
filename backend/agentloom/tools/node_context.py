@@ -125,6 +125,11 @@ class GetNodeContextTool(Tool):
             )
 
         payload = _serialize(body, max_bytes)
+        # Record the used-signal so the engine can refresh / extend the
+        # sticky-restore counter for this source node on the current
+        # ChatNode's CompactSnapshot. Only successful lookups count;
+        # the not-found path above already raised.
+        ctx.accessed_node_ids.add(node_id)
         return ToolResult(content=payload)
 
 
