@@ -14,11 +14,6 @@ params_schema:
       源 WorkNode 的 step_kind（``llm_call`` / ``judge_call`` /
       ``merge`` / ``compact`` / ``planner`` 等）。``tool_call``
       根本不会进入本 fixture。
-  source_description:
-    type: string
-    required: false
-    description: >
-      源节点的人类可读描述（用于说明它的任务）。没有描述时为空。
   source_inputs:
     type: string
     required: false
@@ -69,9 +64,6 @@ plan:
         - role: user
           content: |
             源节点 kind：{{ source_kind }}
-
-            源节点描述：
-            {{ source_description }}
 
             源节点输入：
             ---

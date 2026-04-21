@@ -15,12 +15,6 @@ params_schema:
       The source WorkNode's step_kind (``llm_call``, ``judge_call``,
       ``merge``, ``compact``, ``planner``, etc.) — ``tool_call``
       sources bypass this fixture entirely.
-  source_description:
-    type: string
-    required: false
-    description: >
-      The source node's human-visible description (what it was set up
-      to do). Empty when no description was attached.
   source_inputs:
     type: string
     required: false
@@ -76,9 +70,6 @@ plan:
         - role: user
           content: |
             Source node kind: {{ source_kind }}
-
-            Source description:
-            {{ source_description }}
 
             Source inputs:
             ---

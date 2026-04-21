@@ -161,7 +161,6 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [nodes, setNodes] = useState<Node<any>[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
-  const [flowBriefNode, setFlowBriefNode] = useState<WorkFlowNode | null>(null);
   const dragPositions = useRef<Record<string, { x: number; y: number }>>({});
   const dirtyPositions = useRef<Set<string>>(new Set());
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -217,7 +216,6 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
     }));
     setNodes([...merged, ...stickyNodes]);
     setEdges(laid.edges);
-    setFlowBriefNode(laid.flowBriefNode);
   }, [workflow, workflowSelectedNodeId, ctxWindowByModel, stickyNotes, editingStickyId, selectedStickyId, onNoteTitleChange, onNoteTextChange, onNoteDelete, syncTick]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
@@ -303,7 +301,6 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
 
   return (
     <div data-testid="workflow-canvas" className="relative h-full w-full" onClick={() => { setCtxMenu(null); setStickyCtxMenu(null); }}>
-      <FlowBriefBanner flowBriefNode={flowBriefNode} />
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -348,53 +345,6 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
   );
 }
 
-/**
- * Top-of-frame banner promoted from the WorkFlow's flow-brief
- * WorkNode. The brief WorkNode itself is dropped from the canvas
- * layout (see ``buildWorkflowGraph``) so the only surface carrying
- * its content is this enlarged banner — expand-on-click reveals the
- * full description. Hidden until the engine produces the flow-brief.
- */
-function FlowBriefBanner({ flowBriefNode }: { flowBriefNode: WorkFlowNode | null }) {
-  const [expanded, setExpanded] = useState(false);
-  const workflowId = flowBriefNode?.parent_ids[0];
-  // The matching BoardItem (source_node_id == workflow_id) carries
-  // the authoritative description + fallback flag once persisted;
-  // fall back to the node's own ``output_message.content`` for the
-  // brief window between node completion and store sync.
-  const boardItem = useChatFlowStore((s) =>
-    workflowId ? s.boardItems[workflowId] : undefined,
-  );
-  if (!flowBriefNode) return null;
-  const text =
-    boardItem?.description ??
-    flowBriefNode.output_message?.content ??
-    "";
-  if (!text) return null;
-  const fallback = boardItem?.fallback ?? false;
-  return (
-    <div
-      data-testid="flow-brief-banner"
-      data-fallback={fallback ? "true" : "false"}
-      className={[
-        "absolute left-3 right-3 top-14 z-20",
-        "rounded-lg border border-sky-200 bg-white/95",
-        "px-4 py-3 text-sm leading-relaxed text-gray-800 shadow-md",
-        "cursor-pointer select-none",
-      ].join(" ")}
-      onClick={(e) => {
-        e.stopPropagation();
-        setExpanded((v) => !v);
-      }}
-      title={text}
-    >
-      <div className="break-words">
-        {expanded ? text : text.length > 240 ? `${text.slice(0, 239)}…` : text}
-      </div>
-    </div>
-  );
-}
-
 /** Pure helper — unit-testable without rendering React Flow. */
 export function buildWorkflowGraph(
   workflow: WorkFlow | null,
@@ -403,19 +353,16 @@ export function buildWorkflowGraph(
 ): {
   nodes: Node<WorkFlowNodeData>[];
   edges: Edge[];
-  flowBriefNode: WorkFlowNode | null;
 } {
-  if (!workflow) return { nodes: [], edges: [], flowBriefNode: null };
+  if (!workflow) return { nodes: [], edges: [] };
   const wf = workflow;
-  // The flow-brief is promoted to a top-of-frame banner and dropped
-  // from the canvas; pull it out first so it never enters layout.
-  let flowBriefNode: WorkFlowNode | null = null;
+  // Flow-brief was retired backend-side on 2026-04-21, but any
+  // persisted WorkFlow from before that date may still carry a
+  // scope="flow" BRIEF WorkNode. Drop them from layout so legacy
+  // data doesn't paint a stray disconnected node on the canvas.
   const graphNodes: Record<string, WorkFlowNode> = {};
   for (const [id, n] of Object.entries(wf.nodes)) {
-    if (n.step_kind === "brief" && n.scope === "flow") {
-      flowBriefNode = n;
-      continue;
-    }
+    if (n.step_kind === "brief" && n.scope === "flow") continue;
     graphNodes[id] = n;
   }
   const briefIds = new Set<string>();
@@ -477,5 +424,5 @@ export function buildWorkflowGraph(
       });
     }
   }
-  return { nodes: rfNodes, edges: rfEdges, flowBriefNode };
+  return { nodes: rfNodes, edges: rfEdges };
 }
