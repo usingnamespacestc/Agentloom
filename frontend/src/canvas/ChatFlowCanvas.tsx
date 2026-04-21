@@ -56,6 +56,7 @@ import { layoutDag } from "./layout";
 import { CanvasContextMenu, StickyNoteContextMenu } from "./CanvasContextMenu";
 import { CompactConfirmDialog } from "@/components/CompactConfirmDialog";
 import { ChatFlowActiveWorkPanel } from "./ChatFlowActiveWorkPanel";
+import { MemoryBoardPanel } from "./MemoryBoardPanel";
 import { ModelRibbonLayer } from "./ModelRibbonLayer";
 import { MODEL_KINDS, colorForModel, edgeModel } from "./effectiveModel";
 import { ChatFlowNodeCard, type ChatFlowNodeData } from "./nodes/ChatFlowNodeCard";
@@ -507,6 +508,7 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
         <Controls showInteractive={false} />
         <ModelRibbonLayer chatflow={chatflow} />
         <ChatFlowActiveWorkPanel chatflow={chatflow} />
+        <ChatBoardPanel boardItems={boardItems} onJump={selectNode} />
       </ReactFlow>
 
       {hoveredEdge && cursorPos && chatflow && (
@@ -789,6 +791,42 @@ export function contextWindowMap(
  * outside the ChatNode id-space so selection / drag-position / delete
  * handlers can cheaply skip them. */
 export const CHAT_BRIEF_NODE_PREFIX = "_chat_brief_";
+
+/** Sort BoardItems newest-first; undefined ``created_at`` sorts last. */
+function sortByCreatedDesc(a: BoardItem, b: BoardItem): number {
+  const ta = a.created_at ? Date.parse(a.created_at) : 0;
+  const tb = b.created_at ? Date.parse(b.created_at) : 0;
+  return tb - ta;
+}
+
+/** ChatFlow-layer MemoryBoard panel — lists scope='chat' briefs and
+ * jumps to the source ChatNode on click. */
+function ChatBoardPanel({
+  boardItems,
+  onJump,
+}: {
+  boardItems: Record<NodeId, BoardItem>;
+  onJump: (nodeId: NodeId) => void;
+}) {
+  const { t } = useTranslation();
+  const items = useMemo(
+    () =>
+      Object.values(boardItems)
+        .filter((item) => item.scope === "chat")
+        .sort(sortByCreatedDesc),
+    [boardItems],
+  );
+  return (
+    <MemoryBoardPanel
+      testId="chatflow-memoryboard-panel"
+      title={t("chatflow.memoryboard_panel_title")}
+      emptyText={t("chatflow.memoryboard_panel_empty")}
+      fallbackLabel={t("chatflow.chat_brief_fallback_badge")}
+      items={items}
+      onItemClick={(item) => onJump(item.source_node_id)}
+    />
+  );
+}
 
 /** Pure function so it can be unit-tested without rendering React Flow. */
 export function buildGraph(

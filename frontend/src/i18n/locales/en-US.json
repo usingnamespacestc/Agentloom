@@ -89,7 +89,9 @@
     "chatboard_badge_hint": "A ChatBoardItem is available for this ChatNode — hover to see the brief.",
     "chat_brief_label": "Chat brief",
     "chat_brief_fallback_badge": "fallback",
-    "chat_brief_fallback_hint": "Produced by the deterministic code template — the LLM brief was skipped or failed."
+    "chat_brief_fallback_hint": "Produced by the deterministic code template — the LLM brief was skipped or failed.",
+    "memoryboard_panel_title": "ChatBoard",
+    "memoryboard_panel_empty": "No ChatBoard briefs yet"
   },
   "workflow": {
     "panel_title": "Inner workflow",
@@ -128,7 +130,10 @@
     "blockers": "Blockers",
     "missing_inputs": "Missing inputs",
     "critiques": "Critiques",
-    "issues": "Issues"
+    "issues": "Issues",
+    "memoryboard_panel_title": "WorkBoard",
+    "memoryboard_panel_empty": "No WorkBoard briefs yet",
+    "memoryboard_panel_fallback_badge": "fallback"
   },
   "canvas": {
     "insert_note": "Insert note",

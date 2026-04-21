@@ -33,12 +33,13 @@ import { useTranslation } from "react-i18next";
 import { layoutDag } from "./layout";
 import { CanvasContextMenu, StickyNoteContextMenu } from "./CanvasContextMenu";
 import { contextWindowMap } from "./ChatFlowCanvas";
+import { MemoryBoardPanel } from "./MemoryBoardPanel";
 import { StickyNoteNode, type StickyNoteData } from "./nodes/StickyNoteNode";
 import { WorkFlowNodeCard, type WorkFlowNodeData } from "./nodes/WorkFlowNodeCard";
 import { api } from "@/lib/api";
 import type { ProviderSummary } from "@/lib/api";
 import { useChatFlowStore } from "@/store/chatflowStore";
-import type { NodeId, StickyNote, WorkFlow, WorkFlowNode } from "@/types/schema";
+import type { BoardItem, NodeId, StickyNote, WorkFlow, WorkFlowNode } from "@/types/schema";
 
 const NODE_TYPES = { workflow: WorkFlowNodeCard, stickyNote: StickyNoteNode };
 
@@ -66,6 +67,7 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
   const chatflowId = useChatFlowStore((s) => s.chatflow?.id ?? null);
   const workflowSelectedNodeId = useChatFlowStore((s) => s.workflowSelectedNodeId);
   const selectWorkflowNode = useChatFlowStore((s) => s.selectWorkflowNode);
+  const boardItems = useChatFlowStore((s) => s.boardItems);
   const reactFlow = useReactFlow();
 
   // Sticky notes — persisted via workflow.sticky_notes
@@ -324,6 +326,11 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
       >
         <Background />
         <Controls showInteractive={false} />
+        <WorkBoardPanel
+          workflow={workflow}
+          boardItems={boardItems}
+          onJump={selectWorkflowNode}
+        />
       </ReactFlow>
       {ctxMenu && (
         <CanvasContextMenu
@@ -425,4 +432,42 @@ export function buildWorkflowGraph(
     }
   }
   return { nodes: rfNodes, edges: rfEdges };
+}
+
+function sortBoardItemsDesc(a: BoardItem, b: BoardItem): number {
+  const ta = a.created_at ? Date.parse(a.created_at) : 0;
+  const tb = b.created_at ? Date.parse(b.created_at) : 0;
+  return tb - ta;
+}
+
+/** WorkFlow-layer MemoryBoard panel — lists scope='node' briefs for the
+ * currently viewed WorkFlow (outer or sub) and jumps to the source
+ * WorkNode on click. Sub-workflow filtering is by ``workflow_id`` so
+ * each drill level shows only its own briefs. */
+function WorkBoardPanel({
+  workflow,
+  boardItems,
+  onJump,
+}: {
+  workflow: WorkFlow | null;
+  boardItems: Record<NodeId, BoardItem>;
+  onJump: (nodeId: NodeId) => void;
+}) {
+  const { t } = useTranslation();
+  const items = useMemo(() => {
+    if (!workflow) return [];
+    return Object.values(boardItems)
+      .filter((item) => item.scope === "node" && item.workflow_id === workflow.id)
+      .sort(sortBoardItemsDesc);
+  }, [workflow, boardItems]);
+  return (
+    <MemoryBoardPanel
+      testId="workflow-memoryboard-panel"
+      title={t("workflow.memoryboard_panel_title")}
+      emptyText={t("workflow.memoryboard_panel_empty")}
+      fallbackLabel={t("workflow.memoryboard_panel_fallback_badge")}
+      items={items}
+      onItemClick={(item) => onJump(item.source_node_id)}
+    />
+  );
 }
