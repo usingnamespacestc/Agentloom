@@ -139,6 +139,10 @@ _VARIANT_SCHEMAS: dict[JudgeVariant, dict[str, Any]] = {
                 "type": "array",
                 "items": {"type": "string"},
             },
+            "extracted_capabilities": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
         },
         "required": [
             "extracted_description",

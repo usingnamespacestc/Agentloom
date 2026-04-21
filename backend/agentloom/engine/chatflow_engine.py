@@ -3530,6 +3530,13 @@ def _apply_judge_pre_trio(workflow: WorkFlow, verdict: JudgeVerdict) -> None:
     _set("description", verdict.extracted_description)
     _set("inputs", verdict.extracted_inputs)
     _set("expected_outcome", verdict.extracted_expected_outcome)
+    # Capabilities is a plain list, not an EditableText — the user
+    # typically doesn't hand-edit the tool-slice so there's no
+    # provenance to track. Overwrite only when judge_pre actually
+    # returned a non-empty list, so a capabilities-less fixture or a
+    # halted verdict doesn't clobber a previous extraction.
+    if verdict.extracted_capabilities:
+        workflow.capabilities = list(verdict.extracted_capabilities)
 
 
 def _judge_pre_should_halt(verdict: JudgeVerdict) -> bool:

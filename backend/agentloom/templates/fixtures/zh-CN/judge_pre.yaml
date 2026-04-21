@@ -90,7 +90,20 @@ plan:
                 是没有请求的闲聊等），就让三个字段都为空串。planner
                 会看到这个信号并以 infeasible 中止。
 
-            (2) 基于你刚写出的 trio 判断可行性：
+            (2) 预估 worker 可能需要的能力（capabilities）：
+
+                列出完成该任务可能用到的资源 / 工具 / 技能——例如
+                需要查新信息时给 ``["web_search"]``、需要跑或验证
+                代码时给 ``["code_execution"]``、需要拉取具体 URL
+                时给 ``["file_read", "web_fetch"]``。用简短的
+                snake_case 词元，每个词元对应一个独立能力。若该任务
+                是纯对话 / 纯推理、不需要任何外部资源，则省略该字段
+                或返回空数组——这种情况下 worker 会默认拥有全部工具
+                池。该列表是**预先缩圈的提示**，不是硬性白名单；
+                planner 会参考它决定给下游子 worker 分哪些切片，
+                所以此处**写具体**比**写全**更有用。
+
+            (3) 基于你刚写出的 trio 判断可行性：
 
                 - ok：        inputs 与 outcome 是一致的；可以继续。
                 - risky：     继续是可能的，但前提是某些假设必须成立——
@@ -111,6 +124,7 @@ plan:
               {"extracted_description": str,
                "extracted_inputs": str,
                "extracted_expected_outcome": str,
+               "extracted_capabilities": [str, ...],
                "feasibility": "ok"|"risky"|"infeasible",
                "blockers": [str, ...],
                "missing_inputs": [str, ...]}

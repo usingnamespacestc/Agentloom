@@ -114,7 +114,24 @@ plan:
                 fields. The planner will see that and halt as
                 infeasible.
 
-            (2) Decide feasibility given the trio you just wrote:
+            (2) Scope the capabilities the worker will need:
+
+                List the resources / tools / skills the task plausibly
+                needs — e.g. ``["web_search"]`` for a question that
+                requires fresh information, ``["code_execution"]`` for
+                a task that runs or validates code, ``["file_read",
+                "web_fetch"]`` for a task that pulls specific URLs.
+                Use short, snake_case tokens; one token per distinct
+                capability. Omit the field (or return an empty list)
+                when the task is pure chat / reasoning with no
+                external affordances needed — the worker will default
+                to its full tool pool in that case. This list is a
+                *pre-scope hint*, not a hard allow-list; the planner
+                reads it to decide which sub-workers need which
+                slices, so being specific here is more useful than
+                being exhaustive.
+
+            (3) Decide feasibility given the trio you just wrote:
 
                 - ok:         inputs + outcome are coherent; proceed.
                 - risky:      proceed is possible but specific assumptions
@@ -138,6 +155,7 @@ plan:
               {"extracted_description": str,
                "extracted_inputs": str,
                "extracted_expected_outcome": str,
+               "extracted_capabilities": [str, ...],
                "feasibility": "ok"|"risky"|"infeasible",
                "blockers": [str, ...],
                "missing_inputs": [str, ...]}

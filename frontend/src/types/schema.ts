@@ -232,6 +232,13 @@ export interface WorkFlow {
   /** Hard cap on plan↔plan_judge / worker↔worker_judge debate
    * rounds before forcing convergence (§3.4.5). */
   debate_round_budget?: number;
+  /** Resources / tools / skills judge_pre pre-scoped for this
+   * WorkFlow (e.g. ``["web_search", "code_execution"]``). Planner
+   * and downstream workers read this to select the relevant slice
+   * of their tool pool. Empty = no pre-scope, worker sees its full
+   * pool. Plain list of snake_case tokens; not an EditableText
+   * because the user rarely hand-edits the tool-slice. */
+  capabilities?: string[];
   sticky_notes?: Record<string, StickyNote>;
 }
 

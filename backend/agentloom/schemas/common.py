@@ -361,6 +361,13 @@ class JudgeVerdict(BaseModel):
     extracted_description: str | None = None
     extracted_inputs: str | None = None
     extracted_expected_outcome: str | None = None
+    #: Resources / tools / skills judge_pre infers the task will need
+    #: (e.g. ``["web_search", "code_execution"]``). Written onto
+    #: ``WorkFlow.capabilities`` so the planner and downstream workers
+    #: can read a pre-scoped slice of available resources. ``None`` or
+    #: empty = judge_pre didn't scope (legacy behavior / older fixtures
+    #: without a capabilities field).
+    extracted_capabilities: list[str] | None = None
 
     # --- judge_during ---
     critiques: list[Critique] = Field(default_factory=list)

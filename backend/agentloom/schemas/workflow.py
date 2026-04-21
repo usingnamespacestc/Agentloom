@@ -257,6 +257,15 @@ class WorkFlow(BaseModel):
     description: EditableText | None = None
     inputs: EditableText | None = None
     expected_outcome: EditableText | None = None
+    #: Pre-check capability slice — the list of tools / skills / resources
+    #: judge_pre decided this WorkFlow needs. Written by
+    #: ``_apply_judge_pre_trio`` from ``JudgeVerdict.extracted_capabilities``
+    #: before the planner runs. Empty = judge_pre didn't scope (either
+    #: because it halted before extraction or because the fixture doesn't
+    #: ask for capabilities yet). Planner and downstream delegation can
+    #: read this to avoid re-parsing the full conversation on every
+    #: sub-worker spawn.
+    capabilities: list[str] = Field(default_factory=list)
 
     # Execution behavior — each WorkFlow (including nested ones) picks its own
     execution_mode: ExecutionMode = ExecutionMode.NATIVE_REACT
