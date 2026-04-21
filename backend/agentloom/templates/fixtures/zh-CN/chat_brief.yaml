@@ -1,0 +1,78 @@
+builtin_id: chat_brief
+name: "ChatNode 简介"
+description: >
+  MemoryBoard ChatNode 简介 worker。把一个 ChatNode（普通 turn / compact /
+  merge）的本轮用户输入与 agent 最终回复浓缩成一句简短的散文描述，写入
+  该 ChatBoardItem.description。引擎在 ChatNode 变为 SUCCEEDED 后自动挂起
+  本 fixture；模型来自 ``chatflow.brief_model`` 或 ``chatflow.draft_model``。
+  输出供 MemoryBoard 下游消费方查阅——保持紧凑、可指认，不讲故事。
+params_schema:
+  source_kind:
+    type: string
+    required: true
+    description: >
+      ChatNode 类型：``chat_turn`` / ``chat_compact`` / ``chat_merge``。
+  user_message:
+    type: string
+    required: false
+    description: >
+      本轮 pre-check 前的用户输入（``ChatFlowNode.user_message.text``）。
+      merge 节点没有显式用户输入时可为空。
+  agent_response:
+    type: string
+    required: true
+    description: >
+      本轮 post-check 后的 agent 最终回复（``ChatFlowNode.agent_response.text``）。
+      compact 节点这里是压缩摘要；merge 节点这里是合并后的回复。
+plan:
+  description:
+    text: "为 ChatNode 写一到两句简介。"
+    provenance: pure_agent
+  execution_mode: native_react
+  nodes:
+    - id: "chat_brief_root"
+      parent_ids: []
+      step_kind: draft
+      description:
+        text: "把 ChatNode 本轮输入与输出凝练为简短散文描述。"
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            你是 MemoryBoard 总结器。任务：把**一个**ChatNode 本轮的用户
+            输入与 agent 最终回复改写成一句简短的散文描述——一到两句
+            话——让下游读者不必再回溯完整对话即可掌握要点。
+
+            硬性规则：
+              - 只涵盖两件事：用户本轮问/要求了什么，agent 给出了什么
+                结论/产出。
+              - 总共一到两句。不要列表、不要标题、不要 markdown、不要
+                JSON、不要代码围栏。纯散文。
+              - 保留读者后续回查时需要锚定的具体信息：工具名、文件路
+                径、数字、明确作出的决策、错误名。其它过程性细节一律
+                省掉。不要在正文里写出 ChatNode id —— 系统在写入
+                MemoryBoard 时会以元数据形式附加。
+              - 不要推测下游用途（"这将有助于…"）。只描述发生了什么。
+              - 不要复述系统提示或流程叙述。只写结论与关键事实。
+              - 不要编造对话里没有的内容。
+              - 用中立的第三人称书写。
+              - 对 ``chat_compact``：描述被压缩了什么，以及摘要的要点。
+              - 对 ``chat_merge``：描述合并来源的两条分支各自的取向，
+                以及合并后的回复结论。
+        - role: user
+          content: |
+            ChatNode 类型：{{ source_kind }}
+
+            本轮用户输入：
+            ---
+            {{ user_message }}
+            ---
+
+            本轮 agent 最终回复：
+            ---
+            {{ agent_response }}
+            ---
+
+            现在写出一到两句简介。只输出简介正文——不要开场白、不要
+            结语。
+  root_ids: ["chat_brief_root"]

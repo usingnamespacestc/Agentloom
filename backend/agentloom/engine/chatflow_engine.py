@@ -234,7 +234,7 @@ def _make_board_reader(
 ) -> Callable[..., Awaitable[list[dict[str, Any]]]]:
     """Build the :data:`BoardReader` closure that :meth:`WorkflowEngine.
     _render_node_briefs_from_board` (PR A, 2026-04-21) calls when it
-    needs judge_post's layer-notes or flow_brief's ``node_briefs`` block.
+    needs judge_post's layer-notes. (flow_brief was retired in the same pass.)
 
     Same fresh-session pattern as ``_make_board_writer`` — one session
     per read via ``get_session_maker()`` — so we don't have to thread
@@ -3690,14 +3690,15 @@ class ChatFlowEngine:
         self, chatflow: ChatFlow, node: ChatFlowNode
     ) -> None:
         """Write one ChatBoardItem for *node* via the inner engine's
-        ``board_writer`` (PR 3, 2026-04-20).
+        ``board_writer``.
 
         Called synchronously from every ChatNode-success path: plain
-        turn nodes, Tier-2 compact nodes, and manual merge nodes. The
-        description is a deterministic code template — no LLM call —
-        so the cost is bounded and offline tests don't need a provider
-        stub. A future PR can swap in an LLM-generated brief without
-        changing the call sites.
+        turn nodes, Tier-2 compact nodes, and manual merge nodes. Runs
+        the ``chat_brief`` fixture through ``self._provider`` to distill
+        the turn's user input + agent reply into a one-to-two-sentence
+        description; on provider failure, missing model, or an empty
+        reply, falls back to the deterministic :func:`_chat_board_description`
+        code template and marks the row ``fallback=True``.
 
         Idempotent: the underlying ``BoardItemRepository.upsert_by_source``
         keys off ``source_node_id``, so a re-invocation (retry, engine
@@ -3717,7 +3718,9 @@ class ChatFlowEngine:
         if node.user_message is None and node.agent_response.text == "":
             return
         source_kind = _chat_board_source_kind(node)
-        description = _chat_board_description(node)
+        description, fallback = await self._render_chat_board_description(
+            chatflow, node, source_kind
+        )
         try:
             await writer(
                 chatflow_id=chatflow.id,
@@ -3726,7 +3729,7 @@ class ChatFlowEngine:
                 source_kind=source_kind,
                 scope="chat",
                 description=description,
-                fallback=False,
+                fallback=fallback,
             )
         except Exception:  # noqa: BLE001 — board is best-effort
             log.exception(
@@ -3736,6 +3739,72 @@ class ChatFlowEngine:
                 node.id,
                 source_kind,
             )
+
+    async def _render_chat_board_description(
+        self,
+        chatflow: ChatFlow,
+        node: ChatFlowNode,
+        source_kind: str,
+    ) -> tuple[str, bool]:
+        """Produce the ChatBoardItem ``description`` text for *node*.
+
+        Returns ``(description, fallback)``. Tries the LLM path first
+        (``chat_brief`` fixture + ``chatflow.brief_model or draft_model``);
+        on no model, empty reply, or any provider exception, returns
+        :func:`_chat_board_description` with ``fallback=True``. The brief
+        is best-effort: its failure must never break the ChatNode cascade.
+        """
+        model_ref = chatflow.brief_model or chatflow.draft_model
+        if model_ref is None:
+            return _chat_board_description(node), True
+        from agentloom.engine.workflow_engine import _get_brief_fixture
+
+        try:
+            plan, includes = _get_brief_fixture("chat_brief")
+        except Exception:  # noqa: BLE001 — missing fixture is a build error, but the brief is best-effort
+            log.exception(
+                "chat_brief fixture load failed for chatflow=%s — falling "
+                "back to code template",
+                chatflow.id,
+            )
+            return _chat_board_description(node), True
+
+        user_text = node.user_message.text if node.user_message else ""
+        agent_text = node.agent_response.text if node.agent_response else ""
+        try:
+            brief_wf = instantiate_fixture(
+                plan,
+                {
+                    "source_kind": source_kind,
+                    "user_message": user_text,
+                    "agent_response": agent_text,
+                },
+                includes=includes,
+            )
+            inner = _single_node(brief_wf)
+            assert inner.input_messages is not None
+            from agentloom.engine.workflow_engine import _wire_to_provider
+
+            messages = _wire_to_provider(list(inner.input_messages))
+            model_str = (
+                f"{model_ref.provider_id}:{model_ref.model_id}"
+                if model_ref.provider_id
+                else model_ref.model_id
+            )
+            response = await self._provider(messages, [], model_str)
+            content = (response.message.content or "").strip()
+            if not content:
+                return _chat_board_description(node), True
+            return content, False
+        except Exception as exc:  # noqa: BLE001 — brief is best-effort
+            log.warning(
+                "chat_brief LLM call failed for chatflow=%s node=%s — "
+                "falling back to code template: %s",
+                chatflow.id,
+                node.id,
+                exc,
+            )
+            return _chat_board_description(node), True
 
     async def _relay_inner_events(
         self,

@@ -1,0 +1,87 @@
+builtin_id: chat_brief
+name: "ChatNode brief"
+description: >
+  MemoryBoard ChatNode-brief worker. Summarizes one ChatNode's turn
+  (plain turn / compact / merge) into a single short prose description
+  that populates the ChatBoardItem.description field. Invoked by the
+  ChatFlowEngine's post-success hook; the model is ``chatflow.brief_model``
+  or ``chatflow.draft_model``. Output is read later by MemoryBoard
+  consumers — keep it compact and referential, not narrative.
+params_schema:
+  source_kind:
+    type: string
+    required: true
+    description: >
+      ChatNode kind: ``chat_turn`` / ``chat_compact`` / ``chat_merge``.
+  user_message:
+    type: string
+    required: false
+    description: >
+      The turn's pre-check user input (``ChatFlowNode.user_message.text``).
+      May be empty for merge nodes that lack an explicit user turn.
+  agent_response:
+    type: string
+    required: true
+    description: >
+      The turn's post-check agent final reply
+      (``ChatFlowNode.agent_response.text``). For compact nodes this is
+      the compact summary; for merge nodes it is the merged reply.
+plan:
+  description:
+    text: "Produce a one-to-two-sentence ChatNode brief."
+    provenance: pure_agent
+  execution_mode: native_react
+  nodes:
+    - id: "chat_brief_root"
+      parent_ids: []
+      step_kind: draft
+      description:
+        text: "Distill a ChatNode's turn into a short prose description."
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            You are a MemoryBoard summarizer. Your job: rewrite ONE
+            ChatNode's user input and agent reply into a single short
+            prose description — one or two sentences — that a downstream
+            reader can scan instead of re-reading the full conversation.
+
+            Hard rules:
+              - Cover exactly two things: what the user asked/required
+                this turn, and what the agent concluded/produced.
+              - One or two sentences total. No bullet points, no
+                headings, no markdown, no JSON, no code fences. Just
+                plain prose.
+              - Preserve concrete anchors the reader will need to find
+                things again: tool names, file paths, numbers, explicit
+                decisions, error names. Drop everything else. Do NOT
+                write ChatNode ids in the prose — the system attaches
+                them as metadata when it persists the brief to
+                MemoryBoard.
+              - Do not speculate about downstream use ("this will help
+                with…"). Describe only what happened here.
+              - Do not restate the system prompt or narrate the flow.
+                Conclusions and key facts only.
+              - Never invent content the turn doesn't contain.
+              - Write in neutral third person.
+              - For ``chat_compact``: describe what was compacted and
+                the takeaway of the summary.
+              - For ``chat_merge``: describe each source branch's
+                stance and the merged reply's conclusion.
+        - role: user
+          content: |
+            ChatNode kind: {{ source_kind }}
+
+            User input this turn:
+            ---
+            {{ user_message }}
+            ---
+
+            Agent final reply this turn:
+            ---
+            {{ agent_response }}
+            ---
+
+            Write the one-to-two-sentence brief now. Output the brief
+            text only — no preamble, no postscript.
+  root_ids: ["chat_brief_root"]
