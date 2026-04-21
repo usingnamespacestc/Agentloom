@@ -19,11 +19,24 @@ Supported filters (all optional; all AND-combined; at least one of
 - ``source_node_id`` — direct address; returns at most one row.
 - ``query`` — case-insensitive substring match over ``description``.
 
-The return shape is a JSON object ``{"items": [...], "truncated": bool}``
-with at most ``limit`` (default 50, capped at 200) rows. Each item
-carries the fields downstream consumers care about: ``description``,
-``scope``, ``source_node_id``, ``source_kind``, ``fallback``,
-``chatflow_id``, ``workflow_id``, ``created_at``.
+Two return shapes (opt in via ``format``, default ``"prompt"``):
+
+- ``"prompt"`` — a readable prose block rendered for LLM consumption.
+  Each item becomes a metadata line (``scope``, ``source_kind``,
+  ``source_node_id``, ``created_at``) followed by the indented brief
+  description. This is the default because the tool's primary caller
+  is an LLM planning/judging node — raw JSON wastes tokens on
+  structural punctuation the model has to parse back out.
+- ``"json"`` — the legacy ``{"items": [...], "truncated": bool}``
+  shape. Each item carries ``description``, ``scope``,
+  ``source_node_id``, ``source_kind``, ``fallback``, ``chatflow_id``,
+  ``workflow_id``, ``created_at``. Use this when the caller is
+  programmatic (tests, UI, another tool).
+
+PR B (2026-04-21): the prompt form is the architectural read-time
+JSON→prose conversion the MemoryBoard design calls for — briefs are
+stored as structured rows and materialized as prose at the moment a
+consumer reads them, never edge-connected to consumer nodes.
 
 Cross-workspace isolation is enforced by :class:`BoardItemRepository`
 — every query filters by ``ctx.workspace_id``, so a node id from
@@ -45,6 +58,8 @@ from agentloom.tools.base import Tool, ToolContext, ToolError
 _DEFAULT_LIMIT = 50
 _MAX_LIMIT = 200
 _VALID_SCOPES = {"chat", "node", "flow"}
+_VALID_FORMATS = {"prompt", "json"}
+_DEFAULT_FORMAT = "prompt"
 
 
 class MemoryBoardLookupTool(Tool):
@@ -58,6 +73,9 @@ class MemoryBoardLookupTool(Tool):
         "(``chat``/``node``/``flow``), ``source_node_id`` for direct "
         "address, or ``query`` substring match over the description. "
         "Returns at most ``limit`` rows (default 50, max 200). "
+        "``format`` chooses the output shape: ``prompt`` (default, "
+        "readable prose block for LLM consumption) or ``json`` "
+        "(structured rows for programmatic callers). "
         "Cross-workspace items are never visible."
     )
     parameters = {
@@ -110,6 +128,17 @@ class MemoryBoardLookupTool(Tool):
                 ),
                 "default": _DEFAULT_LIMIT,
             },
+            "format": {
+                "type": "string",
+                "enum": sorted(_VALID_FORMATS),
+                "description": (
+                    "Output shape. ``prompt`` (default) renders a "
+                    "readable prose block for LLM consumption. "
+                    "``json`` returns the structured ``{items, "
+                    "truncated}`` object for programmatic callers."
+                ),
+                "default": _DEFAULT_FORMAT,
+            },
         },
     }
 
@@ -119,6 +148,7 @@ class MemoryBoardLookupTool(Tool):
         source_node_id = _str_or_none(args, "source_node_id")
         scope = _str_or_none(args, "scope")
         query = _str_or_none(args, "query")
+        fmt = _str_or_none(args, "format") or _DEFAULT_FORMAT
 
         if not chatflow_id and not workflow_id:
             raise ToolError(
@@ -130,6 +160,12 @@ class MemoryBoardLookupTool(Tool):
             raise ToolError(
                 f"memoryboard_lookup: invalid scope {scope!r}; "
                 f"must be one of {sorted(_VALID_SCOPES)}"
+            )
+
+        if fmt not in _VALID_FORMATS:
+            raise ToolError(
+                f"memoryboard_lookup: invalid format {fmt!r}; "
+                f"must be one of {sorted(_VALID_FORMATS)}"
             )
 
         raw_limit = args.get("limit", _DEFAULT_LIMIT)
@@ -166,11 +202,14 @@ class MemoryBoardLookupTool(Tool):
         truncated = len(rows) > limit
         rows = rows[:limit]
 
-        payload = {
-            "items": [_serialize_row(r) for r in rows],
-            "truncated": truncated,
-        }
-        return ToolResult(content=json.dumps(payload, ensure_ascii=False))
+        if fmt == "json":
+            payload = {
+                "items": [_serialize_row(r) for r in rows],
+                "truncated": truncated,
+            }
+            return ToolResult(content=json.dumps(payload, ensure_ascii=False))
+
+        return ToolResult(content=_render_prompt_block(rows, truncated=truncated))
 
 
 def _str_or_none(args: dict[str, Any], key: str) -> str | None:
@@ -197,3 +236,38 @@ def _serialize_row(row: BoardItemRow) -> dict[str, Any]:
         "fallback": row.fallback,
         "created_at": row.created_at.isoformat() if row.created_at else None,
     }
+
+
+def _render_prompt_block(rows: list[BoardItemRow], *, truncated: bool) -> str:
+    """Format ``rows`` as a readable prose block for LLM consumption.
+
+    Each row renders as a metadata line (``scope`` / ``source_kind`` /
+    ``source_node_id`` / ``created_at``) followed by the indented brief
+    description. ``source_node_id`` is in the metadata — not inside the
+    description prose — so the consumer can cite it in ``redo_targets``
+    or feed it to ``get_node_context`` for a deeper read.
+    """
+    if not rows:
+        return "MemoryBoard lookup — no items matched."
+
+    header = f"MemoryBoard lookup — {len(rows)} item{'s' if len(rows) != 1 else ''}"
+    if truncated:
+        header += " (truncated; raise ``limit`` for more)"
+    header += "."
+
+    blocks: list[str] = [header]
+    for idx, row in enumerate(rows, start=1):
+        ts = row.created_at.isoformat() if row.created_at else "?"
+        meta_parts = [
+            f"scope={row.scope}",
+            f"kind={row.source_kind}",
+            f"source={row.source_node_id}",
+            f"at={ts}",
+        ]
+        if row.fallback:
+            meta_parts.append("fallback=true")
+        meta = " · ".join(meta_parts)
+        desc = (row.description or "").strip() or "(empty description)"
+        indented = "\n".join(f"    {line}" for line in desc.splitlines())
+        blocks.append(f"[{idx}] {meta}\n{indented}")
+    return "\n\n".join(blocks)
