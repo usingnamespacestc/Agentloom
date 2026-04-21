@@ -150,8 +150,6 @@
     "compact_truncated": "{{count}} turn(s) above compacted — see summary below",
     "compact_summary_label": "Compacted context",
     "compact_summary_pending": "(compact worker still running…)",
-    "compact_instruction_label": "Compact instruction",
-    "compact_stats": "{{original}} → {{compacted}} tokens · {{dropped}} dropped",
     "merge_summary_label": "Merged context",
     "merge_summary_pending": "(merge worker still running…)",
     "merge_instruction_label": "Merge instruction",

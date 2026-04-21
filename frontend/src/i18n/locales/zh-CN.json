@@ -150,8 +150,6 @@
     "compact_truncated": "上方 {{count}} 轮已被压缩 — 摘要见下方",
     "compact_summary_label": "压缩后的上下文",
     "compact_summary_pending": "（压缩 worker 仍在运行…）",
-    "compact_instruction_label": "压缩指令",
-    "compact_stats": "{{original}} → {{compacted}} tokens · 丢弃 {{dropped}}",
     "merge_summary_label": "合并后的上下文",
     "merge_summary_pending": "（合并 worker 仍在运行…）",
     "merge_instruction_label": "合并指令",

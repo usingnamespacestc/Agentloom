@@ -337,11 +337,10 @@ def _chat_board_description(node: ChatFlowNode) -> str:
     agent_snippet = _first_line(agent_text)[:_CHAT_BRIEF_AGENT_SNIPPET].strip()
     if kind == "chat_compact":
         snap = node.compact_snapshot
-        dropped = snap.dropped_count if snap is not None else 0
         preserved = len(snap.preserved_messages) if snap is not None else 0
         summary_snippet = agent_snippet or "(empty summary)"
         return (
-            f"compacted {dropped} messages into a summary "
+            f"compacted prior chain into a summary "
             f"(+{preserved} preserved verbatim): {summary_snippet}"
         ).rstrip(": ")
     if kind == "chat_merge":
@@ -737,11 +736,9 @@ class ChatFlowEngine:
             inner_node.model_override = model
             inner_node.resolved_model = model
 
-        head_real_tokens = _estimate_tokens_from_wire(head_wire)
         prev_summary_tokens = (
             _count_text_tokens(previous_summary) if previous_summary else 0
         )
-        original_tokens = head_real_tokens + prev_summary_tokens
         entry_tokens = _estimate_tokens_from_wire(full_real_wire) + prev_summary_tokens
 
         return ChatFlowNode(
@@ -758,11 +755,6 @@ class ChatFlowEngine:
             compact_snapshot=CompactSnapshot(
                 summary="",
                 preserved_messages=list(tail_wire),
-                source_range=(0, len(head_wire)),
-                dropped_count=len(head_wire),
-                original_tokens=original_tokens,
-                compacted_tokens=0,
-                compact_instruction=compact_instruction,
             ),
         )
 
@@ -925,18 +917,10 @@ class ChatFlowEngine:
                         target_cap,
                     )
                     summary = _truncate_text_to_tokens(summary, target_cap)
-                compacted_tokens = _count_text_tokens(summary) + _estimate_tokens_from_wire(
-                    compact_node.compact_snapshot.preserved_messages
-                    if compact_node.compact_snapshot
-                    else []
-                )
                 if compact_node.compact_snapshot is not None:
                     compact_node.compact_snapshot = (
                         compact_node.compact_snapshot.model_copy(
-                            update={
-                                "summary": summary,
-                                "compacted_tokens": compacted_tokens,
-                            }
+                            update={"summary": summary}
                         )
                     )
                 compact_node.agent_response = EditableText.by_agent(summary)
@@ -3224,17 +3208,9 @@ class ChatFlowEngine:
                     )
                 else:
                     snap = chat_node.compact_snapshot
-                    compacted_tokens = len(summary_text) // 4 + (
-                        _estimate_tokens_from_wire(snap.preserved_messages)
-                        if snap is not None
-                        else 0
-                    )
                     if snap is not None:
                         chat_node.compact_snapshot = snap.model_copy(
-                            update={
-                                "summary": summary_text,
-                                "compacted_tokens": compacted_tokens,
-                            }
+                            update={"summary": summary_text}
                         )
                     chat_node.agent_response = EditableText.by_agent(summary_text)
                     chat_node.status = NodeStatus.SUCCEEDED

@@ -54,30 +54,8 @@ class CompactSnapshot(BaseModel):
     (recent turns kept verbatim).
     """
 
-    #: Compressed-history prose. Becomes a single user-role message at the
-    #: start of the downstream context. Empty string is the
-    #: pre-execution stub — the engine fills this in from the compact
-    #: worker's LLM output when the node completes.
     summary: str = ""
-    #: Verbatim tail of the original sequence — kept so the model still has
-    #: the most recent exchanges in full fidelity. Inserted after
-    #: ``summary`` when reconstructing downstream context.
     preserved_messages: list[WireMessage] = Field(default_factory=list)
-    #: Indices into the pre-compact message list that were folded into
-    #: ``summary`` (half-open interval). ``preserved_messages`` lives at
-    #: ``[end, original_len)``. Recorded for debugging / dry-run display.
-    source_range: tuple[int, int] = (0, 0)
-    #: Number of original messages folded into the summary (== end - start).
-    dropped_count: int = 0
-    #: Char-based token estimate of the pre-compact inputs.
-    original_tokens: int = 0
-    #: Char-based token estimate of ``summary`` + ``preserved_messages``
-    #: after the compact run.
-    compacted_tokens: int = 0
-    #: The free-text instruction the user passed through (manual trigger
-    #: or auto-trigger w/ confirmation). ``None`` for silent WorkFlow
-    #: compacts that had no user interaction.
-    compact_instruction: str | None = None
 
 
 class WorkFlowNode(NodeBase):

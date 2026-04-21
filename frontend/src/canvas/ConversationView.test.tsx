@@ -167,11 +167,6 @@ describe("ConversationView", () => {
           compact_snapshot: {
             summary: "SUMMARY_BODY",
             preserved_messages: [],
-            source_range: [0, 2],
-            dropped_count: 2,
-            original_tokens: 1234,
-            compacted_tokens: 321,
-            compact_instruction: null,
           },
         },
         c: node("c", ["b"], "new user", "new agent", 2),

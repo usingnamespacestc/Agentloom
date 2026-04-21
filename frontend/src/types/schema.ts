@@ -258,11 +258,6 @@ export interface PendingTurn {
 export interface CompactSnapshot {
   summary: string;
   preserved_messages: WireMessage[];
-  source_range: [number, number];
-  dropped_count: number;
-  original_tokens: number;
-  compacted_tokens: number;
-  compact_instruction: string | null;
 }
 
 export interface ChatFlowNode extends NodeBaseFields {

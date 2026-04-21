@@ -1235,11 +1235,6 @@ class WorkflowEngine:
         snapshot = CompactSnapshot(
             summary="",  # filled in by _run_compact after the LLM call
             preserved_messages=preserved_wire,
-            source_range=(0, len(head_tagged)),
-            dropped_count=len(head_tagged),
-            original_tokens=original_tokens,
-            compacted_tokens=0,
-            compact_instruction=None,
         )
 
         compact_model = self._effective_compact_model or node.model_override or ref
@@ -1307,11 +1302,8 @@ class WorkflowEngine:
                 target_tokens,
             )
             summary = _truncate_text_to_tokens(summary, target_tokens)
-        compacted_tokens = _count_text_tokens(summary) + _estimate_tokens_from_wire(
-            node.compact_snapshot.preserved_messages
-        )
         node.compact_snapshot = node.compact_snapshot.model_copy(
-            update={"summary": summary, "compacted_tokens": compacted_tokens}
+            update={"summary": summary}
         )
         # PR 4.2.a: the compact's summary IS a MemoryBoard brief — write
         # the board_item directly instead of spawning a secondary BRIEF

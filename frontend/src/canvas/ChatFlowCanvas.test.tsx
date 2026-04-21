@@ -146,11 +146,6 @@ describe("buildGraph", () => {
     cf.nodes["b"].compact_snapshot = {
       summary: "s",
       preserved_messages: [],
-      source_range: [0, 1],
-      dropped_count: 1,
-      original_tokens: 100,
-      compacted_tokens: 50,
-      compact_instruction: null,
     };
     const { nodes } = buildGraph(cf, null);
     // The card component reads node.compact_snapshot off data.node.

@@ -844,12 +844,6 @@ function CompactMessageBubble({
   // render something as soon as the compact worker writes the snapshot.
   const summary = node.agent_response.text || snap.summary;
   const isRunning = node.status === "running";
-  const instr = snap.compact_instruction;
-  const stats = t("conversation.compact_stats", {
-    original: snap.original_tokens,
-    compacted: snap.compacted_tokens,
-    dropped: snap.dropped_count,
-  });
 
   return (
     <div
@@ -866,21 +860,10 @@ function CompactMessageBubble({
         data-testid={`conversation-node-${node.id}-compact`}
         className="rounded-md border border-teal-200 bg-teal-50/70 px-3 py-2"
       >
-        <div className="mb-1 flex items-center justify-between gap-2 text-[11px] font-semibold text-teal-700">
-          <span className="inline-flex items-center gap-1">
-            <span aria-hidden>⟲</span>
-            {t("conversation.compact_summary_label")}
-          </span>
-          <span className="font-normal text-[10px] text-teal-600/80">{stats}</span>
+        <div className="mb-1 flex items-center gap-1 text-[11px] font-semibold text-teal-700">
+          <span aria-hidden>⟲</span>
+          {t("conversation.compact_summary_label")}
         </div>
-        {instr && (
-          <div className="mb-1 text-[11px] text-teal-700/80">
-            <span className="font-medium">
-              {t("conversation.compact_instruction_label")}:
-            </span>{" "}
-            {instr}
-          </div>
-        )}
         {summary ? (
           <div className="prose prose-sm max-w-none text-[13px] leading-relaxed text-gray-800 break-words">
             <Markdown>{summary}</Markdown>
