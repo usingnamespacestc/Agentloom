@@ -33,7 +33,12 @@ from agentloom.db.repositories.chatflow import ChatFlowRepository
 from agentloom.schemas.chatflow import ChatFlowNode
 from agentloom.schemas.common import ToolResult
 from agentloom.schemas.workflow import WorkFlow, WorkFlowNode
-from agentloom.tools.base import Tool, ToolContext, ToolError
+from agentloom.tools.base import (
+    Tool,
+    ToolContext,
+    ToolError,
+    record_accessed_node_id,
+)
 
 _DEFAULT_MAX_BYTES = 50_000
 _MIN_MAX_BYTES = 1_000
@@ -129,7 +134,7 @@ class GetNodeContextTool(Tool):
         # sticky-restore counter for this source node on the current
         # ChatNode's CompactSnapshot. Only successful lookups count;
         # the not-found path above already raised.
-        ctx.accessed_node_ids.add(node_id)
+        record_accessed_node_id(ctx, node_id)
         return ToolResult(content=payload)
 
 

@@ -91,7 +91,7 @@ from agentloom.schemas.common import (
 from agentloom.schemas.workflow import WireMessage
 from agentloom.templates.instantiate import instantiate_fixture
 from agentloom.templates.loader import fragments_as_texts, load_fixtures
-from agentloom.tools.base import ToolContext, ToolRegistry
+from agentloom.tools.base import ToolContext, ToolRegistry, accessed_scope
 
 log = logging.getLogger(__name__)
 
@@ -3438,6 +3438,12 @@ class ChatFlowEngine:
         # compaction — and skip the judge post-node hook (only relevant
         # for turn nodes in semi_auto / auto mode).
         is_compact_node = chat_node.compact_snapshot is not None
+        # Scope the "nodes fetched via get_node_context this turn"
+        # signal to this ChatNode's inner-workflow execution. contextvars
+        # are task-local so concurrent sibling ChatNodes open their own
+        # scopes and their accessed sets stay isolated.
+        accessed_scope_cm = accessed_scope()
+        accessed_this_turn = accessed_scope_cm.__enter__()
         try:
             await self._inner.execute(
                 chat_node.workflow,
@@ -3465,6 +3471,7 @@ class ChatFlowEngine:
             log.exception("chat node %s inner workflow raised", node_id)
             runtime_error = f"{type(exc).__name__}: {exc}"
         finally:
+            accessed_scope_cm.__exit__(None, None, None)
             # Inner workflow is done (succeeded or raised). Signal
             # end-of-stream via close() — the relay's ``async for``
             # sees the None sentinel and returns naturally — then
@@ -3570,6 +3577,24 @@ class ChatFlowEngine:
                 fut = runtime.pending_futures.get(consumed_pending_id)
                 if fut is not None and not fut.done():
                     fut.set_result(chat_node)
+
+            # Sticky-restore update: fold this turn's get_node_context
+            # hits into the nearest compact ancestor's sticky_restored
+            # and decay any entries that weren't re-touched. No-op on
+            # compact ChatNodes (their own snapshot isn't the cutoff
+            # for themselves) and on FAILED turns (don't let a crash
+            # evict everything before the user retries). See
+            # ``_update_sticky_restored_on_chain`` for the rule set.
+            if (
+                chat_node.status == NodeStatus.SUCCEEDED
+                and not is_compact_node
+            ):
+                _update_sticky_restored_on_chain(
+                    chatflow,
+                    chat_node,
+                    accessed_this_turn,
+                    chatflow.compact_preserve_recent_turns,
+                )
 
             # ChatBoard cascade (PR 3, 2026-04-20): once the ChatNode has
             # frozen into SUCCEEDED, write a ``scope='chat'`` BoardItem so
@@ -5011,6 +5036,7 @@ def _build_chat_context(
                 f"{snap.summary}"
             ),
         )
+        sticky_msgs = _render_sticky_restored_messages(chatflow, snap.sticky_restored)
         # preserved_before_summary=True: the snapshot's preserved list
         # is the shared *prefix* that ran temporally before the summary
         # (joint-compact merge path). Emit preserved first, then the
@@ -5021,9 +5047,11 @@ def _build_chat_context(
             messages.extend(snap.preserved_messages)
             if include_summary_preamble:
                 messages.append(summary_msg)
+            messages.extend(sticky_msgs)
         else:
             if include_summary_preamble:
                 messages.append(summary_msg)
+            messages.extend(sticky_msgs)
             messages.extend(snap.preserved_messages)
         start_idx = compact_cutoff_idx + 1
 
@@ -5047,6 +5075,122 @@ def _build_chat_context(
             WireMessage(role="assistant", content=node.agent_response.text)
         )
     return messages
+
+
+def _render_sticky_restored_messages(
+    chatflow: ChatFlow, sticky_restored: dict[str, int]
+) -> list[WireMessage]:
+    """Render the sticky-restored ChatNodes' user/assistant pairs.
+
+    Sticky restore targets ChatNodes only — WorkNode-level ids stay in
+    ``sticky_restored`` so their forget counters keep decaying, but
+    reinjecting an internal step into a chat turn would muddle the
+    user/assistant dialogue the LLM is reading. The agent that wants
+    a WorkNode's body can still call ``get_node_context`` again; the
+    returned payload just isn't persisted into the context chain.
+
+    Emitted in counter-descending order (most-recently-refreshed
+    first) so the LLM sees the highest-priority restores near the top.
+    """
+    out: list[WireMessage] = []
+    # Sort by counter desc, then node_id for a stable order.
+    for node_id, _counter in sorted(
+        sticky_restored.items(), key=lambda kv: (-kv[1], kv[0])
+    ):
+        node = chatflow.nodes.get(node_id)
+        if node is None:
+            continue  # WorkNode id (or a stale reference) — skip.
+        header = f"[Restored context for chat node {node_id}]"
+        user_text = node.user_message.text if node.user_message else ""
+        agent_text = node.agent_response.text if node.agent_response else ""
+        out.append(
+            WireMessage(
+                role="user",
+                content=f"{header}\n\n{user_text}" if user_text else header,
+            )
+        )
+        if agent_text:
+            out.append(WireMessage(role="assistant", content=agent_text))
+    return out
+
+
+def _find_compact_cutoff_id(
+    chatflow: ChatFlow, parent_ids: list[str]
+) -> str | None:
+    """Return the id of the most-recent settled compact ancestor on the
+    primary-parent chain, or None if no compact has run yet.
+
+    Uses the same walk rules as :func:`_build_chat_context`: follow
+    ``parent_ids[0]`` up, stopping at merge ChatNodes; among the walk
+    the last ChatNode whose ``compact_snapshot`` has a settled summary
+    wins. This is where sticky_restored entries live.
+    """
+    if not parent_ids:
+        return None
+    chain: list[str] = []
+    current: str | None = parent_ids[0]
+    while current is not None:
+        chain.append(current)
+        node = chatflow.nodes[current]
+        if len(node.parent_ids) >= 2:
+            break
+        current = node.parent_ids[0] if node.parent_ids else None
+    chain.reverse()
+    cutoff: str | None = None
+    for nid in chain:
+        snap = chatflow.nodes[nid].compact_snapshot
+        if snap is not None and snap.summary:
+            cutoff = nid
+    return cutoff
+
+
+def _update_sticky_restored_on_chain(
+    chatflow: ChatFlow,
+    chat_node: ChatFlowNode,
+    accessed_node_ids: set[str],
+    counter_init: int,
+) -> None:
+    """Fold this turn's accessed-signal into the relevant compact
+    snapshot's ``sticky_restored``. No-op if there's no compact cutoff
+    on the chain (nothing is compressed, so nothing needs restoring).
+
+    Rules:
+
+    - New accessed entries (ids present in ``chatflow.nodes`` — i.e.
+      ChatNodes) initialize to ``counter_init``. WorkNode accesses
+      aren't preserved here because the sticky-reinjection path only
+      reads ChatNodes.
+    - Existing entries NOT in the accessed set have their counter
+      decremented by 1. Entries whose counter hits 0 drop out.
+    - Existing entries that ARE in the accessed set reset to
+      ``counter_init`` (each call is a full refresh).
+
+    Updates the cutoff node's ``compact_snapshot`` in place via
+    ``model_copy`` so the frozen Pydantic model stays immutable.
+    """
+    cutoff_id = _find_compact_cutoff_id(chatflow, chat_node.parent_ids)
+    if cutoff_id is None:
+        return
+    cutoff_node = chatflow.nodes[cutoff_id]
+    snap = cutoff_node.compact_snapshot
+    if snap is None:
+        return
+
+    accessed_chat_ids = {nid for nid in accessed_node_ids if nid in chatflow.nodes}
+    new_sticky: dict[str, int] = {}
+    for nid, counter in snap.sticky_restored.items():
+        if nid in accessed_chat_ids:
+            new_sticky[nid] = counter_init  # refresh
+        elif counter > 1:
+            new_sticky[nid] = counter - 1  # decay
+        # counter == 1 → drop (decayed to 0)
+    for nid in accessed_chat_ids:
+        new_sticky.setdefault(nid, counter_init)
+
+    if new_sticky != snap.sticky_restored:
+        cutoff_node.compact_snapshot = snap.model_copy(
+            update={"sticky_restored": new_sticky}
+        )
 
 
 def _serialize_wire_chain(msgs: list[WireMessage]) -> str:

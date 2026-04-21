@@ -24,11 +24,13 @@ target path; for Glob/Grep it's the pattern.
 
 from __future__ import annotations
 
+import contextvars
 import fnmatch
 import re
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterator
 
 from agentloom.schemas.common import ToolConstraints, ToolResult
 
@@ -39,6 +41,52 @@ class ToolError(Exception):
     Engine catches this, freezes the node as ``ToolResult(is_error=True)``,
     and lets the LLM see the error message on the next turn.
     """
+
+
+# Task-local binding for the "nodes fetched this turn" signal. The
+# engine opens a fresh scope around each ChatNode's inner-workflow
+# execution (see :meth:`ChatFlowEngine._execute_node`) so concurrent
+# sibling ChatNodes don't pour into the same set. Tools write into the
+# currently-bound set via :func:`record_accessed_node_id` instead of
+# mutating ``ctx.accessed_node_ids`` directly, which keeps the ctx
+# field as a compat fallback for callers that don't open a scope
+# (bare-unit tests, MCP tool runners, etc.).
+_accessed_var: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar(
+    "agentloom.tools.accessed_node_ids", default=None
+)
+
+
+@contextmanager
+def accessed_scope() -> Iterator[set[str]]:
+    """Bind a fresh ``accessed_node_ids`` set for the current asyncio task.
+
+    Tools executing inside this block write to the yielded set via
+    :func:`record_accessed_node_id`. contextvars are task-local, so
+    concurrent sibling tasks opening their own scopes don't see each
+    other's writes — the engine relies on this to route
+    ``get_node_context`` hits back to the correct ChatNode.
+    """
+    scope: set[str] = set()
+    token = _accessed_var.set(scope)
+    try:
+        yield scope
+    finally:
+        _accessed_var.reset(token)
+
+
+def record_accessed_node_id(ctx: "ToolContext", node_id: str) -> None:
+    """Record that *node_id* was just fetched by a tool.
+
+    Writes to the task-local scope if one is bound (the normal engine
+    path); otherwise falls back to ``ctx.accessed_node_ids`` so direct
+    tool invocations outside the engine (tests, ad-hoc scripts) still
+    have an inspectable trail.
+    """
+    scope = _accessed_var.get()
+    if scope is not None:
+        scope.add(node_id)
+        return
+    ctx.accessed_node_ids.add(node_id)
 
 
 @dataclass
