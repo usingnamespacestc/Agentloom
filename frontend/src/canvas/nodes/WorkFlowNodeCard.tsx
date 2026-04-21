@@ -40,6 +40,7 @@ const KIND_ACCENT: Record<string, string> = {
   tool_call: "border-emerald-300 bg-emerald-50",
   judge_call: "border-amber-300 bg-amber-50",
   delegate: "border-violet-300 bg-violet-50",
+  brief: "border-sky-200 bg-white",
 };
 
 function truncate(text: string, n = 140): string {
@@ -164,6 +165,7 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
       {node.step_kind === "delegate" && (
         <SubAgentDelegationBody node={node} />
       )}
+      {node.step_kind === "brief" && <BriefBody node={node} />}
 
       <NodeIdLine nodeId={node.id} />
 
@@ -395,6 +397,33 @@ function ToolCallBody({ node }: { node: WorkFlowNode }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function BriefBody({ node }: { node: WorkFlowNode }) {
+  const [expanded, setExpanded] = useState(false);
+  const boardItem = useChatFlowStore((s) =>
+    node.parent_ids.length > 0 ? s.boardItems[node.parent_ids[0]] : undefined,
+  );
+  const text =
+    boardItem?.description ?? node.output_message?.content ?? "";
+  const fallback = boardItem?.fallback ?? false;
+  if (!text) {
+    return <div className="italic text-gray-400">—</div>;
+  }
+  return (
+    <div
+      data-testid={`brief-body-${node.id}`}
+      data-fallback={fallback ? "true" : "false"}
+      className="cursor-pointer select-none break-words text-[10px] leading-snug text-gray-700"
+      onClick={(e) => {
+        e.stopPropagation();
+        setExpanded((v) => !v);
+      }}
+      title={text}
+    >
+      {expanded ? text : truncate(text, 140)}
     </div>
   );
 }
