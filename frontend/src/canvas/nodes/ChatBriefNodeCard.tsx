@@ -10,7 +10,7 @@
  */
 
 import { useState } from "react";
-import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { type NodeProps } from "@xyflow/react";
 import { useTranslation } from "react-i18next";
 
 import { useChatFlowStore } from "@/store/chatflowStore";
@@ -48,7 +48,6 @@ export function ChatBriefNodeCard({ data }: NodeProps) {
       data-fallback={fallback ? "true" : "false"}
       className="relative w-52 rounded-md border border-indigo-200 bg-indigo-50 p-2 text-[11px] leading-snug text-gray-800 shadow-sm"
     >
-      <Handle id="brief-target" type="target" position={Position.Bottom} />
       <div className="mb-1 flex items-center justify-between gap-1">
         <span className="font-semibold text-indigo-700">
           {t("chatflow.chat_brief_label")}

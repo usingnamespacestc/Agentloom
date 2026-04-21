@@ -472,11 +472,9 @@ export function buildWorkflowGraph(
     graphNodes[id] = n;
   }
   const briefIds = new Set<string>();
-  const briefParentIds = new Set<string>();
   for (const [id, n] of Object.entries(graphNodes)) {
     if (n.step_kind === "brief") {
       briefIds.add(id);
-      for (const pid of n.parent_ids) briefParentIds.add(pid);
     }
   }
   const laidOut = layoutDag<WorkFlowNode>(graphNodes, wf.root_ids, {
@@ -509,7 +507,6 @@ export function buildWorkflowGraph(
         isRoot: rootSet.has(node.id),
         isLeaf: !hasChild.has(node.id),
         maxContextTokens: contextWindowByModel[ctxKey] ?? null,
-        hasBriefChild: briefParentIds.has(node.id),
       },
       selectable: false,
       draggable: !isBrief,
@@ -517,15 +514,18 @@ export function buildWorkflowGraph(
   });
   const rfEdges: Edge[] = [];
   for (const { node } of laidOut) {
+    // Briefs are visually attached to their source as bubbles; skip
+    // edge creation so the source's hover overlay (inherited model
+    // chip, etc.) doesn't leak onto a meaningless connector line.
+    if (briefIds.has(node.id)) continue;
     for (const parentId of node.parent_ids) {
       if (!(parentId in graphNodes)) continue;
-      const isBriefEdge = briefIds.has(node.id);
       rfEdges.push({
         id: `${parentId}->${node.id}`,
         source: parentId,
         target: node.id,
-        sourceHandle: isBriefEdge ? "brief-source" : "main-source",
-        targetHandle: isBriefEdge ? "brief-target" : "main-target",
+        sourceHandle: "main-source",
+        targetHandle: "main-target",
         animated: node.status === "running",
         style: {
           stroke: node.status === "planned" ? "#9ca3af" : "#374151",

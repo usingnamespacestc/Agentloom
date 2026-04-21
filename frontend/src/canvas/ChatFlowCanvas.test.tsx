@@ -177,13 +177,9 @@ describe("buildGraph", () => {
     const sourceNode = nodes.find((n) => n.id === "a")!;
     expect(briefNode!.position.y).toBeLessThan(sourceNode.position.y);
     expect(briefNode!.position.x).toBe(sourceNode.position.x);
-    // Brief edge uses dedicated top/bottom handles.
-    const briefEdge = edges.find((e) => e.id === "brief->a");
-    expect(briefEdge).toBeDefined();
-    expect(briefEdge!.source).toBe("a");
-    expect(briefEdge!.target).toBe(`${CHAT_BRIEF_NODE_PREFIX}a`);
-    expect(briefEdge!.sourceHandle).toBe("brief-source");
-    expect(briefEdge!.targetHandle).toBe("brief-target");
+    // Brief is bubble-attached; no connector edge (the inherited-model
+    // hover overlay on regular edges was meaningless for briefs).
+    expect(edges.some((e) => e.id.startsWith("brief->"))).toBe(false);
   });
 
   it("skips non-chat scope BoardItems when emitting brief nodes", () => {

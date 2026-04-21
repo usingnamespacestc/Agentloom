@@ -28,11 +28,6 @@ export interface WorkFlowNodeData extends Record<string, unknown> {
   isRoot: boolean;
   isLeaf: boolean;
   maxContextTokens: number | null;
-  /** True when this node is the source of at least one BRIEF child —
-   * renders an extra top-side source handle so the brief-edge
-   * connects vertically instead of looping out of the right-side
-   * handle that feeds regular children. */
-  hasBriefChild?: boolean;
 }
 
 const KIND_ACCENT: Record<string, string> = {
@@ -50,7 +45,7 @@ function truncate(text: string, n = 140): string {
 
 export function WorkFlowNodeCard({ data }: NodeProps) {
   const { t } = useTranslation();
-  const { node, isSelected, isRoot, isLeaf, maxContextTokens, hasBriefChild } =
+  const { node, isSelected, isRoot, isLeaf, maxContextTokens } =
     data as WorkFlowNodeData;
   const isBrief = node.step_kind === "brief";
   // Role-based styling takes precedence over step_kind — see roleStyles.ts.
@@ -77,12 +72,6 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
     >
       {!isRoot && !isBrief && (
         <Handle id="main-target" type="target" position={Position.Left} />
-      )}
-      {isBrief && (
-        <Handle id="brief-target" type="target" position={Position.Bottom} />
-      )}
-      {hasBriefChild && (
-        <Handle id="brief-source" type="source" position={Position.Top} />
       )}
 
       <div className="flex items-center justify-between mb-1.5 gap-1">

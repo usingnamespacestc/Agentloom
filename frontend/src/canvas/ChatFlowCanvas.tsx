@@ -985,14 +985,6 @@ export function buildGraph(
       selectable: false,
       draggable: false,
     });
-    rfEdges.push({
-      id: `brief->${id}`,
-      source: id,
-      target: briefId,
-      sourceHandle: "brief-source",
-      targetHandle: "brief-target",
-      style: { stroke: "#a5b4fc", strokeWidth: 1.25 },
-    });
   }
   return { nodes: [...rfNodes, ...briefNodes], edges: rfEdges };
 }

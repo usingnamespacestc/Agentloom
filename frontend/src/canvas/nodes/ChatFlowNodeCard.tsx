@@ -175,9 +175,6 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
       {!isRoot && (
         <Handle id="main-target" type="target" position={Position.Left} />
       )}
-      {hasChatBoardItem && (
-        <Handle id="brief-source" type="source" position={Position.Top} />
-      )}
 
       {/* Delete button — top-right, visible on hover */}
       {canDelete && (
