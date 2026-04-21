@@ -38,7 +38,8 @@
       "draft": "LLM call",
       "tool_call": "Tool call",
       "judge_call": "Judge",
-      "delegate": "Sub-agent"
+      "delegate": "Sub-agent",
+      "brief": "Brief"
     },
     "role": {
       "pre_judge": "pre-judge",
