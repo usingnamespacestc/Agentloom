@@ -59,10 +59,12 @@ import { ChatFlowActiveWorkPanel } from "./ChatFlowActiveWorkPanel";
 import { ModelRibbonLayer } from "./ModelRibbonLayer";
 import { MODEL_KINDS, colorForModel, edgeModel } from "./effectiveModel";
 import { ChatFlowNodeCard, type ChatFlowNodeData } from "./nodes/ChatFlowNodeCard";
+import { ChatBriefNodeCard, type ChatBriefNodeData } from "./nodes/ChatBriefNodeCard";
 import { StickyNoteNode, type StickyNoteData } from "./nodes/StickyNoteNode";
+import { NODE_HEIGHT } from "./layout";
 import { api, type ProviderSummary } from "@/lib/api";
 import { useChatFlowStore } from "@/store/chatflowStore";
-import type { ChatFlow, ChatFlowNode, NodeId, ProviderModelRef, StickyNote } from "@/types/schema";
+import type { BoardItem, ChatFlow, ChatFlowNode, NodeId, ProviderModelRef, StickyNote } from "@/types/schema";
 
 interface ContextMenuState {
   nodeId: string;
@@ -70,7 +72,17 @@ interface ContextMenuState {
   y: number;
 }
 
-const NODE_TYPES = { chatflow: ChatFlowNodeCard, stickyNote: StickyNoteNode };
+const NODE_TYPES = {
+  chatflow: ChatFlowNodeCard,
+  chatBrief: ChatBriefNodeCard,
+  stickyNote: StickyNoteNode,
+};
+
+/** Vertical gap between a ChatNode's centre and its stacked chat-brief
+ * node. ChatNode cards are taller than WorkFlow cards (two prose
+ * sections + token bar) so this is a bit bigger than WorkFlow's
+ * ``STACK_GAP`` in ``layout.ts``. */
+const CHAT_BRIEF_STACK_OFFSET = NODE_HEIGHT + 60;
 
 export interface ChatFlowCanvasProps {
   chatflow: ChatFlow | null;
@@ -255,6 +267,11 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
     [providers],
   );
 
+  // ChatBoardItem cache drives the synthetic chat-brief nodes stacked
+  // above each ChatNode. Rebuilds the graph whenever a BoardItem is
+  // written/updated (SSE refresh, compact/merge follow-ups).
+  const boardItems = useChatFlowStore((s) => s.boardItems);
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [nodes, setNodes] = useState<Node<any>[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
@@ -295,10 +312,16 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
       dirtyPositions.current.clear();
       lastChatflowId.current = chatflow?.id ?? null;
     }
-    const laid = buildGraph(chatflow, selectedNodeId, contextWindowByModel);
+    const laid = buildGraph(chatflow, selectedNodeId, contextWindowByModel, boardItems);
     const merged = laid.nodes.map((n) => ({
       ...n,
-      position: dragPositions.current[n.id] ?? n.position,
+      // Synthetic chat-brief nodes aren't draggable and don't persist
+      // positions — they always sit above their source. Everything else
+      // honours the stored drag position.
+      position:
+        n.type === "chatBrief"
+          ? n.position
+          : (dragPositions.current[n.id] ?? n.position),
     }));
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const stickyNodes: Node<any>[] = Object.values(stickyNotes).map((note) => ({
@@ -319,13 +342,17 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
     }));
     setNodes([...merged, ...stickyNodes]);
     setEdges(laid.edges);
-  }, [chatflow, selectedNodeId, contextWindowByModel, stickyNotes, editingStickyId, selectedStickyId, onNoteTitleChange, onNoteTextChange, onNoteDelete, syncTick]);
+  }, [chatflow, selectedNodeId, contextWindowByModel, boardItems, stickyNotes, editingStickyId, selectedStickyId, onNoteTitleChange, onNoteTextChange, onNoteDelete, syncTick]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     const filtered = changes.filter((c) => c.type !== "select");
     if (filtered.length === 0) return;
     for (const c of filtered) {
-      if (c.type === "position" && c.position) {
+      // Synthetic chat-brief nodes are view-only; skip drag-position
+      // bookkeeping so we never try to PATCH a non-ChatNode id.
+      const isBriefId =
+        c.type === "position" && String(c.id).startsWith(CHAT_BRIEF_NODE_PREFIX);
+      if (c.type === "position" && c.position && !isBriefId) {
         dragPositions.current[c.id] = c.position;
         if (isSticky(String(c.id))) {
           updateStickyNote(c.id, { x: c.position.x, y: c.position.y });
@@ -370,6 +397,9 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
   }, [flushPositions, updateStickyNote, isSticky]);
 
   const handleNodeClick: NodeMouseHandler = (_event, node) => {
+    // Synthetic chat-brief nodes are view-only; clicking them is a
+    // no-op (they don't map to any ChatNode id in the store).
+    if (String(node.id).startsWith(CHAT_BRIEF_NODE_PREFIX)) return;
     if (isSticky(String(node.id))) {
       setSelectedStickyId(node.id);
     } else {
@@ -412,6 +442,8 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
 
   const handleContextMenu: NodeMouseHandler = (event, node) => {
     event.preventDefault();
+    // Synthetic chat-brief nodes have no actions — suppress the menu.
+    if (String(node.id).startsWith(CHAT_BRIEF_NODE_PREFIX)) return;
     if (isSticky(String(node.id))) {
       setStickyCtxMenu({ x: event.clientX, y: event.clientY, noteId: node.id });
     } else {
@@ -753,24 +785,33 @@ export function contextWindowMap(
   return map;
 }
 
+/** Prefix for synthetic chat-brief React Flow node ids. Keeps them
+ * outside the ChatNode id-space so selection / drag-position / delete
+ * handlers can cheaply skip them. */
+export const CHAT_BRIEF_NODE_PREFIX = "_chat_brief_";
+
 /** Pure function so it can be unit-tested without rendering React Flow. */
 export function buildGraph(
   chatflow: ChatFlow | null,
   selectedNodeId: string | null,
   contextWindowByModel: Record<string, number> = {},
-): { nodes: Node<ChatFlowNodeData>[]; edges: Edge[] } {
+  boardItems: Record<NodeId, BoardItem> = {},
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): { nodes: Node<any>[]; edges: Edge[] } {
   if (!chatflow) return { nodes: [], edges: [] };
   const laidOut = layoutDag<ChatFlowNode>(chatflow.nodes, chatflow.root_ids);
   const undeletable = computeUndeletableIds(chatflow.nodes);
   const leaves = computeLeafIds(chatflow.nodes);
   const ctxTokens = computeContextTokens(chatflow.nodes);
   const rootSet = new Set(chatflow.root_ids);
+  const chatNodePositions = new Map<NodeId, { x: number; y: number }>();
   const rfNodes: Node<ChatFlowNodeData>[] = laidOut.map(({ node, position }) => {
     // Prefer server-persisted position over auto-layout.
     const pos =
       node.position_x != null && node.position_y != null
         ? { x: node.position_x, y: node.position_y }
         : position;
+    chatNodePositions.set(node.id, pos);
     const isRoot = rootSet.has(node.id);
     return {
       id: node.id,
@@ -804,6 +845,8 @@ export function buildGraph(
         id: `${parentId}->${node.id}`,
         source: parentId,
         target: node.id,
+        sourceHandle: "main-source",
+        targetHandle: "main-target",
         animated: node.status === "running",
         style: {
           stroke: isMerge ? "#a855f7" : isDashed ? "#9ca3af" : "#374151",
@@ -813,7 +856,37 @@ export function buildGraph(
       });
     }
   }
-  return { nodes: rfNodes, edges: rfEdges };
+
+  // Synthetic chat-brief nodes stacked above each ChatNode that has a
+  // ``scope='chat'`` BoardItem. The brief text lives on the BoardItem,
+  // not on a ChatNode — so these are view-only, don't exist in
+  // ``chatflow.nodes``, aren't draggable, and aren't selectable.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const briefNodes: Node<any>[] = [];
+  for (const id of Object.keys(chatflow.nodes)) {
+    const bi = boardItems[id];
+    if (!bi || bi.scope !== "chat") continue;
+    const srcPos = chatNodePositions.get(id);
+    if (!srcPos) continue;
+    const briefId = `${CHAT_BRIEF_NODE_PREFIX}${id}`;
+    briefNodes.push({
+      id: briefId,
+      type: "chatBrief",
+      position: { x: srcPos.x, y: srcPos.y - CHAT_BRIEF_STACK_OFFSET },
+      data: { sourceNodeId: id } satisfies ChatBriefNodeData,
+      selectable: false,
+      draggable: false,
+    });
+    rfEdges.push({
+      id: `brief->${id}`,
+      source: id,
+      target: briefId,
+      sourceHandle: "brief-source",
+      targetHandle: "brief-target",
+      style: { stroke: "#a5b4fc", strokeWidth: 1.25 },
+    });
+  }
+  return { nodes: [...rfNodes, ...briefNodes], edges: rfEdges };
 }
 
 // ---------------------------------------------------------------- Context menu

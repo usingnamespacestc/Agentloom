@@ -86,7 +86,10 @@
     "compact_badge_hint": "This ChatNode holds a summary of the chain above it. Downstream turns see the summary + recent turns instead of the full history.",
     "compact_summary": "Summary",
     "chatboard_badge": "Board",
-    "chatboard_badge_hint": "A ChatBoardItem is available for this ChatNode — hover to see the brief."
+    "chatboard_badge_hint": "A ChatBoardItem is available for this ChatNode — hover to see the brief.",
+    "chat_brief_label": "Chat brief",
+    "chat_brief_fallback_badge": "fallback",
+    "chat_brief_fallback_hint": "Produced by the deterministic code template — the LLM brief was skipped or failed."
   },
   "workflow": {
     "panel_title": "Inner workflow",

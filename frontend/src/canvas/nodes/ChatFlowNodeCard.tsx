@@ -172,7 +172,12 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
       data-merge={isMergeSettled ? "1" : undefined}
       title={t(`chatflow_settings.execution_mode_${executionMode}_hint`)}
     >
-      {!isRoot && <Handle type="target" position={Position.Left} />}
+      {!isRoot && (
+        <Handle id="main-target" type="target" position={Position.Left} />
+      )}
+      {hasChatBoardItem && (
+        <Handle id="brief-source" type="source" position={Position.Top} />
+      )}
 
       {/* Delete button — top-right, visible on hover */}
       {canDelete && (
@@ -319,7 +324,9 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
 
       <NodeIdLine nodeId={node.id} />
 
-      {!isLeaf && <Handle type="source" position={Position.Right} />}
+      {!isLeaf && (
+        <Handle id="main-source" type="source" position={Position.Right} />
+      )}
     </div>
   );
 }

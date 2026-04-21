@@ -13,7 +13,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { ReactFlowProvider } from "@xyflow/react";
 import type { NodeProps } from "@xyflow/react";
 
-import { ChatFlowCanvas, buildGraph } from "./ChatFlowCanvas";
+import { ChatFlowCanvas, buildGraph, CHAT_BRIEF_NODE_PREFIX } from "./ChatFlowCanvas";
 import { ChatFlowNodeCard, type ChatFlowNodeData } from "./nodes/ChatFlowNodeCard";
 import { useChatFlowStore } from "@/store/chatflowStore";
 import type { BoardItem, ChatFlow, ChatFlowNode } from "@/types/schema";
@@ -150,6 +150,70 @@ describe("buildGraph", () => {
     const { nodes } = buildGraph(cf, null);
     // The card component reads node.compact_snapshot off data.node.
     expect(nodes.find((n) => n.id === "b")!.data.node.compact_snapshot).not.toBeNull();
+  });
+
+  it("emits a synthetic chat-brief node stacked above its source ChatNode", () => {
+    const cf = seed();
+    const briefItem: BoardItem = {
+      id: "bi-1",
+      chatflow_id: cf.id,
+      workflow_id: null,
+      source_node_id: "a",
+      source_kind: "chat_turn",
+      scope: "chat",
+      description: "user said hi; agent replied hey",
+      fallback: false,
+      created_at: "2026-04-21T00:00:00Z",
+    };
+    const { nodes, edges } = buildGraph(cf, null, {}, { a: briefItem });
+    const briefNode = nodes.find(
+      (n) => n.id === `${CHAT_BRIEF_NODE_PREFIX}a`,
+    );
+    expect(briefNode).toBeDefined();
+    expect(briefNode!.type).toBe("chatBrief");
+    expect(briefNode!.selectable).toBe(false);
+    expect(briefNode!.draggable).toBe(false);
+    // Brief is stacked above source — y strictly less.
+    const sourceNode = nodes.find((n) => n.id === "a")!;
+    expect(briefNode!.position.y).toBeLessThan(sourceNode.position.y);
+    expect(briefNode!.position.x).toBe(sourceNode.position.x);
+    // Brief edge uses dedicated top/bottom handles.
+    const briefEdge = edges.find((e) => e.id === "brief->a");
+    expect(briefEdge).toBeDefined();
+    expect(briefEdge!.source).toBe("a");
+    expect(briefEdge!.target).toBe(`${CHAT_BRIEF_NODE_PREFIX}a`);
+    expect(briefEdge!.sourceHandle).toBe("brief-source");
+    expect(briefEdge!.targetHandle).toBe("brief-target");
+  });
+
+  it("skips non-chat scope BoardItems when emitting brief nodes", () => {
+    const cf = seed();
+    // scope='node' is a WorkBoard row — must not paint a chat-brief
+    // even if it's keyed at a ChatNode id.
+    const wrongScope: BoardItem = {
+      id: "bi-2",
+      chatflow_id: cf.id,
+      workflow_id: "wf",
+      source_node_id: "a",
+      source_kind: "draft",
+      scope: "node",
+      description: "ignored",
+      fallback: false,
+      created_at: "2026-04-21T00:00:00Z",
+    };
+    const { nodes, edges } = buildGraph(cf, null, {}, { a: wrongScope });
+    expect(
+      nodes.find((n) => n.id === `${CHAT_BRIEF_NODE_PREFIX}a`),
+    ).toBeUndefined();
+    expect(edges.find((e) => e.id === "brief->a")).toBeUndefined();
+  });
+
+  it("does not emit brief nodes when boardItems is empty", () => {
+    const { nodes, edges } = buildGraph(seed(), null, {}, {});
+    expect(
+      nodes.some((n) => n.id.startsWith(CHAT_BRIEF_NODE_PREFIX)),
+    ).toBe(false);
+    expect(edges.some((e) => e.id.startsWith("brief->"))).toBe(false);
   });
 });
 

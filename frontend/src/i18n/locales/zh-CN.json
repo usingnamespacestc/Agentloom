@@ -86,7 +86,10 @@
     "compact_badge_hint": "该 ChatNode 保存了上游对话链的摘要。下游轮次看到的是「摘要 + 近期消息」，而非完整历史。",
     "compact_summary": "摘要",
     "chatboard_badge": "看板",
-    "chatboard_badge_hint": "该 ChatNode 已生成 ChatBoardItem — 悬停可查看简介。"
+    "chatboard_badge_hint": "该 ChatNode 已生成 ChatBoardItem — 悬停可查看简介。",
+    "chat_brief_label": "对话简介",
+    "chat_brief_fallback_badge": "兜底",
+    "chat_brief_fallback_hint": "使用确定性代码模板生成 — LLM 简介被跳过或失败。"
   },
   "workflow": {
     "panel_title": "内部工作流",
