@@ -86,6 +86,7 @@ plan:
             {% if description %}Description: {{ description }}
             {% endif %}{% if inputs %}Inputs: {{ inputs }}
             {% endif %}{% if expected_outcome %}Expected outcome: {{ expected_outcome }}
+            {% endif %}{% if capabilities %}Capabilities (judge_pre pre-scope): {{ capabilities }}
             {% endif %}
 
             Plan to review (round {{ round }} / {{ round_budget }})

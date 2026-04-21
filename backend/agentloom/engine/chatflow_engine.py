@@ -2016,6 +2016,11 @@ class ChatFlowEngine:
             # Inherit the MemoryBoard brief pin so nested sub-WorkFlows
             # honor the enclosing ChatFlow's brief_model.
             brief_model_override=parent.brief_model_override,
+            # Propagate judge_pre's pre-scope into the sub — the sub's own
+            # judge_pre will re-run and may refine, but seeding with the
+            # parent's list means a first-round planner already sees the
+            # right slice without waiting for the sub's judge_pre verdict.
+            capabilities=list(parent.capabilities),
         )
         # judge_pre is the universal entry gate; the post-node hook then
         # spawns the planner / worker chain when it votes OK.
@@ -4356,6 +4361,10 @@ def _trio_params(workflow: WorkFlow) -> dict[str, str]:
     template expects. Falls back to ``""`` for any unset field so a
     template that asks for ``{{ inputs }}`` doesn't blow up on a
     legacy WorkFlow that predates trio seeding.
+
+    ``capabilities`` is flattened to a comma-joined string — the template
+    substitutor handles scalars, and empty string lets ``{% if capabilities %}``
+    suppress the whole block cleanly when judge_pre didn't pre-scope.
     """
     return {
         "description": workflow.description.text if workflow.description else "",
@@ -4363,6 +4372,7 @@ def _trio_params(workflow: WorkFlow) -> dict[str, str]:
         "expected_outcome": (
             workflow.expected_outcome.text if workflow.expected_outcome else ""
         ),
+        "capabilities": ", ".join(workflow.capabilities),
     }
 
 

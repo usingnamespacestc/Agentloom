@@ -162,6 +162,7 @@ plan:
             {% if description %}Description: {{ description }}
             {% endif %}{% if inputs %}Inputs: {{ inputs }}
             {% endif %}{% if expected_outcome %}Expected outcome: {{ expected_outcome }}
+            {% endif %}{% if capabilities %}Capabilities（judge_pre 预先圈定的工具/技能切片；拆解时优先使用这些）：{{ capabilities }}
             {% endif %}
             来自前一个兄弟的 handoff
             -----------------------

@@ -179,6 +179,7 @@ plan:
             {% if description %}Description: {{ description }}
             {% endif %}{% if inputs %}Inputs: {{ inputs }}
             {% endif %}{% if expected_outcome %}Expected outcome: {{ expected_outcome }}
+            {% endif %}{% if capabilities %}Capabilities (judge_pre pre-scope; prefer these tools/skills when decomposing): {{ capabilities }}
             {% endif %}
             Handoff from preceding sibling
             ------------------------------

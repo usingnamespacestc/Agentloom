@@ -81,6 +81,7 @@ plan:
             {% if description %}Description: {{ description }}
             {% endif %}{% if inputs %}Inputs: {{ inputs }}
             {% endif %}{% if expected_outcome %}Expected outcome: {{ expected_outcome }}
+            {% endif %}{% if capabilities %}Capabilities（judge_pre 预先圈定的切片）：{{ capabilities }}
             {% endif %}
 
             待评审 plan（第 {{ round }} / {{ round_budget }} 轮）
