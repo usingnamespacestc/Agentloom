@@ -43,6 +43,15 @@ import type { BoardItem, NodeId, StickyNote, WorkFlow, WorkFlowNode } from "@/ty
 
 const NODE_TYPES = { workflow: WorkFlowNodeCard, stickyNote: StickyNoteNode };
 
+/** Fixed vertical gap between a brief WorkNode's bottom edge and its
+ * source WorkNode's top edge. The brief's top floats upward as content
+ * grows so the gap stays constant (no overlap on long briefs). */
+const WORK_BRIEF_BOTTOM_GAP = 30;
+/** Fallback height used until React Flow measures the rendered brief
+ * card. Briefs in the WorkFlow lane are typically shorter than ChatFlow
+ * briefs so the fallback is a bit smaller. */
+const WORK_BRIEF_FALLBACK_HEIGHT = 130;
+
 export interface WorkFlowCanvasProps {
   workflow: WorkFlow | null;
   /** ChatNode that owns the drill-stack root. Used as the persistence
@@ -165,12 +174,16 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
   const [edges, setEdges] = useState<Edge[]>([]);
   const dragPositions = useRef<Record<string, { x: number; y: number }>>({});
   const dirtyPositions = useRef<Set<string>>(new Set());
-  /** Per-brief static offset from its source node (captured at layout
-   * time). Briefs stay glued to their source by applying this offset
-   * to the source's live position. */
-  const briefOffsets = useRef<
-    Record<string, { sourceId: string; dx: number; dy: number }>
-  >({});
+  /** Per-brief source link + horizontal offset from layout. The vertical
+   * offset is computed dynamically from the brief's measured height so
+   * the brief's **bottom** stays ``WORK_BRIEF_BOTTOM_GAP`` above its
+   * source's top, no matter how long the brief grows. */
+  const briefOffsets = useRef<Record<string, { sourceId: string; dx: number }>>(
+    {},
+  );
+  /** Measured height of each brief WorkNode, keyed by node id. Updated
+   * from React Flow ``dimensions`` changes in ``onNodesChange``. */
+  const briefHeights = useRef<Record<string, number>>({});
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastWorkflowId = useRef<string | null>(null);
   // Mid-drag, SSE-driven ``setNodes([...])`` replacements disrupt React
@@ -199,6 +212,7 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
       dragPositions.current = {};
       dirtyPositions.current.clear();
       briefOffsets.current = {};
+      briefHeights.current = {};
       lastWorkflowId.current = workflow?.id ?? null;
     }
     const laid = buildWorkflowGraph(workflow, workflowSelectedNodeId, ctxWindowByModel);
@@ -219,7 +233,6 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
       briefOffsets.current[n.id] = {
         sourceId: srcId,
         dx: n.position.x - srcLaid.position.x,
-        dy: n.position.y - srcLaid.position.y,
       };
       delete dragPositions.current[n.id];
     }
@@ -228,7 +241,11 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
         const off = briefOffsets.current[n.id];
         const srcPos = off ? effectivePos.get(off.sourceId) : undefined;
         if (off && srcPos) {
-          return { ...n, position: { x: srcPos.x + off.dx, y: srcPos.y + off.dy } };
+          const h = briefHeights.current[n.id] ?? WORK_BRIEF_FALLBACK_HEIGHT;
+          return {
+            ...n,
+            position: { x: srcPos.x + off.dx, y: srcPos.y - WORK_BRIEF_BOTTOM_GAP - h },
+          };
         }
         return n;
       }
@@ -271,8 +288,20 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
           dirtyPositions.current.add(c.id);
         }
       }
-      if (c.type === "dimensions" && c.dimensions && isSticky(String(c.id))) {
-        updateStickyNote(c.id, { width: c.dimensions.width, height: c.dimensions.height });
+      if (c.type === "dimensions" && c.dimensions) {
+        const id = String(c.id);
+        if (id in briefOffsets.current) {
+          // Brief's rendered height changed — record it and bump the
+          // sync tick so the next layout pass repositions it with the
+          // bottom-gap formula.
+          const prev = briefHeights.current[id];
+          if (prev !== c.dimensions.height) {
+            briefHeights.current[id] = c.dimensions.height;
+            setSyncTick((t) => t + 1);
+          }
+        } else if (isSticky(id)) {
+          updateStickyNote(c.id, { width: c.dimensions.width, height: c.dimensions.height });
+        }
       }
     }
     // Glide briefs with their source during a live drag: build a map
@@ -293,7 +322,14 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
         if (!off) return n;
         const src = sourceMoves.get(off.sourceId);
         if (!src) return n;
-        return { ...n, position: { x: src.x + off.dx, y: src.y + off.dy } };
+        const h =
+          n.measured?.height ??
+          briefHeights.current[n.id] ??
+          WORK_BRIEF_FALLBACK_HEIGHT;
+        return {
+          ...n,
+          position: { x: src.x + off.dx, y: src.y - WORK_BRIEF_BOTTOM_GAP - h },
+        };
       });
     });
 

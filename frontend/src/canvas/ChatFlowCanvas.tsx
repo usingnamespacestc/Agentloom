@@ -79,11 +79,20 @@ const NODE_TYPES = {
   stickyNote: StickyNoteNode,
 };
 
-/** Vertical gap between a ChatNode's centre and its stacked chat-brief
- * node. ChatNode cards are taller than WorkFlow cards (two prose
- * sections + token bar) so this is a bit bigger than WorkFlow's
- * ``STACK_GAP`` in ``layout.ts``. */
-const CHAT_BRIEF_STACK_OFFSET = NODE_HEIGHT + 60;
+/** Fixed vertical gap between a chat-brief's bottom edge and its source
+ * ChatNode's top edge. The brief grows downward from ``srcY - GAP``
+ * and its top floats upward as the content grows, so the gap is
+ * constant regardless of brief height (no more overlap as briefs get
+ * long). */
+const CHAT_BRIEF_BOTTOM_GAP = 30;
+/** Fallback brief height used until React Flow measures the actual
+ * rendered card. Matches the approximate first-render height of a
+ * two-line brief. */
+const CHAT_BRIEF_FALLBACK_HEIGHT = 160;
+/** Initial-layout stack offset used in ``buildGraph`` before the
+ * component's measured-height ref takes over. Kept roughly at the old
+ * value so first-frame positions still land above the source. */
+const CHAT_BRIEF_INITIAL_OFFSET = NODE_HEIGHT + 60;
 
 export interface ChatFlowCanvasProps {
   chatflow: ChatFlow | null;
@@ -281,6 +290,11 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
   // loaded (different chatflow id).
   const dragPositions = useRef<Record<string, { x: number; y: number }>>({});
   const dirtyPositions = useRef<Set<string>>(new Set());
+  /** Last measured height of each chat-brief, keyed by brief id. Drives
+   * the bubble's vertical position so its **bottom** (not top) stays
+   * ``CHAT_BRIEF_BOTTOM_GAP`` above the source's top, regardless of how
+   * tall the brief text becomes. */
+  const briefHeights = useRef<Record<string, number>>({});
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastChatflowId = useRef<string | null>(null);
   // Mid-drag, SSE-driven ``setNodes([...])`` replacements disrupt React
@@ -311,6 +325,7 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
     if (chatflow?.id !== lastChatflowId.current) {
       dragPositions.current = {};
       dirtyPositions.current.clear();
+      briefHeights.current = {};
       lastChatflowId.current = chatflow?.id ?? null;
     }
     const laid = buildGraph(chatflow, selectedNodeId, contextWindowByModel, boardItems);
@@ -329,9 +344,10 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
         const srcId = (n.data as ChatBriefNodeData).sourceNodeId;
         const srcPos = effectivePos.get(srcId);
         if (srcPos) {
+          const h = briefHeights.current[n.id] ?? CHAT_BRIEF_FALLBACK_HEIGHT;
           return {
             ...n,
-            position: { x: srcPos.x, y: srcPos.y - CHAT_BRIEF_STACK_OFFSET },
+            position: { x: srcPos.x, y: srcPos.y - CHAT_BRIEF_BOTTOM_GAP - h },
           };
         }
         return n;
@@ -375,8 +391,20 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
           dirtyPositions.current.add(c.id);
         }
       }
-      if (c.type === "dimensions" && c.dimensions && isSticky(String(c.id))) {
-        updateStickyNote(c.id, { width: c.dimensions.width, height: c.dimensions.height });
+      if (c.type === "dimensions" && c.dimensions) {
+        const id = String(c.id);
+        if (id.startsWith(CHAT_BRIEF_NODE_PREFIX)) {
+          // Brief's rendered height changed — record it and bump the
+          // sync tick so the next layout pass repositions the brief
+          // with its bottom ``CHAT_BRIEF_BOTTOM_GAP`` above the source.
+          const prev = briefHeights.current[id];
+          if (prev !== c.dimensions.height) {
+            briefHeights.current[id] = c.dimensions.height;
+            setSyncTick((t) => t + 1);
+          }
+        } else if (isSticky(id)) {
+          updateStickyNote(c.id, { width: c.dimensions.width, height: c.dimensions.height });
+        }
       }
     }
     // Keep briefs glued to their source while the source is being dragged:
@@ -397,9 +425,13 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
         const srcId = (n.data as ChatBriefNodeData).sourceNodeId;
         const src = sourceMoves.get(srcId);
         if (!src) return n;
+        const h =
+          n.measured?.height ??
+          briefHeights.current[n.id] ??
+          CHAT_BRIEF_FALLBACK_HEIGHT;
         return {
           ...n,
-          position: { x: src.x, y: src.y - CHAT_BRIEF_STACK_OFFSET },
+          position: { x: src.x, y: src.y - CHAT_BRIEF_BOTTOM_GAP - h },
         };
       });
     });
@@ -948,7 +980,7 @@ export function buildGraph(
     briefNodes.push({
       id: briefId,
       type: "chatBrief",
-      position: { x: srcPos.x, y: srcPos.y - CHAT_BRIEF_STACK_OFFSET },
+      position: { x: srcPos.x, y: srcPos.y - CHAT_BRIEF_INITIAL_OFFSET },
       data: { sourceNodeId: id } satisfies ChatBriefNodeData,
       selectable: false,
       draggable: false,
