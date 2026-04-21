@@ -415,7 +415,7 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
                   value={briefModelKey}
                   options={modelOptions}
                   onChange={setBriefModelKey}
-                  inheritOption={t("chatflow_settings.brief_model_disabled")}
+                  inheritOption={t("chatflow_settings.inherit_main_model")}
                 />
               </div>
             )}
