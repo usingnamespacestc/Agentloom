@@ -56,6 +56,14 @@ class CompactSnapshot(BaseModel):
 
     summary: str = ""
     preserved_messages: list[WireMessage] = Field(default_factory=list)
+    #: True when ``preserved_messages`` hold the *shared prefix* that
+    #: came *before* the summary in temporal order — the joint-compact
+    #: merge path writes a ChatNode whose summary folds both sibling
+    #: branches' suffixes, but the root-→LCA prefix is what we want
+    #: downstream readers to see first, not last. Default False keeps
+    #: the historical Tier-2 compact semantics (preserved_messages are
+    #: the recent-tail carried past the cutoff).
+    preserved_before_summary: bool = False
 
 
 class WorkFlowNode(NodeBase):

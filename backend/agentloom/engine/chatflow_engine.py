@@ -41,7 +41,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from agentloom.channels.base import ExternalTurn
@@ -1008,6 +1010,86 @@ class ChatFlowEngine:
         if not summary:
             raise RuntimeError("pre-compact worker returned empty summary")
         return summary
+
+    async def preview_merge(
+        self,
+        chatflow_id: str,
+        *,
+        left_id: str,
+        right_id: str,
+        model: ProviderModelRef | None = None,
+    ) -> MergePreview:
+        """Dry-run a merge: compute LCA, segment tokens, and whether a
+        joint-compact would be needed before the actual merge runs.
+
+        Raises ``ValueError`` for self-merge, ``KeyError`` for an
+        unknown node id. No mutation — safe to call anytime.
+        """
+        runtime = self._require_runtime(chatflow_id)
+        async with runtime.lock:
+            chatflow = runtime.chatflow
+            if left_id == right_id:
+                raise ValueError("cannot merge a node with itself")
+            if left_id not in chatflow.nodes:
+                raise KeyError(f"left {left_id!r} not in chatflow {chatflow_id!r}")
+            if right_id not in chatflow.nodes:
+                raise KeyError(f"right {right_id!r} not in chatflow {chatflow_id!r}")
+
+            lca_id = _chat_lca(chatflow, left_id, right_id)
+            # prefix: root → LCA inclusive (walk LCA up through primary
+            # parents until there is none). LCA may be None for
+            # pathological DAGs; treat that as zero prefix.
+            prefix_tokens = (
+                _count_chat_chain_tokens(chatflow, lca_id) if lca_id else 0
+            )
+            left_suffix_tokens = _count_chat_chain_tokens(
+                chatflow, left_id, stop_at=lca_id
+            )
+            right_suffix_tokens = _count_chat_chain_tokens(
+                chatflow, right_id, stop_at=lca_id
+            )
+
+            merge_model_ref = (
+                model or chatflow.compact_model or chatflow.draft_model
+            )
+            trigger_pct = (
+                chatflow.compact_trigger_pct
+                if chatflow.compact_trigger_pct is not None
+                else DEFAULT_COMPACT_TRIGGER_PCT
+            )
+
+        from agentloom.engine.provider_context_cache import (
+            lookup as _ctx_lookup,
+        )
+
+        window = _ctx_lookup(merge_model_ref) or DEFAULT_CONTEXT_WINDOW_TOKENS
+        total_budget = int(window * trigger_pct)
+        # After reserving the fixed prompt overhead and the prefix that
+        # will ride along with the merge prompt, whatever's left is what
+        # the two branch suffixes must fit into.
+        effective_budget = max(
+            512,
+            total_budget - self._MERGE_PROMPT_OVERHEAD_TOKENS - prefix_tokens,
+        )
+        combined_suffix_tokens = left_suffix_tokens + right_suffix_tokens
+        compact_needed = combined_suffix_tokens > effective_budget
+        # If a joint-compact is needed, aim for half the remaining
+        # budget so both branches collapse into roughly symmetric sizes
+        # with room for the merge prompt itself. Floor at 512 matches
+        # the existing per-branch pre-compact floor in merge_chain.
+        suggested_target = (
+            max(512, effective_budget // 2) if compact_needed else 0
+        )
+        return MergePreview(
+            lca_id=lca_id,
+            compact_needed=compact_needed,
+            suggested_target_tokens=suggested_target,
+            prefix_tokens=prefix_tokens,
+            left_suffix_tokens=left_suffix_tokens,
+            right_suffix_tokens=right_suffix_tokens,
+            combined_suffix_tokens=combined_suffix_tokens,
+            effective_budget_tokens=effective_budget,
+        )
 
     async def merge_chain(
         self,
@@ -4470,6 +4552,120 @@ def _latest_leaf(chatflow: ChatFlow) -> str | None:
     return leaves[-1].id
 
 
+def _chat_lca(chatflow: ChatFlow, left_id: str, right_id: str) -> str | None:
+    """Return the lowest common ancestor of two ChatNodes in the DAG.
+
+    Uses ``ChatFlow.ancestors`` which yields nodes in topological order
+    (root-first). The deepest element that appears in both ancestor
+    lists (plus the nodes themselves) is the LCA. Returns ``None`` if
+    the branches don't share any ancestor (shouldn't happen in a
+    well-formed ChatFlow — every node traces back to a root).
+    """
+    left_chain = set(chatflow.ancestors(left_id)) | {left_id}
+    right_chain = [*chatflow.ancestors(right_id), right_id]
+    lca: str | None = None
+    for nid in right_chain:
+        if nid in left_chain:
+            lca = nid
+    return lca
+
+
+def _count_chat_chain_tokens(
+    chatflow: ChatFlow,
+    start_id: str,
+    *,
+    stop_at: str | None = None,
+) -> int:
+    """Walk ``start_id`` up via primary parent, tally user+assistant
+    tokens of each frozen node along the way.
+
+    ``stop_at`` is *exclusive* — the stop node's tokens are NOT counted.
+    Passing ``stop_at=None`` walks all the way to a root-less node.
+    """
+    tokens = 0
+    current: str | None = start_id
+    while current is not None and current != stop_at:
+        node = chatflow.nodes[current]
+        if node.is_frozen:
+            if node.user_message is not None:
+                tokens += _count_text_tokens(node.user_message.text)
+            tokens += _count_text_tokens(node.agent_response.text)
+        current = node.parent_ids[0] if node.parent_ids else None
+    return tokens
+
+
+# Recognises the citation markers the planner/merge prompts ask models to
+# emit — ``(nodes: abc123)`` / ``（节点: abc123）`` / ``[node:abc123]``. A
+# model reply that contains any of these is assumed to carry its own
+# provenance and the structural fallback stays out of the way.
+_CITATION_RE = re.compile(
+    r"\(\s*(?:nodes?|节点)\s*:"
+    r"|（\s*(?:nodes?|节点)\s*:"
+    r"|\[\s*node\s*:",
+    re.IGNORECASE,
+)
+
+
+def _has_citation(text: str) -> bool:
+    return bool(_CITATION_RE.search(text or ""))
+
+
+def _branch_tail_snippet(
+    chatflow: ChatFlow, node_id: str, *, char_cap: int = 240
+) -> tuple[str, str] | None:
+    """Return (role, short_content) for the given ChatNode's most
+    representative line — prefer the assistant reply; fall back to the
+    user_message if the assistant text is empty. ``None`` for root or
+    unfrozen nodes."""
+    node = chatflow.nodes.get(node_id)
+    if node is None or not node.is_frozen:
+        return None
+    if node.agent_response.text:
+        body = node.agent_response.text
+        return ("assistant", body[:char_cap])
+    if node.user_message is not None and node.user_message.text:
+        return ("user", node.user_message.text[:char_cap])
+    return None
+
+
+def _append_branch_citation_fallback(
+    reply: str, chatflow: ChatFlow, source_ids: list[str]
+) -> str:
+    """Append a ``[sources]`` tail referencing each source branch's
+    ChatNode id when *reply* lacks any citation marker. No-op if the
+    model already cited something — we don't want to double up.
+    """
+    if _has_citation(reply) or not source_ids:
+        return reply
+    lines: list[str] = []
+    for nid in source_ids:
+        snippet = _branch_tail_snippet(chatflow, nid)
+        if snippet is None:
+            lines.append(f"[node:{nid} | —]")
+        else:
+            role, body = snippet
+            lines.append(f"[node:{nid} | {role}] {body}")
+    if not lines:
+        return reply
+    return f"{reply.rstrip()}\n\n[sources]\n" + "\n".join(lines)
+
+
+@dataclass
+class MergePreview:
+    """Snapshot returned by :meth:`ChatFlowEngine.preview_merge` — tells
+    the UI whether the impending merge will need to compact, and what
+    budget it would target."""
+
+    lca_id: str | None
+    compact_needed: bool
+    suggested_target_tokens: int
+    prefix_tokens: int
+    left_suffix_tokens: int
+    right_suffix_tokens: int
+    combined_suffix_tokens: int
+    effective_budget_tokens: int
+
+
 def _build_chat_context(
     chatflow: ChatFlow,
     parent_ids: list[str],
@@ -4531,17 +4727,27 @@ def _build_chat_context(
     if compact_cutoff_idx is not None:
         snap = chatflow.nodes[chain[compact_cutoff_idx]].compact_snapshot
         assert snap is not None  # loop guarantees
-        if include_summary_preamble:
-            messages.append(
-                WireMessage(
-                    role="user",
-                    content=(
-                        "[Prior conversation — summarized to save context]\n\n"
-                        f"{snap.summary}"
-                    ),
-                )
-            )
-        messages.extend(snap.preserved_messages)
+        summary_msg = WireMessage(
+            role="user",
+            content=(
+                "[Prior conversation — summarized to save context]\n\n"
+                f"{snap.summary}"
+            ),
+        )
+        # preserved_before_summary=True: the snapshot's preserved list
+        # is the shared *prefix* that ran temporally before the summary
+        # (joint-compact merge path). Emit preserved first, then the
+        # summary preamble. Default (False) keeps the historical Tier-2
+        # compact shape: summary preamble first, preserved recent-tail
+        # second.
+        if snap.preserved_before_summary:
+            messages.extend(snap.preserved_messages)
+            if include_summary_preamble:
+                messages.append(summary_msg)
+        else:
+            if include_summary_preamble:
+                messages.append(summary_msg)
+            messages.extend(snap.preserved_messages)
         start_idx = compact_cutoff_idx + 1
 
     for nid in chain[start_idx:]:

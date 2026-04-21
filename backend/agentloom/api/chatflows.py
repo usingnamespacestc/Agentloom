@@ -256,6 +256,27 @@ class MergeChainResponse(BaseModel):
     status: str
 
 
+class MergePreviewRequest(BaseModel):
+    """Body for POST /chatflows/{id}/merge/preview. Same id pair as the
+    commit endpoint; ``model`` overrides the merge/compact model for
+    context-window lookup."""
+
+    left_id: str
+    right_id: str
+    model: ProviderModelRef | None = None
+
+
+class MergePreviewResponse(BaseModel):
+    lca_id: str | None
+    compact_needed: bool
+    suggested_target_tokens: int
+    prefix_tokens: int
+    left_suffix_tokens: int
+    right_suffix_tokens: int
+    combined_suffix_tokens: int
+    effective_budget_tokens: int
+
+
 # ---------------------------------------------------------------- routes
 
 
@@ -953,6 +974,57 @@ async def merge_chain(
     return MergeChainResponse(
         node_id=merge_node.id,
         status=merge_node.status.value,
+    )
+
+
+@router.post(
+    "/{chatflow_id}/merge/preview",
+    response_model=MergePreviewResponse,
+)
+async def merge_preview(
+    chatflow_id: str,
+    body: MergePreviewRequest,
+    request: Request,
+    session_maker: async_sessionmaker[AsyncSession] = Depends(get_session_scope),
+) -> MergePreviewResponse:
+    """Dry-run a merge: reports LCA, segment tokens, and whether the
+    impending merge will need to compact to fit its model's context
+    window. No mutation — purely informational."""
+    engine = _get_engine(request)
+
+    async with session_maker() as session:
+        repo = _repo(session)
+        chat = await _attached_chatflow(engine, repo, chatflow_id)
+        if body.left_id not in chat.nodes:
+            raise HTTPException(
+                404, f"node {body.left_id} not in chatflow {chatflow_id}"
+            )
+        if body.right_id not in chat.nodes:
+            raise HTTPException(
+                404, f"node {body.right_id} not in chatflow {chatflow_id}"
+            )
+
+    try:
+        preview = await engine.preview_merge(
+            chat.id,
+            left_id=body.left_id,
+            right_id=body.right_id,
+            model=body.model,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+    return MergePreviewResponse(
+        lca_id=preview.lca_id,
+        compact_needed=preview.compact_needed,
+        suggested_target_tokens=preview.suggested_target_tokens,
+        prefix_tokens=preview.prefix_tokens,
+        left_suffix_tokens=preview.left_suffix_tokens,
+        right_suffix_tokens=preview.right_suffix_tokens,
+        combined_suffix_tokens=preview.combined_suffix_tokens,
+        effective_budget_tokens=preview.effective_budget_tokens,
     )
 
 
