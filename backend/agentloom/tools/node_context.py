@@ -8,11 +8,12 @@ Return shape depends on the node kind:
 
 - ChatNode: just that turn's ``user_message`` and ``agent_response``.
   Ancestor ChatNodes are *not* included — the caller can chain calls if
-  it needs them.
+  it needs them. ``parent_ids`` is returned so the caller can walk
+  upstream one id at a time.
 - WorkNode: ``input_messages`` + ``output_message`` + the enclosing
   WorkFlow's trio (description / inputs / expected_outcome), plus
   tool_call fields when applicable. Step-kind-specific fields only
-  appear when populated.
+  appear when populated. ``parent_ids`` is returned for upstream walks.
 
 Large WireMessage chains can blow up tool_result, so the tool truncates
 the JSON body at ``max_bytes`` (default 50 KiB), appending a
@@ -47,9 +48,10 @@ class GetNodeContextTool(Tool):
         "ancestors). For a WorkNode, returns the node's input_messages "
         "and output_message, plus its enclosing WorkFlow's trio "
         "(description / inputs / expected_outcome) and any tool_call "
-        "fields. Search scope is the current workspace — any ChatFlow "
-        "in it is reachable. Oversized responses are truncated at "
-        "max_bytes (default ~50 KiB)."
+        "fields. Both kinds also return parent_ids so you can walk "
+        "upstream one hop at a time. Search scope is the current "
+        "workspace — any ChatFlow in it is reachable. Oversized "
+        "responses are truncated at max_bytes (default ~50 KiB)."
     )
     parameters = {
         "type": "object",
@@ -133,6 +135,7 @@ def _render_chatnode(
         "kind": "chatnode",
         "node_id": node_id,
         "chatflow_id": chatflow_id,
+        "parent_ids": list(node.parent_ids),
         "user_message": node.user_message.text if node.user_message else None,
         "agent_response": node.agent_response.text if node.agent_response else None,
     }
@@ -149,6 +152,7 @@ def _render_worknode(
         "node_id": node_id,
         "chatflow_id": chatflow_id,
         "workflow_id": workflow.id,
+        "parent_ids": list(node.parent_ids),
         "step_kind": node.step_kind.value if node.step_kind else None,
         "role": node.role.value if node.role else None,
         "enclosing_description": (
