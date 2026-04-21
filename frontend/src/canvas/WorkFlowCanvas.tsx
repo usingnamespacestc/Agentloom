@@ -467,9 +467,8 @@ export function buildWorkflowGraph(
         id: `${parentId}->${node.id}`,
         source: parentId,
         target: node.id,
-        ...(isBriefEdge
-          ? { sourceHandle: "brief-source", targetHandle: "brief-target" }
-          : {}),
+        sourceHandle: isBriefEdge ? "brief-source" : "main-source",
+        targetHandle: isBriefEdge ? "brief-target" : "main-target",
         animated: node.status === "running",
         style: {
           stroke: node.status === "planned" ? "#9ca3af" : "#374151",

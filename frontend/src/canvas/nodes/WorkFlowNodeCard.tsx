@@ -75,7 +75,9 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
         isSelected ? "ring-2 ring-blue-300" : "",
       ].join(" ")}
     >
-      {!isRoot && !isBrief && <Handle type="target" position={Position.Left} />}
+      {!isRoot && !isBrief && (
+        <Handle id="main-target" type="target" position={Position.Left} />
+      )}
       {isBrief && (
         <Handle id="brief-target" type="target" position={Position.Bottom} />
       )}
@@ -114,7 +116,9 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
 
       <NodeIdLine nodeId={node.id} />
 
-      {!isLeaf && <Handle type="source" position={Position.Right} />}
+      {!isLeaf && (
+        <Handle id="main-source" type="source" position={Position.Right} />
+      )}
     </div>
   );
 }
