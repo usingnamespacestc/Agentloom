@@ -1099,6 +1099,8 @@ class ChatFlowEngine:
         right_id: str,
         merge_instruction: str | None = None,
         model: ProviderModelRef | None = None,
+        compact_target_tokens: int | None = None,
+        compact_instruction: str | None = None,
     ) -> ChatFlowNode:
         """Fold two ChatNode branches into a single synthesized reply.
 
@@ -1110,13 +1112,22 @@ class ChatFlowEngine:
         just like they stop at a compact node (both branches' history
         is encoded in the merged reply).
 
-        Context-overflow handling: if either branch's wire chain would
-        exceed the per-branch budget (half of the merge model's context
-        window times :data:`DEFAULT_COMPACT_TRIGGER_PCT`, minus a fixed
-        :data:`_MERGE_PROMPT_OVERHEAD_TOKENS`), that branch is first
-        summarized via :meth:`_precompact_branch_for_merge` and the
-        summary string is fed into the merge prompt instead of the raw
-        chain.
+        Context-overflow handling has two shapes:
+
+        - **Per-branch pre-compact** (default): when either branch's
+          wire chain exceeds the per-branch budget, that branch is
+          summarised via :meth:`_precompact_branch_for_merge` and the
+          summary string is fed into the merge prompt — no ChatNode is
+          created for the summary.
+        - **Joint-compact** (when the caller passes
+          ``compact_target_tokens``): the engine inserts a *visible*
+          compact ChatNode with ``parent_ids=[left_id, right_id]`` above
+          the merge node. That ChatNode holds one joint summary and a
+          ``CompactSnapshot`` whose ``preserved_messages`` is the
+          root→LCA prefix with ``preserved_before_summary=True`` so
+          downstream context walks see the prefix first and the joint
+          summary second. The merge ChatNode is reparented to this
+          compact node (single parent), so walks stop at one node.
 
         MVP: exactly two source nodes; left/right ordering is the order
         the user picked them in the canvas.
@@ -1156,66 +1167,208 @@ class ChatFlowEngine:
                 chatflow.disabled_tool_names
             ) | frozenset(ws_settings.globally_disabled())
 
-        # --- Outside lock: budget + maybe pre-compact each branch. ---
-        from agentloom.engine.provider_context_cache import (
-            lookup as _ctx_lookup,
-        )
+            # Joint-compact path needs LCA + prefix/suffix split before
+            # we leave the lock, so the actual compact LLM call runs on
+            # immutable snapshots. The suffix is derived positionally
+            # from each branch's full ctx (both walks share the root→
+            # LCA head, so the prefix slice length is the same).
+            joint_prefix: list[WireMessage] | None = None
+            joint_left_suffix: list[WireMessage] | None = None
+            joint_right_suffix: list[WireMessage] | None = None
+            if compact_target_tokens is not None:
+                lca_id = _chat_lca(chatflow, left_id, right_id)
+                joint_prefix = (
+                    _build_chat_context(chatflow, [lca_id]) if lca_id else []
+                )
+                head = len(joint_prefix)
+                joint_left_suffix = left_ctx[head:]
+                joint_right_suffix = right_ctx[head:]
 
-        window = _ctx_lookup(merge_model_ref) or DEFAULT_CONTEXT_WINDOW_TOKENS
-        total_budget = int(window * trigger_pct)
-        per_branch_budget = max(
-            512,
-            (total_budget - self._MERGE_PROMPT_OVERHEAD_TOKENS) // 2,
-        )
+        original_tokens = _estimate_tokens_from_wire(
+            left_ctx
+        ) + _estimate_tokens_from_wire(right_ctx)
 
-        left_tokens = _estimate_tokens_from_wire(left_ctx)
-        right_tokens = _estimate_tokens_from_wire(right_ctx)
-        original_tokens = left_tokens + right_tokens
+        # --- Outside lock: joint-compact OR per-branch pre-compact. ---
+        compact_node_id: str | None = None
+        if compact_target_tokens is not None:
+            assert joint_prefix is not None
+            assert joint_left_suffix is not None
+            assert joint_right_suffix is not None
 
-        if left_tokens > per_branch_budget:
-            log.info(
-                "merge pre-compact: left branch %d tokens > %d budget",
-                left_tokens,
-                per_branch_budget,
+            combined_text = (
+                "[Left branch — suffix after LCA]\n"
+                + _serialize_wire_chain(joint_left_suffix)
+                + "\n\n[Right branch — suffix after LCA]\n"
+                + _serialize_wire_chain(joint_right_suffix)
             )
-            left_summary = await self._precompact_branch_for_merge(
-                left_ctx,
-                target_tokens=max(
-                    512,
-                    int(per_branch_budget * DEFAULT_COMPACT_TARGET_PCT),
-                ),
-                model=merge_model_ref,
+            joint_template = instantiate_fixture(
+                self._fixture_plans["compact"],
+                {
+                    "messages_to_compact": combined_text,
+                    "target_tokens": compact_target_tokens,
+                    "must_keep": "",
+                    "must_drop": "",
+                    "compact_instruction": (
+                        compact_instruction
+                        or "Summarise both parallel conversation "
+                        "branches into a single coherent context. "
+                        "Preserve decisions and concrete facts from "
+                        "both sides; call out any disagreements."
+                    ),
+                },
+                includes=self._fixture_includes,
+            )
+            joint_inner = _single_node(joint_template)
+            if merge_model_ref is not None:
+                joint_inner.model_override = merge_model_ref
+                joint_inner.resolved_model = merge_model_ref
+            await self._inner.execute(
+                joint_template,
+                chatflow_tool_loop_budget=1,
+                chatflow_auto_mode_revise_budget=0,
+                chatflow_min_ground_ratio=None,
+                chatflow_ground_ratio_grace_nodes=20,
+                chatflow_compact_trigger_pct=None,
                 disabled_tool_names=effective_disabled,
             )
-        else:
-            left_summary = _serialize_wire_chain(left_ctx)
+            joint_raw = (
+                (joint_inner.output_message.content or "").strip()
+                if joint_inner.output_message
+                else ""
+            )
+            if not joint_raw:
+                raise RuntimeError(
+                    "joint-compact worker returned empty summary"
+                )
 
-        if right_tokens > per_branch_budget:
-            log.info(
-                "merge pre-compact: right branch %d tokens > %d budget",
-                right_tokens,
-                per_branch_budget,
+            async with runtime.lock:
+                chatflow = runtime.chatflow
+                if (
+                    left_id not in chatflow.nodes
+                    or right_id not in chatflow.nodes
+                ):
+                    raise KeyError(
+                        "source node was removed during joint-compact "
+                        f"(left={left_id!r}, right={right_id!r})"
+                    )
+                joint_summary = _append_branch_citation_fallback(
+                    joint_raw, chatflow, [left_id, right_id]
+                )
+                compact_node = ChatFlowNode(
+                    parent_ids=[left_id, right_id],
+                    user_message=(
+                        EditableText.by_user(compact_instruction)
+                        if compact_instruction
+                        else None
+                    ),
+                    agent_response=EditableText.by_agent(joint_summary),
+                    workflow=joint_template,
+                    compact_snapshot=CompactSnapshot(
+                        summary=joint_summary,
+                        preserved_messages=joint_prefix,
+                        preserved_before_summary=True,
+                    ),
+                    status=NodeStatus.SUCCEEDED,
+                    started_at=utcnow(),
+                    finished_at=utcnow(),
+                    entry_prompt_tokens=original_tokens,
+                    output_response_tokens=_count_text_tokens(joint_summary),
+                )
+                chatflow.add_node(compact_node)
+                compact_node_id = compact_node.id
+
+            await self._bus.publish(
+                WorkflowEvent(
+                    workflow_id=chatflow_id,
+                    kind="chat.node.created",
+                    node_id=compact_node_id,
+                    data={
+                        "parent_ids": [left_id, right_id],
+                        "compact": True,
+                        "merge_source": True,
+                    },
+                )
             )
-            right_summary = await self._precompact_branch_for_merge(
-                right_ctx,
-                target_tokens=max(
-                    512,
-                    int(per_branch_budget * DEFAULT_COMPACT_TARGET_PCT),
-                ),
-                model=merge_model_ref,
-                disabled_tool_names=effective_disabled,
+            await self._bus.publish(
+                WorkflowEvent(
+                    workflow_id=chatflow_id,
+                    kind="chat.node.status",
+                    node_id=compact_node_id,
+                    data={"status": NodeStatus.SUCCEEDED.value},
+                )
             )
+
+            # Feed the merge worker the two suffixes directly — the
+            # joint summary above already captures the shared prefix
+            # and the combined context, so the merge worker only
+            # reconciles the post-LCA branches.
+            left_summary = _serialize_wire_chain(joint_left_suffix)
+            right_summary = _serialize_wire_chain(joint_right_suffix)
         else:
-            right_summary = _serialize_wire_chain(right_ctx)
+            from agentloom.engine.provider_context_cache import (
+                lookup as _ctx_lookup,
+            )
+
+            window = (
+                _ctx_lookup(merge_model_ref)
+                or DEFAULT_CONTEXT_WINDOW_TOKENS
+            )
+            total_budget = int(window * trigger_pct)
+            per_branch_budget = max(
+                512,
+                (total_budget - self._MERGE_PROMPT_OVERHEAD_TOKENS) // 2,
+            )
+
+            left_tokens = _estimate_tokens_from_wire(left_ctx)
+            right_tokens = _estimate_tokens_from_wire(right_ctx)
+
+            if left_tokens > per_branch_budget:
+                log.info(
+                    "merge pre-compact: left branch %d tokens > %d budget",
+                    left_tokens,
+                    per_branch_budget,
+                )
+                left_summary = await self._precompact_branch_for_merge(
+                    left_ctx,
+                    target_tokens=max(
+                        512,
+                        int(per_branch_budget * DEFAULT_COMPACT_TARGET_PCT),
+                    ),
+                    model=merge_model_ref,
+                    disabled_tool_names=effective_disabled,
+                )
+            else:
+                left_summary = _serialize_wire_chain(left_ctx)
+
+            if right_tokens > per_branch_budget:
+                log.info(
+                    "merge pre-compact: right branch %d tokens > %d budget",
+                    right_tokens,
+                    per_branch_budget,
+                )
+                right_summary = await self._precompact_branch_for_merge(
+                    right_ctx,
+                    target_tokens=max(
+                        512,
+                        int(per_branch_budget * DEFAULT_COMPACT_TARGET_PCT),
+                    ),
+                    model=merge_model_ref,
+                    disabled_tool_names=effective_disabled,
+                )
+            else:
+                right_summary = _serialize_wire_chain(right_ctx)
 
         # --- Back under lock: build the merge ChatNode. ---
+        merge_parent_ids = (
+            [compact_node_id] if compact_node_id is not None else [left_id, right_id]
+        )
         async with runtime.lock:
             chatflow = runtime.chatflow
-            if left_id not in chatflow.nodes or right_id not in chatflow.nodes:
-                raise KeyError(
-                    f"source node was removed during pre-compact "
-                    f"(left={left_id!r}, right={right_id!r})"
-                )
+            for pid in merge_parent_ids:
+                if pid not in chatflow.nodes:
+                    raise KeyError(
+                        f"merge parent {pid!r} missing after pre-compact"
+                    )
 
             templated = instantiate_fixture(
                 self._fixture_plans["merge"],
@@ -1231,7 +1384,7 @@ class ChatFlowEngine:
                 inner_node.resolved_model = model
 
             merge_node = ChatFlowNode(
-                parent_ids=[left_id, right_id],
+                parent_ids=list(merge_parent_ids),
                 user_message=(
                     EditableText.by_user(merge_instruction)
                     if merge_instruction
@@ -1251,7 +1404,7 @@ class ChatFlowEngine:
                 kind="chat.node.created",
                 node_id=merge_id,
                 data={
-                    "parent_ids": [left_id, right_id],
+                    "parent_ids": list(merge_parent_ids),
                     "merge": True,
                 },
             )
@@ -1325,6 +1478,16 @@ class ChatFlowEngine:
                 )
                 merge_node.finished_at = utcnow()
             else:
+                # The merge ChatNode is the only node downstream will
+                # see — if the model didn't cite, append a structural
+                # fallback pointing back at the original branches so
+                # provenance survives. Joint-compact path cites the
+                # same pair on the compact summary; appending again on
+                # the merge reply is idempotent from the reader's POV
+                # but keeps every synthesised node self-describing.
+                merged_reply = _append_branch_citation_fallback(
+                    merged_reply, chatflow, [left_id, right_id]
+                )
                 merged_tokens = _count_text_tokens(merged_reply)
                 merge_node.agent_response = EditableText.by_agent(merged_reply)
                 merge_node.output_response_tokens = merged_tokens
