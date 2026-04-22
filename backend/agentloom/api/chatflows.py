@@ -242,6 +242,32 @@ class CompactChainResponse(BaseModel):
     status: str
 
 
+class PackChainRequest(BaseModel):
+    """Body for POST /chatflows/{id}/pack.
+
+    ``packed_range`` lists ChatNode ids in topological order (earliest
+    → latest, contiguous along primary-parent). Pack is ChatFlow-layer
+    only — WorkFlow-layer "hide internal nodes" is already served by
+    delegate / sub_workflow.
+    """
+
+    packed_range: list[str]
+    use_detailed_index: bool = True
+    preserve_last_n: int = 0
+    pack_instruction: str = ""
+    must_keep: str = ""
+    must_drop: str = ""
+    target_tokens: int | None = None
+    model: ProviderModelRef | None = None
+
+
+class PackChainResponse(BaseModel):
+    node_id: str
+    status: str
+    summary: str
+    packed_range: list[str]
+
+
 class MergeChainRequest(BaseModel):
     """Body for POST /chatflows/{id}/merge.
 
@@ -946,6 +972,68 @@ async def compact_chain(
     return CompactChainResponse(
         node_id=compact_node.id,
         status=compact_node.status.value,
+    )
+
+
+@router.post(
+    "/{chatflow_id}/pack",
+    response_model=PackChainResponse,
+)
+async def pack_chain(
+    chatflow_id: str,
+    body: PackChainRequest,
+    request: Request,
+    session_maker: async_sessionmaker[AsyncSession] = Depends(get_session_scope),
+) -> PackChainResponse:
+    """User-initiated mid-chain pack over a contiguous ChatNode range.
+
+    Creates a pack ChatNode hanging off ``packed_range[-1]`` and runs
+    its inner workflow to produce the summary. Session is released
+    while the pack worker runs so long LLM calls don't pin a DB
+    connection (same pattern as ``compact_chain``).
+
+    Error mapping:
+      - 400 on ``PackRangeError`` (malformed range)
+      - 404 on unknown ids
+      - 409 on engine state errors (ValueError)
+    """
+    engine = _get_engine(request)
+
+    async with session_maker() as session:
+        repo = _repo(session)
+        chat = await _attached_chatflow(engine, repo, chatflow_id)
+
+    from agentloom.engine.chatflow_engine import PackRangeError
+
+    try:
+        pack_node = await engine.pack_chain_range(
+            chat.id,
+            packed_range=body.packed_range,
+            use_detailed_index=body.use_detailed_index,
+            preserve_last_n=body.preserve_last_n,
+            pack_instruction=body.pack_instruction,
+            must_keep=body.must_keep,
+            must_drop=body.must_drop,
+            target_tokens=body.target_tokens,
+            model=body.model,
+        )
+    except PackRangeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+    async with session_maker() as session:
+        await _repo(session).save(chat)
+        await session.commit()
+
+    snap = pack_node.pack_snapshot
+    return PackChainResponse(
+        node_id=pack_node.id,
+        status=pack_node.status.value,
+        summary=(snap.summary if snap else "") or "",
+        packed_range=list(snap.packed_range) if snap else [],
     )
 
 
