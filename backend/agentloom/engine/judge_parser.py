@@ -253,7 +253,20 @@ def parse_judge_from_tool_args(
 
     Same validation as :func:`parse_judge_verdict` but skips the JSON
     extraction step since the arguments are already a parsed dict.
+
+    Special case: ``{"_raw": <str>}`` is a sentinel the provider adapter
+    emits when the raw tool_call arguments string could not be parsed as
+    JSON (observed with ark-code-latest on Chinese payloads — literal
+    inner ``"`` characters left unescaped). Surface the raw body in the
+    error so the retry path's prompt can echo it back with an explicit
+    escape hint; silently treating it as empty args buries the evidence.
     """
+    if set(args.keys()) == {"_raw"} and isinstance(args["_raw"], str):
+        raw_preview = args["_raw"][:400]
+        raise JudgeParseError(
+            f"judge tool_use arguments are not valid JSON (adapter "
+            f"sentinel _raw): {raw_preview!r}"
+        )
     for key in _LIST_FIELDS:
         if args.get(key) is None and key in args:
             args[key] = []

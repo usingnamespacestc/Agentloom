@@ -1789,6 +1789,42 @@ class WorkflowEngine:
         assert node.judge_variant is not None
         first_raw = node.output_message.content
 
+        # If the first-attempt failure came from a tool_use whose
+        # arguments could not be decoded as JSON (``{"_raw": "..."}``
+        # sentinel — observed with ark-code-latest emitting Chinese
+        # strings with unescaped inner ``"``), surface the broken raw
+        # payload verbatim in the retry prompt and give an escape-
+        # specific hint. The generic "invalid JSON" message alone was
+        # not enough — ark retried the same malformed shape.
+        broken_tool_raw: str | None = None
+        for tu in node.output_message.tool_uses or []:
+            if tu.name == "judge_verdict":
+                raw = tu.arguments.get("_raw")
+                if isinstance(raw, str) and raw:
+                    broken_tool_raw = raw
+                break
+
+        if broken_tool_raw is not None:
+            correction = (
+                "Your previous `judge_verdict` tool call's arguments "
+                "were not valid JSON — the raw string you emitted is "
+                "reproduced verbatim below between the <RAW> markers:\n"
+                "<RAW>\n"
+                f"{broken_tool_raw[:1500]}\n"
+                "</RAW>\n"
+                "Every `\"` character that appears *inside* a JSON "
+                "string value MUST be escaped as `\\\"`. Resubmit the "
+                "judge_verdict tool call with strictly valid JSON "
+                "arguments matching the schema."
+            )
+        else:
+            correction = (
+                f"Your previous reply failed JSON parse: {first_exc}. "
+                "Reply with ONLY a valid JSON object matching the "
+                "required schema — no prose, no code fences, all "
+                "string values quoted."
+            )
+
         # Build retry context: original input + the bad response + a
         # terse corrective user message. Keeps the token cost small and
         # shows the model exactly what it emitted.
@@ -1796,14 +1832,7 @@ class WorkflowEngine:
         retry_messages: list[Message] = [
             *base_messages,
             AssistantMessage(content=first_raw),
-            UserMessage(
-                content=(
-                    f"Your previous reply failed JSON parse: {first_exc}. "
-                    "Reply with ONLY a valid JSON object matching the "
-                    "required schema — no prose, no code fences, all "
-                    "string values quoted."
-                )
-            ),
+            UserMessage(content=correction),
         ]
 
         ref = effective_model_for(workflow, node.id)

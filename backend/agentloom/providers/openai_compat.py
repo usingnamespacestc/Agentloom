@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any
 
 import httpx
@@ -23,6 +24,8 @@ from agentloom.providers.types import (
     ToolDefinition,
     ToolUse,
 )
+
+log = logging.getLogger(__name__)
 
 _MAX_RETRIES = 3
 
@@ -149,7 +152,15 @@ class OpenAICompatAdapter(ProviderAdapter):
             elif isinstance(args_raw, str) and args_raw:
                 try:
                     args = json.loads(args_raw)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as exc:
+                    log.warning(
+                        "tool_call arguments JSON decode failed "
+                        "(tool=%s len=%d err=%s): %r",
+                        func.get("name") or "?",
+                        len(args_raw),
+                        exc,
+                        args_raw[:500],
+                    )
                     args = {"_raw": args_raw}
             else:
                 args = {}
@@ -460,7 +471,15 @@ class OpenAICompatAdapter(ProviderAdapter):
             args_str = buf["args"]
             try:
                 args = json.loads(args_str) if args_str else {}
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                log.warning(
+                    "tool_call (streaming) arguments JSON decode failed "
+                    "(tool=%s len=%d err=%s): %r",
+                    buf.get("name") or "?",
+                    len(args_str),
+                    exc,
+                    args_str[:500],
+                )
                 args = {"_raw": args_str}
             tool_uses.append(
                 ToolUse(id=buf["id"], name=buf["name"], arguments=args)
