@@ -90,9 +90,11 @@ async def delete_folder(
         chatflow_ids = await repo.delete(folder_id)
     except FolderNotFoundError as exc:
         raise HTTPException(404, f"folder {folder_id} not found") from exc
-    # Detach any engine runtimes for the deleted chatflows.
+    # Detach any engine runtimes for the deleted chatflows. cancel=True
+    # so in-flight LLM/brief tasks don't linger past the DB delete and
+    # try to INSERT into board_items for a gone chatflow (FK violation).
     for cid in chatflow_ids:
         if engine.get_runtime(cid) is not None:
-            await engine.detach(cid)
+            await engine.detach(cid, cancel=True)
     await session.commit()
     return {"ok": True, "deleted_chatflows": chatflow_ids}

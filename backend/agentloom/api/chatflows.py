@@ -45,7 +45,7 @@ from agentloom.engine.chatflow_engine import (
     ChatFlowEngine,
     DiscardedUpstreamFailure,
 )
-from agentloom.engine.events import get_event_bus
+from agentloom.engine.events import WorkflowEvent, get_event_bus
 from agentloom.schemas import ChatFlow, PendingTurn, make_chatflow
 from agentloom.schemas.chatflow import PendingTurnSource
 from agentloom.schemas.common import ExecutionMode, FrozenNodeError, ProviderModelRef, StickyNote
@@ -383,13 +383,26 @@ async def delete_chatflow(
     engine = _get_engine(request)
     runtime = engine.get_runtime(chatflow_id)
     if runtime is not None:
-        await engine.detach(chatflow_id)
+        await engine.detach(chatflow_id, cancel=True)
     repo = _repo(session)
     try:
         await repo.delete(chatflow_id)
     except ChatFlowNotFoundError as exc:
         raise HTTPException(404, f"chatflow {chatflow_id} not found") from exc
     await session.commit()
+    # Tell any open SSE subscriber the chatflow is gone so the UI stops
+    # painting the last-known node state as still-running. Publish a
+    # terminal event first (so subscribers see the reason), then close
+    # the stream with an end-of-stream sentinel.
+    bus = get_event_bus()
+    await bus.publish(
+        WorkflowEvent(
+            workflow_id=chatflow_id,
+            kind="chat.deleted",
+            data={"chatflow_id": chatflow_id},
+        )
+    )
+    await bus.close(chatflow_id)
     return {"ok": True}
 
 

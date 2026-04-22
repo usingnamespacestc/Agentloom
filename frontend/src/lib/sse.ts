@@ -56,6 +56,7 @@ export function subscribeEvents(
     "chat.node.status",
     "chat.node.queue.updated",
     "chat.node.deleted",
+    "chat.deleted",
     "chat.turn.started",
     "chat.turn.completed",
     "chat.workflow.node.running",
