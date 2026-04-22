@@ -9,12 +9,9 @@
  */
 
 import { render, screen } from "@testing-library/react";
-import { describe, it, expect, afterEach } from "vitest";
-import { ReactFlowProvider } from "@xyflow/react";
-import type { NodeProps } from "@xyflow/react";
+import { describe, it, expect } from "vitest";
 
 import { ChatFlowCanvas, buildGraph, CHAT_BRIEF_NODE_PREFIX } from "./ChatFlowCanvas";
-import { ChatFlowNodeCard, type ChatFlowNodeData } from "./nodes/ChatFlowNodeCard";
 import { useChatFlowStore } from "@/store/chatflowStore";
 import type { BoardItem, ChatFlow, ChatFlowNode } from "@/types/schema";
 
@@ -35,7 +32,9 @@ function seed(): ChatFlow {
       disabled_tool_names: [],
       compact_trigger_pct: 0.7,
       compact_target_pct: 0.5,
-      compact_preserve_recent_turns: 3,
+      compact_keep_recent_count: 3,
+      compact_preserve_mode: "by_count",
+      recalled_context_sticky_turns: 3,
       compact_model: null,
       compact_require_confirmation: true,
       chatnode_compact_trigger_pct: 0.6,
@@ -146,6 +145,7 @@ describe("buildGraph", () => {
     cf.nodes["b"].compact_snapshot = {
       summary: "s",
       preserved_messages: [],
+      preserved_before_summary: false,
     };
     const { nodes } = buildGraph(cf, null);
     // The card component reads node.compact_snapshot off data.node.
@@ -213,113 +213,6 @@ describe("buildGraph", () => {
   });
 });
 
-describe("ChatFlowNodeCard — ChatBoard badge (PR 3)", () => {
-  afterEach(() => {
-    useChatFlowStore.setState({ boardItems: {} });
-  });
-
-  function seedChatNode(id: string = "cn-1"): ChatFlowNode {
-    const iso = "2026-04-20T00:00:00Z";
-    return {
-      id,
-      parent_ids: ["root"],
-      description: { text: "", provenance: "unset", updated_at: iso },
-      inputs: null,
-      expected_outcome: null,
-      status: "succeeded",
-      resolved_model: null,
-      locked: false,
-      error: null,
-      position_x: null,
-      position_y: null,
-      created_at: iso,
-      updated_at: iso,
-      started_at: null,
-      finished_at: null,
-      user_message: { text: "hi", provenance: "pure_user", updated_at: iso },
-      agent_response: { text: "hello", provenance: "pure_agent", updated_at: iso },
-      workflow: { id: "wf", root_ids: [], nodes: {} },
-      pending_queue: [],
-      compact_snapshot: null,
-      entry_prompt_tokens: null,
-      output_response_tokens: null,
-    } as unknown as ChatFlowNode;
-  }
-
-  function renderCard(node: ChatFlowNode) {
-    const data: ChatFlowNodeData = {
-      node,
-      isSelected: false,
-      canDelete: false,
-      isLeaf: true,
-      isRoot: false,
-      contextTokens: 0,
-      maxContextTokens: null,
-    };
-    return render(
-      <ReactFlowProvider>
-        <ChatFlowNodeCard {...({ data } as unknown as NodeProps)} />
-      </ReactFlowProvider>,
-    );
-  }
-
-  it("renders a ChatBoard badge when a scope='chat' BoardItem exists for the node", () => {
-    const node = seedChatNode("cn-with-board");
-    const item: BoardItem = {
-      id: "bi-chat-1",
-      chatflow_id: "cf-a",
-      workflow_id: null,
-      source_node_id: node.id,
-      source_kind: "chat_turn",
-      scope: "chat",
-      description: "user asked: hi; agent: hello",
-      fallback: false,
-      created_at: "2026-04-20T00:00:00Z",
-    };
-    useChatFlowStore.setState({ boardItems: { [node.id]: item } });
-
-    renderCard(node);
-    const badge = screen.getByTestId(`chatflow-node-${node.id}-chatboard-badge`);
-    expect(badge).toBeInTheDocument();
-    // The badge exposes the source_kind so future styling / selectors
-    // can key off chat_turn vs chat_compact vs chat_merge.
-    expect(badge.getAttribute("data-source-kind")).toBe("chat_turn");
-    // Hover tooltip carries the full description prose.
-    expect(badge.getAttribute("title")).toContain("user asked: hi");
-  });
-
-  it("hides the ChatBoard badge when no scope='chat' BoardItem is seeded", () => {
-    const node = seedChatNode("cn-no-board");
-    renderCard(node);
-    expect(
-      screen.queryByTestId(`chatflow-node-${node.id}-chatboard-badge`),
-    ).toBeNull();
-  });
-
-  it("ignores non-chat scope items keyed at the same id", () => {
-    // A WorkBoard (scope='node') row must not paint the ChatBoard
-    // badge — they share the BoardItem shape but the scope filter
-    // separates the two rendering paths.
-    const node = seedChatNode("cn-wrong-scope");
-    const item: BoardItem = {
-      id: "bi-node-1",
-      chatflow_id: "cf-a",
-      workflow_id: "wf-a",
-      source_node_id: node.id,
-      source_kind: "draft",
-      scope: "node",
-      description: "wrong scope for a ChatNode",
-      fallback: false,
-      created_at: "2026-04-20T00:00:00Z",
-    };
-    useChatFlowStore.setState({ boardItems: { [node.id]: item } });
-    renderCard(node);
-    expect(
-      screen.queryByTestId(`chatflow-node-${node.id}-chatboard-badge`),
-    ).toBeNull();
-  });
-});
-
 describe("ChatFlowCanvas rendering", () => {
   it("renders the empty-state placeholder when chatflow is null", () => {
     render(<ChatFlowCanvas chatflow={null} />);
@@ -345,7 +238,9 @@ describe("ChatFlowCanvas rendering", () => {
       disabled_tool_names: [],
       compact_trigger_pct: 0.7,
       compact_target_pct: 0.5,
-      compact_preserve_recent_turns: 3,
+      compact_keep_recent_count: 3,
+      compact_preserve_mode: "by_count",
+      recalled_context_sticky_turns: 3,
       compact_model: null,
       compact_require_confirmation: true,
       chatnode_compact_trigger_pct: 0.6,

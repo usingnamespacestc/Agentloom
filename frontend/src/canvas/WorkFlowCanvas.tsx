@@ -483,8 +483,13 @@ export function buildWorkflowGraph(
     stackAboveIds: briefIds,
   });
   const rootSet = new Set(wf.root_ids);
+  // Briefs are rendered as floating bubbles with no edge to their
+  // source (see edge-creation skip below). Excluding them here keeps
+  // a WorkNode whose only child is a brief from showing a dangling
+  // right-side source handle — nothing connects to it visibly.
   const hasChild = new Set<string>();
   for (const n of Object.values(graphNodes)) {
+    if (briefIds.has(n.id)) continue;
     for (const pid of n.parent_ids) hasChild.add(pid);
   }
   const rfNodes: Node<WorkFlowNodeData>[] = laidOut.map(({ node, position }) => {
