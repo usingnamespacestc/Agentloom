@@ -384,9 +384,37 @@ async def list_chatflow_board_items(
     / ``chat``) and by ``source_node_id`` client-side. Shaped as
     ``{"items": [...]}`` to leave room for pagination metadata later
     without a breaking rev of the response envelope.
+
+    For pack items (``source_kind == "pack"``) we enrich the row with
+    ``pack_inner_ids`` — the ``packed_range`` pulled off the pack's
+    WorkFlowNode so the client can render a "replace the inner items
+    with pack's summary when viewing from pack's downstream" filter
+    without having to re-walk the chatflow payload for each pack.
+    Empty list on non-pack rows.
     """
     repo = BoardItemRepository(session, workspace_id=DEFAULT_WORKSPACE_ID)
     rows = await repo.list_by_chatflow(chatflow_id)
+
+    pack_inner: dict[str, list[str]] = {}
+    if any(r.source_kind == "pack" for r in rows):
+        cf_repo = _repo(session)
+        try:
+            chat = await cf_repo.get(chatflow_id)
+        except KeyError:
+            chat = None
+        if chat is not None:
+            for row in rows:
+                if row.source_kind != "pack":
+                    continue
+                wf = _walk_workflow_for_node(chat, row.source_node_id)
+                if wf is None:
+                    continue
+                wn = wf.nodes.get(row.source_node_id)
+                if wn is not None and wn.pack_snapshot is not None:
+                    pack_inner[row.source_node_id] = list(
+                        wn.pack_snapshot.packed_range
+                    )
+
     items = [
         {
             "id": row.id,
@@ -398,10 +426,30 @@ async def list_chatflow_board_items(
             "description": row.description,
             "fallback": row.fallback,
             "created_at": row.created_at.isoformat() if row.created_at else None,
+            "pack_inner_ids": pack_inner.get(row.source_node_id, []),
         }
         for row in rows
     ]
     return {"items": items}
+
+
+def _walk_workflow_for_node(chat, node_id: str):
+    """Find the innermost WorkFlow (outer or any nested sub_workflow)
+    that contains ``node_id``. Returns None if no WorkFlow owns it —
+    e.g. ``node_id`` is a ChatNode rather than a WorkNode, or the pack
+    row outlived the chatflow state we just loaded.
+    """
+    stack = []
+    for cn in chat.nodes.values():
+        stack.append(cn.workflow)
+    while stack:
+        wf = stack.pop()
+        if node_id in wf.nodes:
+            return wf
+        for wn in wf.nodes.values():
+            if wn.sub_workflow is not None:
+                stack.append(wn.sub_workflow)
+    return None
 
 
 @router.delete("/{chatflow_id}")
