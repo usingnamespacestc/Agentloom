@@ -358,13 +358,19 @@ def _first_line(text: str) -> str:
 def _chat_board_source_kind(node: ChatFlowNode) -> str:
     """Classify a finished ChatNode into a MemoryBoard ``source_kind``.
 
-    Same tiered rule as ``_build_chat_context``: a populated
-    ``compact_snapshot`` outranks the structural merge test
-    (``len(parent_ids) >= 2``) because the two are mutually exclusive
-    in practice — a compact ChatNode always has exactly one parent,
-    a merge ChatNode always has two. Plain turn nodes fall through to
-    ``"chat_turn"``.
+    Tiered rule, matching ``_build_chat_context``:
+    - ``pack_snapshot`` (a user-initiated mid-chain pack) is the most
+      specific classification and outranks both others. Pack and
+      compact are mutually exclusive on any ChatNode (validator in
+      ``schemas.chatflow``).
+    - A populated ``compact_snapshot`` outranks the structural merge
+      test because the two are mutually exclusive in practice (compact
+      always has exactly one parent, merge always two).
+    - Multi-parent → ``"chat_merge"``.
+    - Plain turn nodes fall through to ``"chat_turn"``.
     """
+    if node.pack_snapshot is not None:
+        return "chat_pack"
     if node.compact_snapshot is not None:
         return "chat_compact"
     if len(node.parent_ids) >= 2:
@@ -396,6 +402,14 @@ def _chat_board_description(node: ChatFlowNode) -> str:
         return (
             f"compacted prior chain into a summary "
             f"(+{preserved} preserved verbatim): {summary_snippet}"
+        ).rstrip(": ")
+    if kind == "chat_pack":
+        psnap = node.pack_snapshot
+        range_size = len(psnap.packed_range) if psnap is not None else 0
+        summary_snippet = agent_snippet or "(empty summary)"
+        return (
+            f"packed {range_size} ChatNode(s) into a mid-chain summary: "
+            f"{summary_snippet}"
         ).rstrip(": ")
     if kind == "chat_merge":
         sources = node.parent_ids
@@ -1267,6 +1281,30 @@ class ChatFlowEngine:
                 pack_node.agent_response = EditableText.by_agent(summary)
                 pack_node.status = NodeStatus.SUCCEEDED
                 pack_node.finished_at = utcnow()
+
+        # MemoryBoard: pack's summary IS its ChatBoard brief. Write
+        # the row directly via the inner engine's board_writer — no
+        # secondary chat_brief LLM call (same rationale as
+        # PR 4.2.a for compact at the WorkFlow layer).
+        if (
+            pack_node.status == NodeStatus.SUCCEEDED
+            and self._inner._board_writer is not None
+        ):
+            try:
+                await self._inner._board_writer(
+                    chatflow_id=chatflow.id,
+                    workflow_id=None,
+                    source_node_id=pack_id,
+                    source_kind="chat_pack",
+                    scope="chat",
+                    description=summary,
+                    fallback=False,
+                )
+            except Exception:  # noqa: BLE001 — board is best-effort
+                log.exception(
+                    "ChatBoardItem write failed for pack node %s — state unchanged",
+                    pack_id,
+                )
 
         await self._bus.publish(
             WorkflowEvent(
