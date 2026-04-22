@@ -238,9 +238,12 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
 
 下面这些是已经设计过、但还没动手（或只完成了 scaffolding）的方向：
 
-- [ ] **打包（pack）**——Layer-1 WorkNode kind，和 compress 对偶：把 WorkFlow /
-      ChatFlow 的产物打包成可交付件（文档、代码 patch、结构化报告），让一段
-      agent 活儿的产出不是"散落在若干 node 里"而是一件可复用资产。
+- [ ] **打包（pack）**——compress 的中段自定义变体：compress 是"根→叶"的全
+      链路压缩，pack 支持**任意连通中段**，并把"是否用详细索引 / 是否保护末 n
+      条 / 压缩范围"这三个开关对用户暴露。拓扑上 pack 的 parent 是被打包范围
+      的最后一个节点（另带 `packed_range` 元数据）；从 pack 及其后续链看，被
+      打包节点**隐藏**（pack 本身即 summary），从打包前 / 全局 canvas 看则仍
+      可见。Pack 可嵌套；delegate / 子代理在拓扑上就是 pack 的特化。
 - [ ] **认知节点 ReAct DAG 展开**——planning / pre-check / monitoring /
       post-check 这批"认知 WorkNode"统一支持 ReAct 式 DAG 展开（两端 cognitive，
       中间 tool_call），跟 MCP runtime（M7.5）搭车。当前止血手段是在 planner
