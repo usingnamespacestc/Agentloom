@@ -72,6 +72,7 @@ from agentloom.schemas import (
     ChatFlow,
     ChatFlowNode,
     CompactSnapshot,
+    PackSnapshot,
     PendingTurn,
     StepKind,
     WorkFlow,
@@ -1012,6 +1013,274 @@ class ChatFlowEngine:
                 update={"summary": summary}
             )
         return summary
+
+    # --------------------------------------------------------------- pack (ChatFlow-layer mid-chain)
+
+    def _build_pack_chatnode(
+        self,
+        chatflow: ChatFlow,
+        *,
+        packed_range: list[str],
+        use_detailed_index: bool,
+        preserve_last_n: int,
+        target_tokens: int | None,
+        model: ProviderModelRef | None,
+        pack_instruction: str,
+        must_keep: str,
+        must_drop: str,
+    ) -> ChatFlowNode:
+        """Construct an unattached pack ChatFlowNode over a validated
+        mid-chain range. Mirrors :meth:`_build_compact_chatnode` but
+        takes an explicit ``packed_range`` instead of walking the
+        primary-parent chain to root.
+
+        Parent_ids is set to the last packed ChatNode; the explicit
+        range (including nested packs / compacts) is gathered into the
+        prompt and a pre-stub ``pack_snapshot`` is stamped so the
+        caller can execute the inner workflow and finalize the summary.
+        """
+        ordered = _validate_chat_packed_range(chatflow, packed_range)
+        last_id = ordered[-1]
+
+        # Carve off the verbatim tail at ChatNode granularity so a
+        # user turn + its assistant reply stay together. preserve_last_n
+        # is counted in ChatNodes, not messages.
+        keep = max(0, min(len(ordered), preserve_last_n))
+        head_ids = ordered[:-keep] if keep else list(ordered)
+        tail_ids = ordered[-keep:] if keep else []
+
+        head_tagged = _gather_chat_pack_range_messages(chatflow, head_ids)
+        tail_wire: list[WireMessage] = []
+        for _nid, m in _gather_chat_pack_range_messages(chatflow, tail_ids):
+            tail_wire.append(m)
+        full_wire = [m for _nid, m in _gather_chat_pack_range_messages(chatflow, ordered)]
+
+        if not head_tagged:
+            raise PackRangeError(
+                "nothing to pack — preserve_last_n covers the entire range"
+            )
+
+        head_serialized = "\n".join(
+            f"[node:{nid or '?'} | {m.role}] {m.content}"
+            for nid, m in head_tagged
+        )
+
+        resolved_target = (
+            target_tokens
+            if target_tokens is not None
+            else max(512, int(4096 * DEFAULT_COMPACT_TARGET_PCT))
+        )
+
+        templated = instantiate_fixture(
+            self._fixture_plans["pack"],
+            {
+                "messages_to_pack": head_serialized,
+                "packed_node_ids": ", ".join(ordered),
+                "target_tokens": resolved_target,
+                "use_detailed_index": str(bool(use_detailed_index)).lower(),
+                "must_keep": must_keep,
+                "must_drop": must_drop,
+                "pack_instruction": pack_instruction,
+            },
+            includes=self._fixture_includes,
+        )
+
+        inner_node = _single_node(templated)
+        if model is not None:
+            inner_node.model_override = model
+            inner_node.resolved_model = model
+
+        entry_tokens = _estimate_tokens_from_wire(full_wire)
+
+        return ChatFlowNode(
+            parent_ids=[last_id],
+            user_message=(
+                EditableText.by_user(pack_instruction)
+                if pack_instruction
+                else None
+            ),
+            agent_response=EditableText.by_agent(""),
+            workflow=templated,
+            status=NodeStatus.PLANNED,
+            entry_prompt_tokens=entry_tokens,
+            pack_snapshot=PackSnapshot(
+                summary="",
+                packed_range=list(ordered),
+                use_detailed_index=use_detailed_index,
+                preserve_last_n=keep,
+                preserved_messages=list(tail_wire),
+            ),
+        )
+
+    async def pack_chain_range(
+        self,
+        chatflow_id: str,
+        *,
+        packed_range: list[str],
+        use_detailed_index: bool = True,
+        preserve_last_n: int = 0,
+        pack_instruction: str = "",
+        must_keep: str = "",
+        must_drop: str = "",
+        target_tokens: int | None = None,
+        model: ProviderModelRef | None = None,
+    ) -> ChatFlowNode:
+        """User-initiated mid-chain pack.
+
+        Creates a pack ChatNode hanging off ``packed_range[-1]``, runs
+        its inner workflow (which invokes the ``pack.yaml`` fixture to
+        produce the summary), writes the summary onto
+        ``pack_snapshot.summary`` + ``agent_response``, and returns the
+        frozen pack node.
+
+        Pre-pack / global-canvas views still see the packed range
+        unchanged; only the pack node itself and anything downstream
+        of it see the summary substitution (enforced at read time in
+        :func:`_build_chat_context`).
+        """
+        runtime = self._require_runtime(chatflow_id)
+
+        async with runtime.lock:
+            chatflow = runtime.chatflow
+            # Strict brief-sync gate (mirrors compact_chain): the pack
+            # worker cites ChatNode ids from its brief, so we must not
+            # pack a node whose brief hasn't landed yet.
+            await self._await_ancestor_briefs(chatflow, packed_range[-1])
+            pack_node = self._build_pack_chatnode(
+                chatflow,
+                packed_range=packed_range,
+                use_detailed_index=use_detailed_index,
+                preserve_last_n=preserve_last_n,
+                target_tokens=target_tokens,
+                model=model,
+                pack_instruction=pack_instruction,
+                must_keep=must_keep,
+                must_drop=must_drop,
+            )
+            chatflow.add_node(pack_node)
+            pack_id = pack_node.id
+
+        await self._bus.publish(
+            WorkflowEvent(
+                workflow_id=chatflow_id,
+                kind="chat.node.created",
+                node_id=pack_id,
+                data={
+                    "parent_id": packed_range[-1],
+                    "pack": True,
+                },
+            )
+        )
+        await self._bus.publish(
+            WorkflowEvent(
+                workflow_id=chatflow_id,
+                kind="chat.node.status",
+                node_id=pack_id,
+                data={"status": NodeStatus.RUNNING.value},
+            )
+        )
+
+        async with runtime.lock:
+            pack_node = chatflow.get(pack_id)
+            pack_node.status = NodeStatus.RUNNING
+            pack_node.started_at = utcnow()
+
+        inner_wf_id = pack_node.workflow.id
+        relay_queue = self._bus.open_subscription(inner_wf_id)
+        relay_task = asyncio.create_task(
+            self._relay_inner_events(
+                chatflow.id, pack_id, inner_wf_id, relay_queue
+            )
+        )
+
+        runtime_error: str | None = None
+        ws_settings = tenancy_runtime.get_settings(self._inner._tool_ctx.workspace_id)
+        effective_disabled = (
+            frozenset(chatflow.disabled_tool_names)
+            | frozenset(ws_settings.globally_disabled())
+        )
+        try:
+            await self._inner.execute(
+                pack_node.workflow,
+                chatflow_tool_loop_budget=chatflow.tool_loop_budget,
+                chatflow_auto_mode_revise_budget=chatflow.auto_mode_revise_budget,
+                chatflow_min_ground_ratio=None,
+                chatflow_ground_ratio_grace_nodes=20,
+                # Pack is single-shot; auto-compacting its own input
+                # would recurse uselessly.
+                chatflow_compact_trigger_pct=None,
+                chatflow_id=chatflow.id,
+                disabled_tool_names=effective_disabled,
+            )
+        except Exception as exc:  # noqa: BLE001 — engine boundary
+            log.exception("pack ChatNode %s inner workflow raised", pack_id)
+            runtime_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            await self._bus.close(inner_wf_id)
+            try:
+                await relay_task
+            except Exception:
+                pass
+
+        async with runtime.lock:
+            pack_node = chatflow.get(pack_id)
+            inner_llm = _single_node(pack_node.workflow)
+            summary = (
+                (inner_llm.output_message.content or "").strip()
+                if inner_llm.output_message
+                else ""
+            )
+            if runtime_error is not None or not summary:
+                pack_node.status = NodeStatus.FAILED
+                pack_node.error = (
+                    runtime_error or "pack worker returned empty summary"
+                )
+                pack_node.finished_at = utcnow()
+            else:
+                # Hard-cap the pack summary at target × ctx so an
+                # overshooting summarizer can't strand the next turn.
+                from agentloom.engine.workflow_engine import (
+                    _truncate_text_to_tokens,
+                )
+
+                resolved_for_cap = (
+                    pack_node.resolved_model
+                    or inner_llm.resolved_model
+                    or inner_llm.model_override
+                )
+                ctx = self._inner._context_window_for(resolved_for_cap)
+                cap_tokens = max(
+                    256,
+                    int(ctx * chatflow.chatnode_compact_target_pct),
+                )
+                if _count_text_tokens(summary) > cap_tokens:
+                    log.warning(
+                        "pack summary exceeds target: node=%s cap=%d — truncating",
+                        pack_id,
+                        cap_tokens,
+                    )
+                    summary = _truncate_text_to_tokens(summary, cap_tokens)
+                assert pack_node.pack_snapshot is not None
+                pack_node.pack_snapshot = pack_node.pack_snapshot.model_copy(
+                    update={"summary": summary}
+                )
+                pack_node.agent_response = EditableText.by_agent(summary)
+                pack_node.status = NodeStatus.SUCCEEDED
+                pack_node.finished_at = utcnow()
+
+        await self._bus.publish(
+            WorkflowEvent(
+                workflow_id=chatflow_id,
+                kind="chat.node.status",
+                node_id=pack_id,
+                data={
+                    "status": pack_node.status.value,
+                    **({"error": pack_node.error} if pack_node.error else {}),
+                },
+            )
+        )
+        await self._save(runtime)
+        return pack_node
 
     async def compact_chain(
         self,
@@ -5350,6 +5619,9 @@ def _build_chat_context(
 
     messages: list[WireMessage] = []
     start_idx = 0
+    # Pack substitutions computed after start_idx is finalised (see below).
+    pack_subs_at: dict[int, PackSnapshot] = {}
+    hidden_chain_indices: set[int] = set()
     if compact_cutoff_idx is not None:
         snap = chatflow.nodes[chain[compact_cutoff_idx]].compact_snapshot
         assert snap is not None  # loop guarantees
@@ -5398,9 +5670,50 @@ def _build_chat_context(
             messages.extend(snap.preserved_messages)
         start_idx = compact_cutoff_idx + 1
 
-    for nid in chain[start_idx:]:
+    # Pack substitutions: for each pack ChatNode on chain[start_idx:],
+    # emit its summary once at the first range index, and mark every
+    # range member + the pack node itself as hidden so the emission
+    # loop doesn't double-count. Pack only affects ITS OWN range
+    # (unlike compact which implicitly covers everything before it);
+    # pre-pack ancestors in the same chain continue to emit normally.
+    for i in range(start_idx, len(chain)):
+        node_i = chatflow.nodes[chain[i]]
+        pack_snap = node_i.pack_snapshot
+        if pack_snap is not None and pack_snap.summary:
+            range_set = set(pack_snap.packed_range)
+            range_indices = [
+                j for j in range(start_idx, len(chain)) if chain[j] in range_set
+            ]
+            if range_indices:
+                pack_subs_at[min(range_indices)] = pack_snap
+                hidden_chain_indices.update(range_indices)
+            # The pack node's own user/assistant should not emit — the
+            # summary substitutes for the range and pack.agent_response
+            # IS that summary.
+            hidden_chain_indices.add(i)
+
+    for i in range(start_idx, len(chain)):
+        nid = chain[i]
         node = chatflow.nodes[nid]
         if not node.is_frozen:
+            continue
+        # Emit a pack summary at the first index of each pack's range.
+        if i in pack_subs_at:
+            psnap = pack_subs_at[i]
+            messages.append(
+                WireMessage(
+                    role="user",
+                    content=(
+                        "[Packed range — summarized to save context]\n\n"
+                        f"{psnap.summary}"
+                    ),
+                )
+            )
+            messages.extend(psnap.preserved_messages)
+        # Hidden chain indices (range members + the pack node itself)
+        # skip their own user/assistant emission; the summary above
+        # already covers them.
+        if i in hidden_chain_indices:
             continue
         # A compact ChatNode after the cutoff (only possible if the
         # newest compact isn't the cutoff — can't currently happen but
@@ -5817,6 +6130,94 @@ def _greedy_pack_chatnode_groups_within_budget(
     return out
 
 
+class PackRangeError(ValueError):
+    """Raised when a user-supplied ``packed_range`` is invalid (empty,
+    unknown id, or not contiguous along the primary-parent chain).
+    Surfaced to the API handler as a 400."""
+
+
+def _validate_chat_packed_range(
+    chatflow: ChatFlow, packed_range: list[str]
+) -> list[str]:
+    """Verify the supplied ChatNode ids form a contiguous primary-parent
+    chain and return them in topological order (earliest → latest).
+
+    Rules:
+      - at least one id
+      - every id exists in ``chatflow``
+      - for each consecutive pair ``(a, b)``, ``a`` appears in
+        ``b.parent_ids`` (``a`` is a parent of ``b``)
+    """
+    if not packed_range:
+        raise PackRangeError("packed_range is empty")
+    for nid in packed_range:
+        if nid not in chatflow.nodes:
+            raise PackRangeError(f"packed_range id {nid!r} not in chatflow")
+    for a, b in zip(packed_range, packed_range[1:]):
+        if a not in chatflow.nodes[b].parent_ids:
+            raise PackRangeError(
+                f"packed_range not contiguous: {a!r} is not a parent of {b!r}"
+            )
+    return list(packed_range)
+
+
+def _gather_chat_pack_range_messages(
+    chatflow: ChatFlow, packed_range: list[str]
+) -> list[tuple[str, WireMessage]]:
+    """Collect user+assistant wire messages from the packed ChatNode
+    range, each tagged with its ChatNode id.
+
+    Nested pack / compact members substitute their summary to save
+    tokens and stay consistent with how downstream readers see them —
+    pack prompts shouldn't double-summarize an already-summarized block.
+    Non-frozen members are skipped; a running ChatNode doesn't belong
+    in pack input.
+    """
+    tagged: list[tuple[str, WireMessage]] = []
+    for nid in packed_range:
+        node = chatflow.nodes.get(nid)
+        if node is None or not node.is_frozen:
+            continue
+        # Nested pack: fold to its summary, don't re-expand.
+        if node.pack_snapshot is not None and node.pack_snapshot.summary:
+            tagged.append(
+                (
+                    nid,
+                    WireMessage(
+                        role="user",
+                        content=(
+                            "[Prior pack — summarized]\n\n"
+                            f"{node.pack_snapshot.summary}"
+                        ),
+                    ),
+                )
+            )
+            continue
+        # Nested compact: same — use the summary.
+        if node.compact_snapshot is not None and node.compact_snapshot.summary:
+            tagged.append(
+                (
+                    nid,
+                    WireMessage(
+                        role="user",
+                        content=(
+                            "[Prior compact — summarized]\n\n"
+                            f"{node.compact_snapshot.summary}"
+                        ),
+                    ),
+                )
+            )
+            continue
+        if node.user_message is not None:
+            tagged.append(
+                (nid, WireMessage(role="user", content=node.user_message.text))
+            )
+        tagged.append(
+            (nid, WireMessage(role="assistant", content=node.agent_response.text))
+        )
+    return tagged
+
+
 def _build_tagged_chat_context_for_compact(
     chatflow: ChatFlow, parent_id: str
 ) -> list[tuple[str | None, WireMessage]]:
@@ -5866,6 +6267,24 @@ def _build_tagged_chat_context_for_compact(
         if not node.is_frozen:
             continue
         if node.compact_snapshot is not None:
+            continue
+        # Pack nodes on the chain: emit the summary (as a user-role
+        # preamble) instead of the pack's own user/assistant pair.
+        # The compact worker sees "this range was packed — here's the
+        # summary" and summarizes on top of that, which is what we want.
+        if node.pack_snapshot is not None and node.pack_snapshot.summary:
+            tagged.append(
+                (
+                    nid,
+                    WireMessage(
+                        role="user",
+                        content=(
+                            "[Prior packed range — summarized]\n\n"
+                            f"{node.pack_snapshot.summary}"
+                        ),
+                    ),
+                )
+            )
             continue
         if node.user_message is not None:
             tagged.append(
