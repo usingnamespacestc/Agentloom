@@ -40,6 +40,19 @@ params_schema:
     description: >
       第 1 轮：空。第 N>1 轮：planner_judge 的批评 JSON，
       指明本轮需要处理的问题。
+  capabilities:
+    type: string
+    required: false
+    description: >
+      judge_pre 预先圈定的工具/技能切片（逗号分隔的自然语言标签），
+      供规划器在拆解时优先参考；可能为空。
+  available_tools:
+    type: string
+    required: true
+    description: >
+      运行时 ChatFlow 注册表中实际可用的工具名（逗号分隔）。
+      tool_call 的 tool_name 必须严格从中选取。若注册表为空，
+      引擎会传入字面量 "(empty)"，此时一律使用 draft。
 plan:
   description:
     text: "planner — atomic / decompose 决策"
@@ -71,10 +84,16 @@ plan:
             - "atomic"：任务可由单次 LLM 调用或单次工具调用完成。
               输出 worker 的工作说明。
 
-            - "decompose"：任务必须拆分。为每个子任务输出一条记录。
-              子任务可以并行（不设 `after`）或串行（`after` 列出
-              必须先完成的子任务的 0-based 索引）。允许通过 `after`
-              图结构自由组合并串行与并行。
+            - "decompose"：任务必须拆分。为每个子任务写一段自然语言
+              的任务描述（`description`）——像在给一位同事派活：把子
+              任务的目标、范围、必要的上下文讲清楚，别人读完就知道
+              要做什么。**不要**在子任务里自己拆出 trio（inputs /
+              expected_outcome）——每个子 WorkFlow 内部会跑自己的
+              judge_pre，从你写的描述里提炼 trio。这是固定分工：你
+              负责"讲清楚任务"，子 WorkFlow 的 judge_pre 负责"拆出
+              trio"。子任务可以并行（不设 `after`）或串行（`after`
+              列出必须先完成的子任务的 0-based 索引）。允许通过
+              `after` 图结构自由组合并串行与并行。
 
             硬性规则：
             - 叶子节点必须是 worker。若规划器找不到可行的分解方式，
@@ -85,24 +104,27 @@ plan:
               中抽出干净的任务。请输出 `mode: "infeasible"` 并在
               `reason` 中说明任务过于模糊无法规划，以便系统重新
               询问用户。
-            - 每个子任务必须声明自己的 trio——子节点只能看到你交给
-              它们的内容，看不到你的推理，也看不到兄弟节点的输出。
-              逐个子任务决定 `inputs` 应当包含什么：只放该子节点
-              需要完成工作的内容即可。当子节点必须字面操作原材料
-              时（待编辑的文本、待审阅的代码块），请逐字复制；其他
-              场景下做摘要或省略。若下游子任务之后反馈信息缺失，
-              出口 judge 会把信息缺口反馈给用户——你不必"以防万一"
-              地全量前置。
+            - 子节点只能看到你写给它的 `description`，看不到你的推理，
+              也看不到兄弟节点的输出。所以当子节点必须字面操作原材料
+              时（待编辑的文本、待审阅的代码块、必须引用的原话），
+              请把这些材料**直接写进 description 里**（逐字复制），
+              不要只说"请处理用户刚才给的那段代码"——子 WorkFlow 没有
+              用户的原话可读。若下游子任务之后反馈信息缺失，出口
+              judge 会把信息缺口反馈给用户——你不必"以防万一"地全量
+              前置。
             - atomic worker 的说明中需要选择 `step_kind`：
                 * "draft"：自然语言 / 推理任务。
                 * "tool_call"：单次工具调用。需提供 `tool_name` 和
-                  `tool_args`。`tool_name` 必须是运行时工具注册表中
-                  实际存在的工具名。不要编造名字，也不要借用引擎
-                  内部的标识符（``judge_verdict``、``post_verdict``、
+                  `tool_args`。**`tool_name` 必须严格来自下方 user
+                  消息里列出的 "Available tools"。** 如果该列表显示
+                  "(empty)"，一律使用 "draft"——没有任何工具可供
+                  调用。不要编造
+                  工具名，也不要借用引擎内部的标识符
+                  （``judge_verdict``、``post_verdict``、
                   ``feasibility``、``planner`` 等——它们是 JSON key，
-                  不是工具）。如果不确定某个工具是否存在，请把
-                  `tool_name` 留为 null 交给运行时的 worker 自行选择，
-                  或改用 `step_kind: "draft"` 由 worker 决策。
+                  不是工具）。判断不准就直接选 "draft"，让 worker
+                  在自然语言层面完成——不要把一个不存在的工具名写
+                  进计划里。
             - **压缩上下文优先取全文。** 若 `inputs` 里出现了来自
               压缩摘要的节点 id 引用（例如 ``(节点: <id>)`` 标记、
               或 judge_pre 明确写出的"可用 get_node_context 读取
@@ -143,8 +165,7 @@ plan:
                  "tool_args": object | null
               } | null,
               "subtasks": [
-                {"description": str, "inputs": str,
-                 "expected_outcome": str, "after": [int]}
+                {"description": str, "after": [int]}
               ] | null,
               "reason": str | null
             }
@@ -163,7 +184,8 @@ plan:
             {% endif %}{% if inputs %}Inputs: {{ inputs }}
             {% endif %}{% if expected_outcome %}Expected outcome: {{ expected_outcome }}
             {% endif %}{% if capabilities %}Capabilities（judge_pre 预先圈定的工具/技能切片；拆解时优先使用这些）：{{ capabilities }}
-            {% endif %}
+            {% endif %}Available tools（运行时注册表中当前可用的工具名，tool_call 的 tool_name 必须严格从该列表中选取；若显示 "(empty)" 则一律使用 step_kind: "draft"）：{{ available_tools }}
+
             来自前一个兄弟的 handoff
             -----------------------
             {{ handoff_notes }}

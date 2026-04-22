@@ -4,10 +4,15 @@ The planner template (``templates/fixtures/planner.yaml``) prompts the
 LLM to emit one of three shapes:
 
 - ``atomic``:     a single worker brief — the level can be done in one
-                  llm_call or one tool_call.
-- ``decompose``:  N sub-tasks, each carrying its own trio. The
-                  orchestrator spawns one ``sub_agent_delegation`` per
-                  sub-task.
+                  llm_call or one tool_call. Carries its own trio because
+                  the worker template consumes it verbatim, without a
+                  sub-WorkFlow in between.
+- ``decompose``:  N sub-tasks, each a natural-language description of
+                  what that sub-agent should do. The orchestrator spawns
+                  one ``sub_agent_delegation`` per sub-task; each sub-
+                  WorkFlow's own ``judge_pre`` reads the description and
+                  distills the trio. Planner does NOT write trio for
+                  sub-tasks — that's judge_pre's job.
 - ``infeasible``: the planner can find no viable decomposition; the
                   orchestrator routes this to ``judge_post`` as a halt.
 
@@ -49,7 +54,11 @@ class AtomicBrief(BaseModel):
 
 
 class SubTask(BaseModel):
-    """One sub-WorkFlow trio in a ``decompose`` plan.
+    """One sub-WorkFlow task in a ``decompose`` plan.
+
+    Just the natural-language description plus the ``after`` dependency
+    graph. Trio extraction is the downstream sub-WorkFlow's judge_pre's
+    job — see ``_build_sub_workflow_for_subtask``.
 
     ``after`` is the list of 0-indexed positions of sub-tasks that must
     complete before this one runs; an empty list means the sub-task can
@@ -57,8 +66,6 @@ class SubTask(BaseModel):
     """
 
     description: str
-    inputs: str = ""
-    expected_outcome: str
     after: list[int] = Field(default_factory=list)
 
 

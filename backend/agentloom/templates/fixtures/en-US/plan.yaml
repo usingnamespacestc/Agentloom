@@ -42,6 +42,21 @@ params_schema:
     description: >
       Round 1: empty. Round N>1: the planner_judge's critique JSON so
       the planner knows what to address.
+  capabilities:
+    type: string
+    required: false
+    description: >
+      judge_pre's pre-scope of tools / skills (comma-separated natural
+      language labels) the planner should prefer when decomposing.
+      May be empty.
+  available_tools:
+    type: string
+    required: true
+    description: >
+      Comma-joined names of tools actually present in the runtime
+      registry. tool_call's tool_name MUST come strictly from this
+      list. When the registry is empty, the engine passes the literal
+      "(empty)" — in that case always use draft.
 plan:
   description:
     text: "planner — atomic-or-decompose decision"
@@ -74,10 +89,19 @@ plan:
             - "atomic": the task can be completed by a single LLM call
               or a single tool invocation. Emit the worker's brief.
 
-            - "decompose": the task must be split. Emit one entry per
-              sub-task. Sub-tasks may run in parallel (no `after`) or
-              serially (`after` lists 0-indexed positions of sub-tasks
-              that must complete first). Free-mix is allowed via the
+            - "decompose": the task must be split. For each sub-task,
+              write a natural-language task description (`description`)
+              — like handing work to a colleague: state the sub-task's
+              goal, scope, and any context they need so that reading it
+              alone is enough to know what to do. **Do NOT** split out
+              a trio (inputs / expected_outcome) for the sub-task
+              yourself — each sub-WorkFlow runs its own judge_pre that
+              distills the trio from the description you write. Fixed
+              division of labour: you "explain the task clearly";
+              the sub-WorkFlow's judge_pre "extracts the trio".
+              Sub-tasks may run in parallel (no `after`) or serially
+              (`after` lists 0-indexed positions of sub-tasks that
+              must complete first). Free-mix is allowed via the
               `after` graph.
 
             Hard rules:
@@ -89,29 +113,32 @@ plan:
               extract a clean task from the conversation. Emit
               `mode: "infeasible"` with a `reason` explaining that
               the task is too vague to plan, so the user is re-asked.
-            - Each sub-task must declare its own trio — children only
-              see what you hand them, not your reasoning and not
-              sibling output. Decide per sub-task what goes in its
-              `inputs`: just what that child needs to do its job.
-              Copy raw material verbatim when the child must operate
-              on it literally (text to edit, a code block to review);
-              summarise or omit otherwise. If a downstream child
-              later reports missing information, the exit judge will
-              surface that back to the user — you don't need to
-              front-load everything "just in case".
+            - A child only sees the `description` you write — not
+              your reasoning and not sibling output. So when a child
+              must operate on raw material literally (text to edit,
+              a code block to review, an exact quote to cite), embed
+              that material **directly in the description** (verbatim
+              copy). Don't just say "please process the code the user
+              just provided" — the sub-WorkFlow has no user transcript
+              to read. If a downstream child later reports missing
+              information, the exit judge will surface that back to
+              the user — you don't need to front-load everything
+              "just in case".
             - For atomic worker briefs, choose `step_kind`:
                 * "draft": natural language / reasoning task.
                 * "tool_call": single tool invocation. Provide
-                  `tool_name` and `tool_args`.
-                  `tool_name` MUST reference a tool that actually
-                  exists in the runtime's tool registry. Do NOT invent
-                  names and do NOT borrow identifiers from this engine's
-                  internals (``judge_verdict``, ``post_verdict``,
-                  ``feasibility``, ``planner``, etc. — those are JSON
-                  keys, not tools). If you're unsure whether a
-                  specific tool exists, leave `tool_name` null and let
-                  the worker pick at run time, or pick `step_kind:
-                  "draft"` so the worker can decide.
+                  `tool_name` and `tool_args`. **`tool_name` MUST come
+                  strictly from the "Available tools" list in the user
+                  message below.** If that list shows "(empty)",
+                  always use "draft" — no tools are callable at
+                  runtime. Do NOT
+                  invent names and do NOT borrow identifiers from this
+                  engine's internals (``judge_verdict``,
+                  ``post_verdict``, ``feasibility``, ``planner``, etc.
+                  — those are JSON keys, not tools). When uncertain,
+                  pick "draft" and let the worker handle it in natural
+                  language — never write a non-existent tool name into
+                  the plan.
             - **Fetch full content before answering compacted
               questions.** When `inputs` references node ids from a
               compact summary (e.g. ``(节点: <id>)`` / ``(nodes:
@@ -158,8 +185,7 @@ plan:
                  "tool_args": object | null
               } | null,
               "subtasks": [
-                {"description": str, "inputs": str,
-                 "expected_outcome": str, "after": [int]}
+                {"description": str, "after": [int]}
               ] | null,
               "reason": str | null
             }
@@ -180,7 +206,8 @@ plan:
             {% endif %}{% if inputs %}Inputs: {{ inputs }}
             {% endif %}{% if expected_outcome %}Expected outcome: {{ expected_outcome }}
             {% endif %}{% if capabilities %}Capabilities (judge_pre pre-scope; prefer these tools/skills when decomposing): {{ capabilities }}
-            {% endif %}
+            {% endif %}Available tools (runtime registry; tool_call's tool_name MUST come strictly from this list; if it shows "(empty)", always use step_kind: "draft"): {{ available_tools }}
+
             Handoff from preceding sibling
             ------------------------------
             {{ handoff_notes }}

@@ -32,6 +32,17 @@ params_schema:
     type: string
     required: true
     description: "Hard cap on debate rounds for this WorkFlow."
+  capabilities:
+    type: string
+    required: false
+    description: "judge_pre's pre-scope of tools / skills; may be empty."
+  available_tools:
+    type: string
+    required: true
+    description: >
+      Names of tools actually present in the runtime registry. The
+      plan's tool_call tool_name MUST come from this list; if it is
+      "(empty)", the plan should not contain a tool_call.
 plan:
   description:
     text: "planner_judge — review the plan"
@@ -70,6 +81,15 @@ plan:
               `after` graph is acyclic; that no sub-task is a no-op.
             - For "atomic" plans: check that the worker's brief has
               concrete inputs and a measurable expected_outcome.
+            - Tool whitelist: when an atomic plan picks `step_kind:
+              "tool_call"`, its `tool_name` MUST appear in the
+              "Available tools" list in the user message below. If the
+              list shows "(empty)" but the plan still asks for a
+              `tool_call`, or `tool_name` is not on the list, flag it
+              as a blocker
+              and require switching to `step_kind: "draft"` or picking
+              a tool from the whitelist — never accept a fabricated
+              tool name.
             - Convergence pressure: this is round {{ round }} of at
               most {{ round_budget }}. Late rounds should accept any
               plan that is not actively wrong; nits are not blockers.
@@ -87,7 +107,8 @@ plan:
             {% endif %}{% if inputs %}Inputs: {{ inputs }}
             {% endif %}{% if expected_outcome %}Expected outcome: {{ expected_outcome }}
             {% endif %}{% if capabilities %}Capabilities (judge_pre pre-scope): {{ capabilities }}
-            {% endif %}
+            {% endif %}Available tools (runtime registry; the plan's tool_call tool_name MUST come strictly from this list; if it shows "(empty)", the plan must not contain a tool_call): {{ available_tools }}
+
 
             Plan to review (round {{ round }} / {{ round_budget }})
             -------------------------------------------------------

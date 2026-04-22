@@ -30,6 +30,16 @@ params_schema:
     type: string
     required: true
     description: "本 WorkFlow 的辩论轮次硬上限。"
+  capabilities:
+    type: string
+    required: false
+    description: "judge_pre 预先圈定的工具/技能切片；可能为空。"
+  available_tools:
+    type: string
+    required: true
+    description: >
+      运行时注册表实际可用的工具名。plan 中 tool_call 的 tool_name
+      必须从中选取；若为 "(empty)"，plan 不应出现 tool_call。
 plan:
   description:
     text: "planner_judge —— 评审 plan"
@@ -65,6 +75,12 @@ plan:
               的数据；`after` 图是否无环；是否存在 no-op 子任务。
             - 对于 "atomic" plan：检查 worker brief 是否具备具体的
               inputs 和可度量的 expected_outcome。
+            - 工具白名单：若 atomic plan 选的是 `step_kind:
+              "tool_call"`，其 `tool_name` 必须严格落在下方 user
+              消息列出的 "Available tools" 之内。若 Available tools
+              显示 "(empty)" 但 plan 仍给出 `tool_call`，或 `tool_name` 不在
+              白名单中，列为 blocker 并要求改为 `step_kind: "draft"`
+              或改用白名单内的工具——不要放行捏造的工具名。
             - 收敛压力：本轮是第 {{ round }} 轮，最多 {{ round_budget }}
               轮。到了后期，只要 plan 不是"明显错的"就该接受；nit 不
               算阻塞。
@@ -82,7 +98,8 @@ plan:
             {% endif %}{% if inputs %}Inputs: {{ inputs }}
             {% endif %}{% if expected_outcome %}Expected outcome: {{ expected_outcome }}
             {% endif %}{% if capabilities %}Capabilities（judge_pre 预先圈定的切片）：{{ capabilities }}
-            {% endif %}
+            {% endif %}Available tools（运行时注册表；plan 中 tool_call 的 tool_name 必须严格从该列表中选取；若显示 "(empty)" 则 plan 中不应出现 tool_call）：{{ available_tools }}
+
 
             待评审 plan（第 {{ round }} / {{ round_budget }} 轮）
             --------------------------------------------------
