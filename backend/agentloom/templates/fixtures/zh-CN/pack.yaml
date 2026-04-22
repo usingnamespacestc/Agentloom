@@ -76,6 +76,7 @@ plan:
                例如：
                  如需完整内容，可调用 get_node_context(node_id=<id>)
                  查看 pack 内任意 ChatNode。
+               **这行和正文之间必须留一行空行**。
 
             2. 当 ``use_detailed_index`` 为 true 时，其后每一段对应
                **一个被打包 ChatNode id**。同一 id 下的用户提问 + 助
@@ -84,6 +85,9 @@ plan:
                段**。段末尾用半角括号写**一次**节点 id，形如
                ``(节点: n_abc)``；极少数情况下一段需要跨多个 id 才
                能讲清楚，才可以列多个，如 ``(节点: n_abc, n_def)``。
+
+               **段与段之间必须用一行空行分隔**（两个换行符），让
+               markdown 渲染时段落不会挤在一起。
 
                当 ``use_detailed_index`` 为 false 时，生成**单段**整
                体摘要，段末**一次性**列出全部被打包 id，形如

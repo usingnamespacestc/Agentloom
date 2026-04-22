@@ -85,6 +85,7 @@ plan:
                to fetch full content on demand, e.g.:
                  For full content, call get_node_context(node_id=<id>)
                  to inspect any ChatNode in this pack.
+               **Leave a blank line between this pointer and the body**.
 
             2. When ``use_detailed_index`` is true, every following
                paragraph corresponds to **one packed ChatNode id**.
@@ -96,6 +97,10 @@ plan:
                ``(nodes: n_abc)``. Only when a paragraph genuinely
                spans multiple ids should you list several, e.g.
                ``(nodes: n_abc, n_def)``.
+
+               **Separate paragraphs with a blank line** (two newlines)
+               so markdown renders them as distinct blocks instead of
+               running them together.
 
                When ``use_detailed_index`` is false, produce a SINGLE
                paragraph that summarizes the range holistically and

@@ -345,6 +345,45 @@ def _make_board_writer(
 _CHAT_BRIEF_USER_SNIPPET = 120
 _CHAT_BRIEF_AGENT_SNIPPET = 200
 
+#: Matches the closing ``(节点: …)`` / ``(nodes: …)`` / ``(已打包:
+#: …)`` / ``(packed: …)`` tail that the pack fixture asks every
+#: per-node paragraph (detailed-index mode) or the monolithic closing
+#: line (use_detailed_index=false) to end with. Used to insert blank
+#: lines between paragraphs so markdown renders them as separate
+#: paragraphs instead of one run-on line. Non-greedy ``[^)]*`` so it
+#: doesn't span across paragraphs when content contains parens.
+_PACK_PARA_TAIL_RE = re.compile(
+    r"(\([^)]*(?:节点|nodes|已打包|packed)[^)]*\))(?!\s*\n\s*\n)(?=\s*\S)",
+    re.IGNORECASE,
+)
+
+
+def _normalize_pack_summary(text: str) -> str:
+    """Normalize pack-summary whitespace for readable markdown rendering.
+
+    LLMs (Ark included) reliably put a single ``\\n`` between pack
+    paragraphs; markdown collapses single newlines into spaces so the
+    UI would show the whole pack as one run-on paragraph. Force
+    double-newlines:
+
+    - Between the leading pointer line (``"...get_node_context..."``)
+      and the first paragraph.
+    - After every per-node citation closing-paren — ``(节点: id)`` or
+      ``(nodes: id)`` or the monolithic ``(已打包: …)`` / ``(packed: …)``
+      tail — when the next non-blank character is on a following line.
+
+    No-op when the paragraphs are already separated by a blank line.
+    Idempotent — running twice yields the same text.
+    """
+    lines = text.split("\n")
+    # First blank line between pointer and body.
+    if len(lines) >= 2 and lines[0].strip() and lines[1].strip():
+        lines.insert(1, "")
+    joined = "\n".join(lines)
+    # Then the per-paragraph separators.
+    return _PACK_PARA_TAIL_RE.sub(r"\1\n", joined)
+
+
 #: Synthetic user turn injected before the greeting root's assistant
 #: response so the wire never starts with role="assistant". Many
 #: chat_templates (Qwen / Llama / Mistral on llama.cpp, strict
@@ -1284,6 +1323,10 @@ class ChatFlowEngine:
                         cap_tokens,
                     )
                     summary = _truncate_text_to_tokens(summary, cap_tokens)
+                # Insert blank lines between the pointer / per-node
+                # paragraphs so markdown renders them as separate
+                # blocks instead of one run-on line.
+                summary = _normalize_pack_summary(summary)
                 assert pack_node.pack_snapshot is not None
                 pack_node.pack_snapshot = pack_node.pack_snapshot.model_copy(
                     update={"summary": summary}
