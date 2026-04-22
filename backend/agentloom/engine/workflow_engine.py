@@ -535,6 +535,8 @@ def _render_source_output_for_brief(source: WorkFlowNode) -> str:
         return f"{tr.content or ''}{err}".strip() or "(empty tool result)"
     if source.step_kind == StepKind.COMPRESS and source.compact_snapshot is not None:
         return source.compact_snapshot.summary or "(empty compact snapshot)"
+    if source.step_kind == StepKind.PACK and source.pack_snapshot is not None:
+        return source.pack_snapshot.summary or "(empty pack snapshot)"
     if source.step_kind == StepKind.JUDGE_CALL and source.judge_verdict is not None:
         # The raw verdict is structured JSON; the textual ``output_message``
         # already contains what the model wrote, but the structured
@@ -986,6 +988,7 @@ class WorkflowEngine:
                     self._board_writer is not None
                     and node.step_kind != StepKind.BRIEF
                     and node.step_kind != StepKind.COMPRESS
+                    and node.step_kind != StepKind.PACK
                 ):
                     self._spawn_node_brief(workflow, node)
             elif node.status == NodeStatus.FAILED:
@@ -1081,6 +1084,7 @@ class WorkflowEngine:
         # long preserved tails.
         if (
             node.step_kind != StepKind.COMPRESS
+            and node.step_kind != StepKind.PACK
             and node.input_messages is None
             and not _parent_is_fresh_compact(workflow, node)
             and self._needs_compact(messages, ref)
@@ -2235,14 +2239,26 @@ def _build_tagged_context_from_ancestors(
     """
     ancestors = workflow.ancestors(node.id)
 
+    # Both COMPRESS and PACK nodes act as cutoffs in the walk: downstream
+    # readers see the snapshot summary in place of everything up to and
+    # including the cutoff. COMPRESS covers the implicit root→cutoff
+    # prefix; PACK covers the explicit ``packed_range``. We pick the
+    # most recent cutoff found — if the chain has both a compact and a
+    # downstream pack, the pack wins because it's closer to ``node``.
     compact_cutoff_idx: int | None = None
     for i, aid in enumerate(ancestors):
         a = workflow.get(aid)
-        if (
+        is_compact_cut = (
             a.step_kind == StepKind.COMPRESS
             and a.compact_snapshot is not None
             and a.compact_snapshot.summary
-        ):
+        )
+        is_pack_cut = (
+            a.step_kind == StepKind.PACK
+            and a.pack_snapshot is not None
+            and a.pack_snapshot.summary
+        )
+        if is_compact_cut or is_pack_cut:
             compact_cutoff_idx = i
 
     tagged: list[tuple[str | None, Message]] = []
@@ -2250,20 +2266,32 @@ def _build_tagged_context_from_ancestors(
 
     if compact_cutoff_idx is not None:
         cutoff_node = workflow.get(ancestors[compact_cutoff_idx])
-        snap = cutoff_node.compact_snapshot
-        assert snap is not None
+        if cutoff_node.step_kind == StepKind.PACK:
+            pack_snap = cutoff_node.pack_snapshot
+            assert pack_snap is not None
+            summary = pack_snap.summary
+            preserved = pack_snap.preserved_messages
+        else:
+            comp_snap = cutoff_node.compact_snapshot
+            assert comp_snap is not None
+            summary = comp_snap.summary
+            preserved = comp_snap.preserved_messages
+        # Preamble text is intentionally unified — judge_pre fixture
+        # and downstream tests grep for "summarized to save context"
+        # regardless of whether the cutoff is compact or pack, since
+        # both serve the same role from the reader's perspective.
         tagged.append(
             (
                 cutoff_node.id,
                 UserMessage(
                     content=(
                         "[Prior conversation — summarized to save context]\n\n"
-                        f"{snap.summary}"
+                        f"{summary}"
                     )
                 ),
             )
         )
-        for m in _wire_to_provider(snap.preserved_messages):
+        for m in _wire_to_provider(preserved):
             tagged.append((None, m))
         start_idx = compact_cutoff_idx + 1
     else:
