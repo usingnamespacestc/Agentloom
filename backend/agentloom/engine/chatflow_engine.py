@@ -3717,6 +3717,93 @@ class ChatFlowEngine:
                 continue
             self._inject_upstream_outputs(sub, delegation_parents)
 
+    def _recover_dangling_decompose(
+        self,
+        workflow: WorkFlow,
+        *,
+        user_message_text: str,
+    ) -> bool:
+        """Scan *workflow* for decompose groups whose members all succeeded
+        but whose aggregating judge_post is missing, and spawn it.
+
+        Returns ``True`` if at least one aggregator was spawned; the
+        caller should re-run :meth:`WorkflowEngine.execute` so the new
+        node actually runs. Returns ``False`` when every decompose group
+        already has its aggregator (normal happy path) or when there are
+        no decompose groups at all (native_react turns).
+
+        Why this exists: the post_node_hook that normally spawns the
+        aggregator is wrapped in a blanket ``try/except`` in
+        ``WorkflowEngine._run_node``. Any exception raised inside
+        ``_after_delegation`` is logged but otherwise swallowed, and the
+        WorkFlow settles with no judge_post — the ChatFlow layer then
+        reports "inner workflow had no terminal llm_call". This recovery
+        runs once after execute() returns and catches that race.
+        """
+        if not any(
+            n.step_kind == StepKind.DELEGATE
+            for n in workflow.nodes.values()
+        ):
+            return False
+
+        # Find every plan_judge that owns a decompose group.
+        plan_judges: list[WorkFlowNode] = [
+            n
+            for n in workflow.nodes.values()
+            if n.step_kind == StepKind.JUDGE_CALL
+            and n.role == WorkNodeRole.PLAN_JUDGE
+        ]
+        spawned_any = False
+        for owner in plan_judges:
+            members = _decompose_group_members(workflow, owner.id)
+            if not members:
+                continue
+            if not all(m.status == NodeStatus.SUCCEEDED for m in members):
+                continue
+            if _decompose_group_already_aggregated(workflow, owner.id):
+                continue
+
+            log.warning(
+                "dangling decompose group recovered: workflow=%s owner=%s "
+                "members=%d — spawning aggregator retroactively",
+                workflow.id,
+                owner.id,
+                len(members),
+            )
+            upstream_summary = _format_decompose_aggregation(workflow, members)
+            worknode_catalog = "\n".join(
+                f"{m.id}: sub_agent_delegation for "
+                f"{(m.description.text if m.description else '').strip() or '(no description)'}"
+                for m in members
+            )
+            # Use the last-finishing member as parent_node for wiring
+            # parity with the normal _after_delegation path; the
+            # aggregator's parent_ids get overwritten to all members.
+            last = max(
+                members,
+                key=lambda m: m.finished_at or m.updated_at or m.created_at,
+            )
+            try:
+                aggregator = self._spawn_judge_post(
+                    workflow,
+                    user_message_text=user_message_text,
+                    context_wire=[],
+                    parent_node=last,
+                    upstream_kind="decompose_aggregation",
+                    upstream_summary=upstream_summary,
+                    worknode_catalog=worknode_catalog,
+                )
+                aggregator.parent_ids = [m.id for m in members]
+                spawned_any = True
+            except Exception:  # noqa: BLE001 — defensive
+                log.exception(
+                    "dangling decompose recovery failed to spawn aggregator: "
+                    "workflow=%s owner=%s",
+                    workflow.id,
+                    owner.id,
+                )
+        return spawned_any
+
     def _inject_upstream_outputs(
         self, sub: WorkFlow, parents: list[WorkFlowNode]
     ) -> None:
@@ -4175,6 +4262,36 @@ class ChatFlowEngine:
                 await relay_task
             except Exception:
                 pass
+
+        # Dangling-decompose recovery (bug #1 from 2026-04-22 integration
+        # test): post_node_hook.`_after_delegation` normally spawns the
+        # aggregating judge_post when the last delegate of a decompose
+        # group succeeds, but the hook's blanket try/except silently
+        # swallows any exception it raises — leaving the WorkFlow ended
+        # with "no terminal llm_call" and no user-facing output. Detect
+        # that shape here and spawn the aggregator retroactively so the
+        # turn still produces a judge_post reply instead of failing with
+        # an opaque internal error.
+        if runtime_error is None and not is_compact_node:
+            if self._recover_dangling_decompose(
+                chat_node.workflow,
+                user_message_text=chat_node.user_message.text if chat_node.user_message else "",
+            ):
+                # A new judge_post was spawned; rerun execute so it runs.
+                # The WorkflowEngine._post_node_hook is still set to fire
+                # when it succeeds (for accept/retry/fail handling).
+                try:
+                    await self._inner.execute(
+                        chat_node.workflow,
+                        chatflow_id=chatflow.id,
+                        disabled_tool_names=effective_disabled,
+                    )
+                except Exception as exc:  # noqa: BLE001 — engine boundary
+                    log.exception(
+                        "recovery aggregator execute raised for chat node %s",
+                        node_id,
+                    )
+                    runtime_error = f"{type(exc).__name__}: {exc}"
 
         async with runtime.lock:
             chat_node = chatflow.get(node_id)
