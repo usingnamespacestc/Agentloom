@@ -1523,6 +1523,15 @@ class ChatFlowEngine:
                 compact_node.status = NodeStatus.SUCCEEDED
                 compact_node.finished_at = utcnow()
 
+        # ChatBoard hook: a successful compact ChatNode gets its own
+        # scope='chat' ChatBoardItem (source_kind='chat_compact') so any
+        # later compact/pack/merge that walks the chain sees a brief
+        # for this ancestor. Without this, PR A's brief-sync gate rejects
+        # descendant compact calls with "missing scope='chat' ChatBoardItem
+        # for ancestor(s) …" (regression found 2026-04-22 integration test).
+        if compact_node.status == NodeStatus.SUCCEEDED:
+            await self._spawn_chat_board_item(chatflow, compact_node)
+
         await self._bus.publish(
             WorkflowEvent(
                 workflow_id=chatflow_id,
