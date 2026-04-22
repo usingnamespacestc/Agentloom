@@ -55,7 +55,6 @@ from agentloom.schemas.common import (
     EditableText,
     EditProvenance,
     JudgeVariant,
-    NodeId,
     NodeScope,
     NodeStatus,
     ProviderModelRef,
@@ -65,7 +64,7 @@ from agentloom.schemas.common import (
     utcnow,
 )
 from agentloom.schemas.common import ToolUse as SchemaToolUse
-from agentloom.schemas.workflow import CompactSnapshot, PackSnapshot, WireMessage
+from agentloom.schemas.workflow import CompactSnapshot, WireMessage
 from agentloom.tools.base import ToolContext, ToolRegistry
 
 #: Provider call surface — the engine never instantiates an adapter
@@ -326,160 +325,6 @@ def _compact_description_text() -> EditableText:
         text="Compact (auto-inserted)",
         provenance=EditProvenance.PURE_AGENT,
     )
-
-
-_PACK_FIXTURE_CACHE: dict[str, tuple[dict[str, Any], dict[str, str]]] = {}
-
-
-def _get_pack_fixture() -> tuple[dict[str, Any], dict[str, str]]:
-    """Return ``(plan_dict, include_fragments)`` for ``pack.yaml`` in
-    the workspace's currently-configured language. Mirrors
-    :func:`_get_compact_fixture` — loaded once per language and cached.
-    Fails loudly if the fixture is missing; pack has no fallback prompt.
-    """
-    from agentloom import tenancy_runtime
-    from agentloom.db.models.tenancy import DEFAULT_WORKSPACE_ID
-    from agentloom.templates.loader import (
-        DEFAULT_LANGUAGE,
-        fragments_as_texts,
-        load_fixtures,
-    )
-
-    lang = tenancy_runtime.get_settings(DEFAULT_WORKSPACE_ID).language
-    cached = _PACK_FIXTURE_CACHE.get(lang)
-    if cached is not None:
-        return cached
-    templates, fragments = load_fixtures(language=lang)
-    pack = next((f for f in templates if f.builtin_id == "pack"), None)
-    if pack is None and lang != DEFAULT_LANGUAGE:
-        templates, fragments = load_fixtures(language=DEFAULT_LANGUAGE)
-        pack = next((f for f in templates if f.builtin_id == "pack"), None)
-    if pack is None:
-        raise RuntimeError(
-            "pack.yaml fixture missing — required for user-initiated pack runs"
-        )
-    _PACK_FIXTURE_CACHE[lang] = (pack.plan, fragments_as_texts(fragments))
-    return _PACK_FIXTURE_CACHE[lang]
-
-
-def _pack_description_text() -> EditableText:
-    """Placeholder description for user-initiated pack nodes."""
-    return EditableText(
-        text="Pack (user-initiated)",
-        provenance=EditProvenance.PURE_AGENT,
-    )
-
-
-class PackRangeError(ValueError):
-    """Raised when a user-supplied ``packed_range`` is invalid
-    (empty, unknown id, or not contiguous along the primary-parent
-    chain). Surfaced to the API handler as a 400."""
-
-
-def _validate_and_order_packed_range(
-    workflow: WorkFlow, packed_range: list[NodeId]
-) -> list[NodeId]:
-    """Verify the supplied node ids form a contiguous primary-parent
-    chain and return them in topological order (earliest → latest).
-
-    Rules:
-      - at least one id
-      - every id exists in ``workflow``
-      - for each consecutive pair ``(a, b)``, ``a`` appears in
-        ``b.parent_ids`` (``a`` is a parent of ``b``; doesn't have to be
-        the primary parent so ranges can traverse a merge).
-
-    The caller passes an already-ordered list; we only normalize +
-    validate. We do NOT derive the range from its endpoints because
-    picking *which* path through a DAG to pack is the user's call.
-    """
-    if not packed_range:
-        raise PackRangeError("packed_range is empty")
-    for nid in packed_range:
-        if nid not in workflow.nodes:
-            raise PackRangeError(f"packed_range id {nid!r} not in workflow")
-    for a, b in zip(packed_range, packed_range[1:]):
-        if a not in workflow.nodes[b].parent_ids:
-            raise PackRangeError(
-                f"packed_range not contiguous: {a!r} is not a parent of {b!r}"
-            )
-    return list(packed_range)
-
-
-def _gather_pack_range_messages(
-    workflow: WorkFlow, packed_range: list[NodeId]
-) -> list[tuple[NodeId | None, Message]]:
-    """Collect the provider-messages that belong to the packed range,
-    tagged with their source WorkNode id. The first packed node's
-    ``input_messages`` seed the prompt (so the pack worker sees the
-    system-prompt context the range was running against); subsequent
-    nodes contribute their terminal output (draft output_message,
-    tool_call tool_result, compact/pack summary, judge output). Nested
-    compact/pack inside the range are expanded to their summary so the
-    pack worker sees the already-compressed block rather than its full
-    internals — consistent with how downstream readers see them.
-    """
-    out: list[tuple[NodeId | None, Message]] = []
-    for idx, nid in enumerate(packed_range):
-        n = workflow.nodes.get(nid)
-        if n is None:
-            continue
-        if idx == 0 and n.input_messages:
-            for m in _wire_to_provider(n.input_messages):
-                out.append((nid, m))
-        if n.step_kind == StepKind.DRAFT and n.output_message is not None:
-            for m in _wire_to_provider([n.output_message]):
-                out.append((nid, m))
-        elif (
-            n.step_kind == StepKind.TOOL_CALL
-            and n.tool_result is not None
-            and n.source_tool_use_id is not None
-        ):
-            out.append(
-                (
-                    nid,
-                    ToolMessage(
-                        tool_use_id=n.source_tool_use_id,
-                        content=n.tool_result.content,
-                    ),
-                )
-            )
-        elif (
-            n.step_kind == StepKind.COMPRESS
-            and n.compact_snapshot is not None
-            and n.compact_snapshot.summary
-        ):
-            out.append(
-                (
-                    nid,
-                    UserMessage(
-                        content=(
-                            "[Prior compact — summarized to save context]\n\n"
-                            f"{n.compact_snapshot.summary}"
-                        )
-                    ),
-                )
-            )
-        elif (
-            n.step_kind == StepKind.PACK
-            and n.pack_snapshot is not None
-            and n.pack_snapshot.summary
-        ):
-            out.append(
-                (
-                    nid,
-                    UserMessage(
-                        content=(
-                            "[Prior pack — summarized to save context]\n\n"
-                            f"{n.pack_snapshot.summary}"
-                        )
-                    ),
-                )
-            )
-        elif n.step_kind == StepKind.JUDGE_CALL and n.output_message is not None:
-            for m in _wire_to_provider([n.output_message]):
-                out.append((nid, m))
-    return out
 
 
 # --------------------------------------------------------------- brief (MemoryBoard PR 1)
@@ -1082,8 +927,6 @@ class WorkflowEngine:
                 await self._run_sub_agent_delegation(workflow, node)
             elif node.step_kind == StepKind.COMPRESS:
                 await self._run_compact(workflow, node)
-            elif node.step_kind == StepKind.PACK:
-                await self._run_pack(workflow, node)
             elif node.step_kind == StepKind.BRIEF:
                 await self._run_brief(workflow, node)
             else:  # pragma: no cover — enum exhaustiveness
@@ -1526,145 +1369,6 @@ class WorkflowEngine:
         # PR 4.2.a: the compact's summary IS a MemoryBoard brief — write
         # the board_item directly instead of spawning a secondary BRIEF
         # WorkNode to summarize the summary.
-        await self._persist_board_item(
-            workflow=workflow,
-            source=node,
-            scope=NodeScope.NODE,
-            description=summary,
-            fallback=False,
-        )
-
-    # --------------------------------------------------------------- pack (mid-graph custom)
-
-    def _build_pack_worknode(
-        self,
-        workflow: WorkFlow,
-        packed_range: list[NodeId],
-        *,
-        use_detailed_index: bool = True,
-        preserve_last_n: int = 0,
-        pack_instruction: str = "",
-        must_keep: str = "",
-        must_drop: str = "",
-        target_tokens: int | None = None,
-    ) -> WorkFlowNode:
-        """Create a user-initiated PACK WorkNode hanging off the last
-        id in ``packed_range``. Materialize the range messages into the
-        pack worker's rendered prompt, carve off ``preserve_last_n``
-        verbatim tail if requested, and stamp a pre-populated
-        :class:`PackSnapshot` whose ``summary`` will be filled in by
-        :meth:`_run_pack` on the next engine sweep.
-
-        Unlike ``_insert_compact_worknode`` (Tier 1 auto-insertion in
-        front of an existing node), this helper **does not re-parent**
-        anything. Pack is user-initiated and materialized as a NEW leaf
-        whose parent is the last packed node; pre-existing descendants
-        of packed nodes keep their original edges and therefore their
-        original visibility of the range (view-dependent hiding is a
-        read-time concern handled in ``_build_*_context``).
-        """
-        from agentloom.templates.instantiate import instantiate_fixture
-
-        ordered = _validate_and_order_packed_range(workflow, packed_range)
-        last_id = ordered[-1]
-        last_node = workflow.nodes[last_id]
-
-        tagged = _gather_pack_range_messages(workflow, ordered)
-        keep = max(0, min(len(tagged), preserve_last_n))
-        head_tagged = tagged[:-keep] if keep else tagged
-        tail = [m for _, m in tagged[-keep:]] if keep else []
-        head_serialized = _render_messages_to_compact(head_tagged)
-
-        # Budget defaults mirror compact — leave the caller free to
-        # override (e.g. a CLI-side pack might push more aggressive).
-        ref = last_node.resolved_model or last_node.model_override
-        if target_tokens is None:
-            ctx = self._context_window_for(ref)
-            target_tokens = max(256, int(ctx * self._effective_compact_target_pct))
-
-        pack_plan, includes = _get_pack_fixture()
-        pack_wf = instantiate_fixture(
-            pack_plan,
-            {
-                "messages_to_pack": head_serialized,
-                "packed_node_ids": ", ".join(ordered),
-                "target_tokens": target_tokens,
-                "use_detailed_index": str(bool(use_detailed_index)).lower(),
-                "must_keep": must_keep,
-                "must_drop": must_drop,
-                "pack_instruction": pack_instruction,
-            },
-            includes=includes,
-        )
-        (inner,) = pack_wf.nodes.values()
-        assert inner.input_messages is not None
-        prompt = list(inner.input_messages)
-
-        preserved_wire = _provider_to_wire(tail)
-        snapshot = PackSnapshot(
-            summary="",  # filled by _run_pack after the LLM call
-            packed_range=ordered,
-            use_detailed_index=use_detailed_index,
-            preserve_last_n=keep,
-            preserved_messages=preserved_wire,
-        )
-
-        pack_model = self._effective_compact_model or last_node.model_override or ref
-        pack_node = WorkFlowNode(
-            step_kind=StepKind.PACK,
-            parent_ids=[last_id],
-            description=_pack_description_text(),
-            input_messages=prompt,
-            pack_snapshot=snapshot,
-            model_override=pack_model,
-            resolved_model=pack_model,
-        )
-        workflow.add_node(pack_node)
-        if pack_node.id in workflow.root_ids and pack_node.parent_ids:
-            workflow.root_ids.remove(pack_node.id)
-        log.info(
-            "pack inserted: workflow=%s pack=%s range_size=%d preserved=%d",
-            workflow.id,
-            pack_node.id,
-            len(ordered),
-            len(tail),
-        )
-        return pack_node
-
-    async def _run_pack(self, workflow: WorkFlow, node: WorkFlowNode) -> None:
-        """Run a PACK WorkNode: invoke the provider on the pre-filled
-        prompt and splice the summary into ``pack_snapshot``. Symmetric
-        with :meth:`_run_compact` but does not consult
-        ``compact_preserve_mode`` — pack's preserved tail was already
-        carved at insertion time.
-        """
-        await self._invoke_and_freeze(workflow, node, expose_tools=False)
-        assert node.output_message is not None
-        summary = (node.output_message.content or "").strip()
-        if node.pack_snapshot is None:
-            raise RuntimeError(
-                f"pack node {node.id} missing pre-populated snapshot"
-            )
-        # Hard-cap the summary at target × ctx to protect downstream
-        # context budgets — overshooting pack summaries strand the next
-        # turn the same way overshooting compact ones do.
-        ctx = self._context_window_for(node.resolved_model or node.model_override)
-        target_tokens = max(256, int(ctx * self._effective_compact_target_pct))
-        summary_tokens = _count_text_tokens(summary)
-        if summary_tokens > target_tokens:
-            log.warning(
-                "pack summary exceeds target: node=%s summary_tokens=%d "
-                "target_tokens=%d — truncating",
-                node.id,
-                summary_tokens,
-                target_tokens,
-            )
-            summary = _truncate_text_to_tokens(summary, target_tokens)
-        node.pack_snapshot = node.pack_snapshot.model_copy(
-            update={"summary": summary}
-        )
-        # Pack's summary IS its MemoryBoard brief — same rationale as
-        # compact (don't LLM-brief a summary).
         await self._persist_board_item(
             workflow=workflow,
             source=node,
