@@ -39,14 +39,7 @@
       "tool_call": "工具调用",
       "judge_call": "评审",
       "delegate": "子代理",
-      "brief": "简介",
-      "compress": "压缩",
-      "merge": "合并",
-      "pack": "打包"
-    },
-    "pack": {
-      "packed_count": "打包 {{count}} 个节点",
-      "summary_label": "摘要"
+      "brief": "简介"
     },
     "role": {
       "pre_judge": "前置评判",

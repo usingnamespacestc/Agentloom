@@ -44,7 +44,6 @@ const STEP_KIND_COLOR: Record<StepKind, string> = {
   compress: "bg-teal-100 text-teal-800",
   merge: "bg-rose-100 text-rose-800",
   brief: "bg-sky-100 text-sky-800",
-  pack: "bg-rose-100 text-rose-800",
 };
 
 function collectActiveWorkNodes(
