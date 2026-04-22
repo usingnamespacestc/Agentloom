@@ -243,6 +243,28 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
 
       <div className="flex items-center justify-between mb-1.5">
         <StatusBadge status={node.status} />
+        {/* Execution mode badge — explicit text label next to status.
+          * The outline ring on the card already encodes the mode in
+          * colour (violet=auto_plan, sky=native_react), but a text
+          * badge makes the mode legible without hover tooltip. Skip
+          * on compact / pack / greeting-root / merge ChatNodes —
+          * they don't run a normal turn WorkFlow. */}
+        {!isCompact && !isPack && !isGreetingRoot && !isMerge && (
+          <span
+            title={t(`chatflow_settings.execution_mode_${executionMode}_hint`)}
+            className={[
+              "inline-flex items-center rounded px-1 py-0.5 text-[10px] font-medium leading-none",
+              executionMode === "auto_plan"
+                ? "bg-violet-100 text-violet-800"
+                : executionMode === "native_react"
+                  ? "bg-sky-100 text-sky-800"
+                  : "bg-gray-100 text-gray-700",
+            ].join(" ")}
+            data-testid={`chatflow-node-${node.id}-exec-mode`}
+          >
+            {t(`chatflow_settings.execution_mode_${executionMode}_short`)}
+          </span>
+        )}
         {isCompact && (
           <span
             title={t("chatflow.compact_badge_hint")}
