@@ -345,6 +345,16 @@ def _make_board_writer(
 _CHAT_BRIEF_USER_SNIPPET = 120
 _CHAT_BRIEF_AGENT_SNIPPET = 200
 
+#: Synthetic user turn injected before the greeting root's assistant
+#: response so the wire never starts with role="assistant". Many
+#: chat_templates (Qwen / Llama / Mistral on llama.cpp, strict
+#: OpenAI-compat shims) reject or mis-render a conversation whose
+#: first message is assistant. Greeting roots have ``user_message=None``
+#: by construction; this anchor fills that hole without changing the
+#: visible ChatNode tree — it appears in ``_build_chat_context`` output
+#: only, the UI preview and the persisted ChatFlow are unaffected.
+_GREETING_ANCHOR_USER_CONTENT = "Hello"
+
 
 def _first_line(text: str) -> str:
     """Grab the first non-empty line of *text* (stripped)."""
@@ -5765,6 +5775,15 @@ def _build_chat_context(
             messages.append(
                 WireMessage(role="user", content=node.user_message.text)
             )
+        else:
+            # Greeting root: synthesize a user anchor so the wire
+            # never opens with role="assistant". See
+            # ``_GREETING_ANCHOR_USER_CONTENT`` for rationale.
+            messages.append(
+                WireMessage(
+                    role="user", content=_GREETING_ANCHOR_USER_CONTENT
+                )
+            )
         messages.append(
             WireMessage(role="assistant", content=node.agent_response.text)
         )
@@ -6250,6 +6269,17 @@ def _gather_chat_pack_range_messages(
             tagged.append(
                 (nid, WireMessage(role="user", content=node.user_message.text))
             )
+        else:
+            # Greeting root: synthesize a user anchor so the compact /
+            # pack worker's input never starts with role="assistant".
+            tagged.append(
+                (
+                    nid,
+                    WireMessage(
+                        role="user", content=_GREETING_ANCHOR_USER_CONTENT
+                    ),
+                )
+            )
         tagged.append(
             (nid, WireMessage(role="assistant", content=node.agent_response.text))
         )
@@ -6327,6 +6357,17 @@ def _build_tagged_chat_context_for_compact(
         if node.user_message is not None:
             tagged.append(
                 (nid, WireMessage(role="user", content=node.user_message.text))
+            )
+        else:
+            # Greeting root: synthesize a user anchor so the compact /
+            # pack worker's input never starts with role="assistant".
+            tagged.append(
+                (
+                    nid,
+                    WireMessage(
+                        role="user", content=_GREETING_ANCHOR_USER_CONTENT
+                    ),
+                )
             )
         tagged.append(
             (nid, WireMessage(role="assistant", content=node.agent_response.text))
