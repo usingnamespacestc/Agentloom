@@ -87,10 +87,29 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
   const isDashed = node.status === "planned" || node.status === "running";
   const isAwaitingUser = !!node.workflow.pending_user_prompt;
   const isCompact = node.compact_snapshot != null;
+  const isPack = node.pack_snapshot != null;
   const executionMode = node.workflow.execution_mode;
   const isPendingMergeFirst = useChatFlowStore(
     (s) => s.pendingMergeFirstId === node.id,
   );
+  // Pack hover wiring: pack cards drive hover state; other cards
+  // consume it to draw the rose halo on range members.
+  const setHoveredPack = useChatFlowStore((s) => s.setHoveredPack);
+  const hoveredPackRange = useChatFlowStore((s) => s.hoveredPackRange);
+  const hoveredPackId = useChatFlowStore((s) => s.hoveredPackId);
+  const isPackMemberHighlighted =
+    !isPack &&
+    hoveredPackRange !== null &&
+    hoveredPackRange.includes(node.id);
+  const isHoveredPackSelf = isPack && hoveredPackId === node.id;
+  const packHandlers =
+    isPack && node.pack_snapshot
+      ? {
+          onMouseEnter: () =>
+            setHoveredPack(node.id, node.pack_snapshot!.packed_range),
+          onMouseLeave: () => setHoveredPack(null, null),
+        }
+      : {};
   // Live preview: pick the longest streaming delta among any running
   // WorkNode under this ChatNode (handles parallel siblings + nested
   // sub-workflows). When no delta has arrived yet we fall back to the
@@ -126,28 +145,35 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
     <div
       data-testid={`chatflow-node-${node.id}`}
       data-compact={isCompact ? "1" : undefined}
+      data-pack={isPack ? "1" : undefined}
+      data-pack-member={isPackMemberHighlighted ? "true" : undefined}
+      {...packHandlers}
       className={[
         "group/card relative rounded-lg border shadow-sm w-52 p-2.5 text-xs",
-        isCompact
-          ? "bg-teal-50 border-l-[3px] border-l-teal-500"
-          : isAwaitingUser
-            ? "bg-amber-50 border-l-[3px] border-l-amber-500"
-            : isRoot
-              ? "bg-blue-50 border-l-[3px] border-l-blue-400"
-              : isLeaf
-                ? "bg-green-50"
-                : "bg-white",
+        isPack
+          ? "bg-rose-50 border-l-[3px] border-l-rose-500"
+          : isCompact
+            ? "bg-teal-50 border-l-[3px] border-l-teal-500"
+            : isAwaitingUser
+              ? "bg-amber-50 border-l-[3px] border-l-amber-500"
+              : isRoot
+                ? "bg-blue-50 border-l-[3px] border-l-blue-400"
+                : isLeaf
+                  ? "bg-green-50"
+                  : "bg-white",
         isSelected
           ? "border-blue-500 ring-2 ring-blue-200"
-          : isCompact
-            ? "border-teal-300"
-            : isAwaitingUser
-              ? "border-amber-300"
-              : isRoot
-                ? "border-blue-200"
-                : isLeaf
-                  ? "border-green-200"
-                  : "border-gray-300",
+          : isPack
+            ? "border-rose-300"
+            : isCompact
+              ? "border-teal-300"
+              : isAwaitingUser
+                ? "border-amber-300"
+                : isRoot
+                  ? "border-blue-200"
+                  : isLeaf
+                    ? "border-green-200"
+                    : "border-gray-300",
         isMerge ? "border-purple-400" : "",
         isDashed ? "border-dashed" : "",
         executionMode === "auto_plan"
@@ -158,6 +184,10 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
         isPendingMergeFirst
           ? "ring-4 ring-violet-400 animate-pulse"
           : "",
+        // Pack hover decoration — distinct from selection so hover +
+        // selection don't stomp on each other visually.
+        isPackMemberHighlighted ? "ring-2 ring-rose-400" : "",
+        isHoveredPackSelf ? "ring-2 ring-rose-500" : "",
       ].join(" ")}
       data-pending-merge-first={isPendingMergeFirst ? "1" : undefined}
       data-merge={isMergeSettled ? "1" : undefined}
@@ -189,6 +219,19 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
           >
             <span aria-hidden>⟲</span>
             {t("chatflow.compact_badge")}
+          </span>
+        )}
+        {isPack && (
+          <span
+            title={t("chatflow.pack_badge_hint", {
+              count: node.pack_snapshot?.packed_range.length ?? 0,
+            })}
+            className="inline-flex items-center gap-0.5 rounded bg-rose-200/80 px-1 py-0.5 text-[10px] font-semibold text-rose-900"
+          >
+            <span aria-hidden>📦</span>
+            {t("chatflow.pack_badge", {
+              count: node.pack_snapshot?.packed_range.length ?? 0,
+            })}
           </span>
         )}
         {isAwaitingUser && (
@@ -229,6 +272,22 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
               <span className="inline-flex items-center gap-1 text-teal-600">
                 <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-teal-400" />
                 compacting…
+              </span>
+            ) : (
+              <span className="italic text-gray-400">—</span>
+            )}
+          </div>
+        </div>
+      ) : isPack ? (
+        <div className="mb-1.5">
+          <div className="text-[10px] text-rose-700 mb-0.5">{t("chatflow.pack_summary")}</div>
+          <div className="prose prose-sm max-w-none text-xs text-gray-900 break-words leading-snug">
+            {node.agent_response.text ? (
+              <Markdown>{truncate(node.agent_response.text)}</Markdown>
+            ) : node.status === "running" ? (
+              <span className="inline-flex items-center gap-1 text-rose-600">
+                <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-rose-400" />
+                packing…
               </span>
             ) : (
               <span className="italic text-gray-400">—</span>

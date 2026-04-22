@@ -18,6 +18,7 @@ const SOURCE_KIND_COLOR: Record<string, string> = {
   chat_turn: "bg-blue-100 text-blue-800",
   chat_compact: "bg-teal-100 text-teal-800",
   chat_merge: "bg-rose-100 text-rose-800",
+  chat_pack: "bg-rose-200 text-rose-900",
   draft: "bg-blue-100 text-blue-800",
   tool_call: "bg-amber-100 text-amber-800",
   judge_call: "bg-purple-100 text-purple-800",

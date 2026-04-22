@@ -272,6 +272,21 @@ export interface CompactSnapshot {
 }
 
 /**
+ * Mirror of ``agentloom.schemas.workflow.PackSnapshot``.
+ * Populated on ChatFlowNodes that serve as mid-chain pack points.
+ * Unlike compact (implicit root→leaf), ``packed_range`` carries the
+ * explicit ChatNode id range the pack covers. ``summary`` empty
+ * means the pack worker hasn't finished yet.
+ */
+export interface PackSnapshot {
+  summary: string;
+  packed_range: NodeId[];
+  use_detailed_index: boolean;
+  preserve_last_n: number;
+  preserved_messages: WireMessage[];
+}
+
+/**
  * Mirror of ``agentloom.schemas.chatflow.InboundContextSegment``.
  *
  * Kinds:
@@ -308,6 +323,12 @@ export interface ChatFlowNode extends NodeBaseFields {
    * this ChatNode is a compact point: ``agent_response.text`` holds
    * the summary prose and downstream context builds root here. */
   compact_snapshot: CompactSnapshot | null;
+  /** Mid-chain pack marker. When non-null, this ChatNode is a pack
+   * snapshot point over the explicit ``pack_snapshot.packed_range``
+   * list; downstream context builds substitute the summary for the
+   * range, pre-range ancestors remain visible as usual. Mutually
+   * exclusive with ``compact_snapshot``. */
+  pack_snapshot?: PackSnapshot | null;
   /** Tokens in this node's chain context at spawn (``_build_chat_context``
    * output + this turn's user message). Stamped once by the engine; the
    * canvas TokenBar reads this for monotonic context-growth display.
@@ -470,4 +491,9 @@ export interface BoardItem {
   description: string;
   fallback: boolean;
   created_at: string | null;
+  /** For ``source_kind === "chat_pack"`` rows: the ChatNode ids this
+   * pack covers. Empty on every non-pack row. Clients can use this to
+   * hide range-member rows when rendering the board panel from the
+   * pack's downstream view. */
+  pack_inner_ids?: NodeId[];
 }

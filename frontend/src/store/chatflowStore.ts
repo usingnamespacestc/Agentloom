@@ -189,6 +189,17 @@ export interface ChatFlowStoreState {
   hoveredEdge: { parent: NodeId; child: NodeId } | null;
   setHoveredEdge: (edge: { parent: NodeId; child: NodeId } | null) => void;
 
+  /** Pack hover: the ChatNode ids a currently-hovered pack covers.
+   * Driven by the pack ChatNode card's ``onMouseEnter/Leave``; other
+   * ChatNode cards subscribe and draw a rose halo when their id is in
+   * this list. Null = no pack is being hovered. Overlapping / nested
+   * packs are naturally handled — only one pack's range is active at
+   * a time, so hovering whichever pack you want lights up its own
+   * members without conflict. */
+  hoveredPackRange: NodeId[] | null;
+  hoveredPackId: NodeId | null;
+  setHoveredPack: (packId: NodeId | null, range: NodeId[] | null) => void;
+
   /** Load a chatflow from the server and subscribe to its events. */
   loadChatFlow: (id: string) => Promise<void>;
   /** Manually inject a chatflow (used by tests and by a create handler
@@ -299,6 +310,7 @@ const INITIAL: Omit<
   | "moveChatFlowToFolder"
   | "patchChatFlow"
   | "setHoveredEdge"
+  | "setHoveredPack"
   | "loadChatFlow"
   | "setChatFlow"
   | "selectNode"
@@ -345,6 +357,8 @@ const INITIAL: Omit<
   viewMode: "chatflow",
   rightPanelWidth: RIGHT_PANEL_DEFAULT,
   hoveredEdge: null,
+  hoveredPackRange: null,
+  hoveredPackId: null,
   sseSubscription: null,
   sseFactory: null,
   streamingDeltas: {},
@@ -557,6 +571,10 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
 
   setHoveredEdge(edge) {
     set({ hoveredEdge: edge });
+  },
+
+  setHoveredPack(packId, range) {
+    set({ hoveredPackId: packId, hoveredPackRange: range });
   },
 
   async patchChatFlow(patch) {
