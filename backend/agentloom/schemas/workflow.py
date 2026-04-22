@@ -66,6 +66,58 @@ class CompactSnapshot(BaseModel):
     preserved_before_summary: bool = False
 
 
+class PackSnapshot(BaseModel):
+    """Structured output of a :attr:`StepKind.PACK` WorkNode.
+
+    Pack is a mid-graph custom variant of compress. Where
+    :class:`CompactSnapshot` covers an implicit root→leaf chain,
+    ``PackSnapshot.packed_range`` lists the explicit contiguous
+    range — from the earliest packed node up to the pack's primary
+    parent (the "last packed node"). Three knobs expose trade-offs
+    to the invoker; compress uses all-on defaults, pack allows the
+    aggressive settings (no per-node index, no preserved tail) that
+    mid-graph summaries typically want.
+
+    Visibility of the packed range is view-dependent, enforced at
+    ancestor-walk time (see engine ``_build_*_context``):
+
+    - from this pack node or anything downstream of it → the packed
+      nodes are substituted by ``summary`` and the walk stops at the
+      range boundary
+    - from any node outside + upstream of the pack (including a fresh
+      turn started off the original pre-pack chain, and the global
+      canvas) → the packed range is fully visible as if pack never
+      ran
+
+    Pack is nestable: members of ``packed_range`` may themselves be
+    pack nodes, resolved recursively at walk time.
+    """
+
+    summary: str = ""
+    #: Node ids covered by this pack, in topological order along the
+    #: primary-parent chain — the first element is the earliest
+    #: packed node; the last element is ``parent_ids[0]`` of the
+    #: pack itself. Must be non-empty at commit time; an empty
+    #: ``packed_range`` would mean "this pack summarizes nothing".
+    packed_range: list[NodeId] = Field(default_factory=list)
+    #: Knob 1 — "detailed index". When True (compress default), each
+    #: packed node also emits/keeps its own ChatBoardItem so
+    #: downstream references can cite individual packed members.
+    #: When False, only the pack itself publishes an item and the
+    #: internals collapse into one monolithic summary.
+    use_detailed_index: bool = True
+    #: Knob 2 — number of most-recent messages inside the packed
+    #: range to keep verbatim in ``preserved_messages`` instead of
+    #: folding into ``summary``. 0 = no preserved tail (typical for
+    #: a mid-graph pack). Compress's equivalent lives on
+    #: ``ChatFlowSettings.compact_keep_recent_count``; pack carries
+    #: it per-invocation because pack is user-initiated.
+    preserve_last_n: int = 0
+    #: Verbatim tail messages carried past the pack cutoff, matching
+    #: ``preserve_last_n``. Empty when ``preserve_last_n == 0``.
+    preserved_messages: list[WireMessage] = Field(default_factory=list)
+
+
 class WorkFlowNode(NodeBase):
     """A single step inside a WorkFlow.
 
@@ -127,6 +179,16 @@ class WorkFlowNode(NodeBase):
     #: chain. ``None`` for pending compact nodes and for non-compact kinds.
     compact_snapshot: CompactSnapshot | None = None
 
+    # --- pack ---
+    #: Set by the engine when a PACK node finishes. Unlike
+    #: ``compact_snapshot`` (implicit root→leaf range), pack_snapshot
+    #: carries an explicit ``packed_range`` and three knobs. Downstream
+    #: ancestor walks substitute this summary for every node in
+    #: ``packed_range`` when reached via the pack; pre-pack / global-
+    #: canvas walks ignore it. ``None`` for pending pack nodes and for
+    #: every non-pack step_kind.
+    pack_snapshot: "PackSnapshot | None" = None
+
     #: If this node is a redo clone spawned by a judge_post ``retry``
     #: verdict, the id of the node it was cloned from (worker or
     #: delegation). Lets the re-aggregation walk the retry lineage so
@@ -154,6 +216,8 @@ class WorkFlowNode(NodeBase):
                 raise ValueError("llm_call node may not carry judge_call fields")
             if self.compact_snapshot is not None:
                 raise ValueError("llm_call node may not carry compact fields")
+            if self.pack_snapshot is not None:
+                raise ValueError("llm_call node may not carry pack fields")
         elif self.step_kind == StepKind.TOOL_CALL:
             if self.input_messages or self.output_message or self.usage:
                 raise ValueError("tool_call node may not carry llm_call fields")
@@ -163,6 +227,8 @@ class WorkFlowNode(NodeBase):
                 raise ValueError("tool_call node may not carry judge_call fields")
             if self.compact_snapshot is not None:
                 raise ValueError("tool_call node may not carry compact fields")
+            if self.pack_snapshot is not None:
+                raise ValueError("tool_call node may not carry pack fields")
         elif self.step_kind == StepKind.JUDGE_CALL:
             if self.tool_name or self.tool_args or self.tool_result:
                 raise ValueError("judge_call node may not carry tool_call fields")
@@ -172,6 +238,8 @@ class WorkFlowNode(NodeBase):
                 raise ValueError("judge_call node requires judge_variant")
             if self.compact_snapshot is not None:
                 raise ValueError("judge_call node may not carry compact fields")
+            if self.pack_snapshot is not None:
+                raise ValueError("judge_call node may not carry pack fields")
         elif self.step_kind == StepKind.DELEGATE:
             if self.tool_name or self.tool_args or self.tool_result:
                 raise ValueError("delegation node may not carry tool_call fields")
@@ -181,6 +249,8 @@ class WorkFlowNode(NodeBase):
                 raise ValueError("delegation node may not carry judge_call fields")
             if self.compact_snapshot is not None:
                 raise ValueError("delegation node may not carry compact fields")
+            if self.pack_snapshot is not None:
+                raise ValueError("delegation node may not carry pack fields")
         elif self.step_kind == StepKind.COMPRESS:
             # Compact nodes share llm_call's input/output/usage shape
             # (they're a single LLM invocation under the hood) and
@@ -192,6 +262,20 @@ class WorkFlowNode(NodeBase):
                 raise ValueError("compact node may not carry a sub_workflow")
             if self.judge_variant or self.judge_verdict:
                 raise ValueError("compact node may not carry judge_call fields")
+            if self.pack_snapshot is not None:
+                raise ValueError("compact node may not carry pack fields")
+        elif self.step_kind == StepKind.PACK:
+            # Pack nodes share llm_call's input/output/usage shape (one
+            # LLM invocation producing the summary) and additionally
+            # carry ``pack_snapshot`` with the explicit range + knobs.
+            if self.tool_name or self.tool_args or self.tool_result:
+                raise ValueError("pack node may not carry tool_call fields")
+            if self.sub_workflow is not None:
+                raise ValueError("pack node may not carry a sub_workflow")
+            if self.judge_variant or self.judge_verdict:
+                raise ValueError("pack node may not carry judge_call fields")
+            if self.compact_snapshot is not None:
+                raise ValueError("pack node may not carry compact fields")
         elif self.step_kind == StepKind.BRIEF:
             # Brief nodes are llm_call-shaped: they carry input_messages /
             # output_message / usage and nothing else. ``scope`` must
@@ -206,6 +290,8 @@ class WorkFlowNode(NodeBase):
                 raise ValueError("brief node may not carry judge_call fields")
             if self.compact_snapshot is not None:
                 raise ValueError("brief node may not carry compact fields")
+            if self.pack_snapshot is not None:
+                raise ValueError("brief node may not carry pack fields")
 
         # Non-brief nodes may not carry a scope — scope is a brief-only
         # marker. Prevents accidental contamination across kinds.
