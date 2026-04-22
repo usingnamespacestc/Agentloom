@@ -33,6 +33,12 @@ class ProviderSubKind(str, Enum):
         top_k, repetition_penalty, num_ctx. ``openai_compat`` parent.
       - ``volcengine``: Ark / Doubao. Same keys as openai_chat.
         ``openai_compat`` parent.
+      - ``llamacpp``: llama.cpp server's OpenAI-compat endpoint
+        (default :8080 / :8001). Accepts temperature, top_p, top_k,
+        max_tokens, and ``repeat_penalty`` (same wire field Ollama
+        uses as ``repetition_penalty``). ``num_ctx`` is fixed at server
+        start and is NOT a per-request param, so it's excluded from
+        the whitelist. ``openai_compat`` parent.
       - ``anthropic``: Anthropic Messages API. temperature, top_p,
         top_k, max_tokens, thinking_budget_tokens. ``anthropic_native``
         parent.
@@ -41,6 +47,7 @@ class ProviderSubKind(str, Enum):
     OPENAI_CHAT = "openai_chat"
     OLLAMA = "ollama"
     VOLCENGINE = "volcengine"
+    LLAMACPP = "llamacpp"
     ANTHROPIC = "anthropic"
 
 
@@ -63,6 +70,9 @@ SUB_KIND_PARAM_WHITELIST: dict[ProviderSubKind, frozenset[str]] = {
             "frequency_penalty",
             "thinking_enabled",
         }
+    ),
+    ProviderSubKind.LLAMACPP: frozenset(
+        {"temperature", "top_p", "top_k", "max_output_tokens", "repetition_penalty"}
     ),
     ProviderSubKind.ANTHROPIC: frozenset(
         {"temperature", "top_p", "top_k", "max_output_tokens", "thinking_budget_tokens"}

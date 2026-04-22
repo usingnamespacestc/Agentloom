@@ -469,6 +469,7 @@ export type ProviderSubKind =
   | "openai_chat"
   | "ollama"
   | "volcengine"
+  | "llamacpp"
   | "anthropic";
 
 /** Mirror of agentloom.schemas.provider.SUB_KIND_PARAM_WHITELIST. */
@@ -495,6 +496,13 @@ export const SUB_KIND_PARAM_WHITELIST: Record<ProviderSubKind, ReadonlySet<keyof
     "presence_penalty",
     "frequency_penalty",
     "thinking_enabled",
+  ]),
+  llamacpp: new Set([
+    "temperature",
+    "top_p",
+    "top_k",
+    "max_output_tokens",
+    "repetition_penalty",
   ]),
   anthropic: new Set([
     "temperature",

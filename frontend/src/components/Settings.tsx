@@ -613,6 +613,7 @@ function ProviderForm({
             <option value="openai_chat">{t("providers.sub_kind_openai_chat")}</option>
             <option value="ollama">{t("providers.sub_kind_ollama")}</option>
             <option value="volcengine">{t("providers.sub_kind_volcengine")}</option>
+            <option value="llamacpp">{t("providers.sub_kind_llamacpp")}</option>
           </select>
           <p className="mt-1 text-[10px] text-gray-400">{t("providers.sub_kind_hint")}</p>
         </label>
