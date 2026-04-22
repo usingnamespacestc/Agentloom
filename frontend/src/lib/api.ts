@@ -244,6 +244,42 @@ export const api = {
       },
     ),
 
+  /** Mid-chain pack — summarizes a contiguous ChatNode range into a
+   * single summary ChatNode hanging off ``packed_range[-1]``. From the
+   * pack and its downstream the range is hidden; from pre-pack / the
+   * global canvas it stays visible. */
+  packChain: (
+    chatflowId: string,
+    body: {
+      packed_range: string[];
+      use_detailed_index?: boolean;
+      preserve_last_n?: number;
+      pack_instruction?: string;
+      must_keep?: string;
+      must_drop?: string;
+      target_tokens?: number | null;
+      model?: ProviderModelRef | null;
+    },
+  ) =>
+    request<{
+      node_id: string;
+      status: string;
+      summary: string;
+      packed_range: string[];
+    }>(`/api/chatflows/${chatflowId}/pack`, {
+      method: "POST",
+      body: JSON.stringify({
+        packed_range: body.packed_range,
+        use_detailed_index: body.use_detailed_index ?? true,
+        preserve_last_n: body.preserve_last_n ?? 0,
+        pack_instruction: body.pack_instruction ?? "",
+        must_keep: body.must_keep ?? "",
+        must_drop: body.must_drop ?? "",
+        target_tokens: body.target_tokens ?? null,
+        model: sanitizeRef(body.model ?? null),
+      }),
+    }),
+
   /** Manual branch merge. Folds two ChatNode branches into a single
    * synthesized reply; the new node's parent_ids are [left_id, right_id]. */
   mergeChain: (

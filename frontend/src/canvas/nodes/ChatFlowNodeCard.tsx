@@ -92,6 +92,9 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
   const isPendingMergeFirst = useChatFlowStore(
     (s) => s.pendingMergeFirstId === node.id,
   );
+  const isPendingPackStart = useChatFlowStore(
+    (s) => s.pendingPackStartId === node.id,
+  );
   // Pack hover wiring: pack cards drive hover state; other cards
   // consume it to draw the rose halo on range members.
   const setHoveredPack = useChatFlowStore((s) => s.setHoveredPack);
@@ -183,6 +186,12 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
             : "",
         isPendingMergeFirst
           ? "ring-4 ring-violet-400 animate-pulse"
+          : "",
+        // Rose pulse when this node is the first of a pending pack
+        // range selection. Distinct from merge's violet so the two
+        // handshakes don't visually collide.
+        isPendingPackStart
+          ? "ring-4 ring-rose-400 animate-pulse"
           : "",
         // Pack hover decoration — distinct from selection so hover +
         // selection don't stomp on each other visually.

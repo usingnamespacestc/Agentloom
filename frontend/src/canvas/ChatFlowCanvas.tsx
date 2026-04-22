@@ -55,6 +55,7 @@ import { useTranslation } from "react-i18next";
 import { layoutDag } from "./layout";
 import { CanvasContextMenu, StickyNoteContextMenu } from "./CanvasContextMenu";
 import { CompactConfirmDialog } from "@/components/CompactConfirmDialog";
+import { PackConfirmDialog } from "@/components/PackConfirmDialog";
 import { ChatFlowActiveWorkPanel } from "./ChatFlowActiveWorkPanel";
 import { MemoryBoardPanel } from "./MemoryBoardPanel";
 import { ModelRibbonLayer } from "./ModelRibbonLayer";
@@ -120,6 +121,9 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
   const beginPendingMerge = useChatFlowStore((s) => s.beginPendingMerge);
   const cancelPendingMerge = useChatFlowStore((s) => s.cancelPendingMerge);
   const commitMergeWith = useChatFlowStore((s) => s.commitMergeWith);
+  const pendingPackStartId = useChatFlowStore((s) => s.pendingPackStartId);
+  const beginPendingPack = useChatFlowStore((s) => s.beginPendingPack);
+  const cancelPendingPack = useChatFlowStore((s) => s.cancelPendingPack);
 
   // Cursor position for the edge-hover tooltip — only tracked while an
   // edge is hovered, so we don't pay for global mousemove the rest of
@@ -142,6 +146,13 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
   // the node context menu and the chatflow requires confirmation, we
   // open CompactConfirmDialog pinned to the chosen node as parent.
   const [compactDialogParentId, setCompactDialogParentId] = useState<string | null>(null);
+  // Pack two-pick range selection resolves to this pair and opens
+  // the PackConfirmDialog. Derived by beginPendingPack (start) +
+  // the "pack to here" menu item (end).
+  const [packDialogPair, setPackDialogPair] = useState<{
+    startId: string;
+    endId: string;
+  } | null>(null);
   const reactFlow = useReactFlow();
 
   // Sticky notes — persisted via chatflow.sticky_notes
@@ -609,6 +620,12 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
             : pendingMergeFirstId === contextMenu.nodeId
               ? "first-pending-self"
               : "first-pending-other";
+        const packState: "no-pending" | "first-pending-self" | "first-pending-other" =
+          pendingPackStartId === null
+            ? "no-pending"
+            : pendingPackStartId === contextMenu.nodeId
+              ? "first-pending-self"
+              : "first-pending-other";
 
         return (
           <NodeContextMenu
@@ -630,6 +647,23 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
             }}
             onCancelPendingMerge={() => {
               cancelPendingMerge();
+              setContextMenu(null);
+            }}
+            packState={packState}
+            onPackStart={() => {
+              beginPendingPack(contextMenu.nodeId);
+              setContextMenu(null);
+            }}
+            onPackToHere={() => {
+              const endId = contextMenu.nodeId;
+              const startId = pendingPackStartId;
+              setContextMenu(null);
+              if (startId) {
+                setPackDialogPair({ startId, endId });
+              }
+            }}
+            onCancelPendingPack={() => {
+              cancelPendingPack();
               setContextMenu(null);
             }}
             onEnterWorkflow={() => {
@@ -681,6 +715,16 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
           chatflow={chatflow}
           parentNode={chatflow.nodes[compactDialogParentId]}
           onCreated={(nodeId) => selectNode(nodeId)}
+        />
+      )}
+
+      {packDialogPair && chatflow && (
+        <PackConfirmDialog
+          open
+          onClose={() => setPackDialogPair(null)}
+          chatflow={chatflow}
+          startId={packDialogPair.startId}
+          endId={packDialogPair.endId}
         />
       )}
 
@@ -1008,6 +1052,10 @@ function NodeContextMenu({
   onSelectToMerge,
   onCommitMerge,
   onCancelPendingMerge,
+  packState,
+  onPackStart,
+  onPackToHere,
+  onCancelPendingPack,
 }: {
   x: number;
   y: number;
@@ -1025,6 +1073,13 @@ function NodeContextMenu({
   onSelectToMerge: () => void;
   onCommitMerge: () => void;
   onCancelPendingMerge: () => void;
+  packState:
+    | "no-pending"
+    | "first-pending-self"
+    | "first-pending-other";
+  onPackStart: () => void;
+  onPackToHere: () => void;
+  onCancelPendingPack: () => void;
 }) {
   const { t } = useTranslation();
 
@@ -1062,6 +1117,21 @@ function NodeContextMenu({
   // Compact — hide on compact nodes themselves.
   if (canCompact) {
     items.push({ label: t("chatflow.ctx_compact"), onClick: onCompact });
+  }
+
+  // Pack (two-step range selection, mirrors merge's handshake).
+  if (packState === "no-pending") {
+    items.push({ label: t("chatflow.ctx_pack_start"), onClick: onPackStart });
+  } else if (packState === "first-pending-self") {
+    items.push({
+      label: t("chatflow.ctx_cancel_pending_pack"),
+      onClick: onCancelPendingPack,
+    });
+  } else {
+    items.push({
+      label: t("chatflow.ctx_pack_to_here"),
+      onClick: onPackToHere,
+    });
   }
 
   // Delete

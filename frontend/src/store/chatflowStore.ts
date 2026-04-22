@@ -285,6 +285,36 @@ export interface ChatFlowStoreState {
    * the pending state on success. Throws if no pending first node. */
   commitMergeWith: (secondId: NodeId) => Promise<void>;
 
+  /** First-pick for pack range selection. Like ``pendingMergeFirstId``
+   * but for the "two-pick range" flow: right-click ChatNode → "select
+   * as pack start" → set this. Right-click another ChatNode → "pack to
+   * here" → ``commitPackTo`` checks that start/end are ancestor-
+   * descendant along the primary-parent chain, derives the range, and
+   * hits the pack API. Null when no pack is in progress. */
+  pendingPackStartId: NodeId | null;
+  /** Stash ``nodeId`` as the pack start. Toggle-off when called with
+   * the same id twice. */
+  beginPendingPack: (nodeId: NodeId) => void;
+  /** Clear any pending-pack state. */
+  cancelPendingPack: () => void;
+  /** Derive a primary-parent-chain range between ``pendingPackStartId``
+   * and ``endId``, then hit the pack API with the supplied knobs.
+   * Throws with a user-facing message if the two ids are not
+   * ancestor-descendant (one must reach the other by walking
+   * ``parent_ids[0]``). */
+  commitPackTo: (
+    endId: NodeId,
+    knobs: {
+      use_detailed_index?: boolean;
+      preserve_last_n?: number;
+      pack_instruction?: string;
+      must_keep?: string;
+      must_drop?: string;
+      target_tokens?: number | null;
+      model?: ProviderModelRef | null;
+    },
+  ) => Promise<void>;
+
   /** Apply a single SSE event to the current chatflow payload. */
   applyEvent: (event: WorkFlowEvent) => void;
   /** Override the SSE factory (for tests). */
@@ -334,6 +364,9 @@ const INITIAL: Omit<
   | "beginPendingMerge"
   | "cancelPendingMerge"
   | "commitMergeWith"
+  | "beginPendingPack"
+  | "cancelPendingPack"
+  | "commitPackTo"
   | "applyEvent"
   | "setSSEFactory"
   | "refreshBoardItems"
@@ -350,6 +383,7 @@ const INITIAL: Omit<
   selectedNodeId: null,
   branchMemory: {},
   pendingMergeFirstId: null,
+  pendingPackStartId: null,
   drillStack: [],
   workflowSelectedNodeId: null,
   workflowBranchMemory: {},
@@ -1032,6 +1066,81 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     const res = await api.mergeChain(chat.id, {
       left_id: firstId,
       right_id: secondId,
+    });
+    await get().refreshChatFlow();
+    get().selectNode(res.node_id);
+  },
+
+  beginPendingPack(nodeId) {
+    const current = get().pendingPackStartId;
+    if (current === nodeId) {
+      // Same node twice cancels (mirrors merge's toggle-off).
+      set({ pendingPackStartId: null });
+      return;
+    }
+    set({ pendingPackStartId: nodeId });
+  },
+
+  cancelPendingPack() {
+    if (get().pendingPackStartId !== null) {
+      set({ pendingPackStartId: null });
+    }
+  },
+
+  async commitPackTo(endId, knobs) {
+    const chat = get().chatflow;
+    const startId = get().pendingPackStartId;
+    if (!chat) throw new Error("no chatflow loaded");
+    if (startId === null) throw new Error("no pending pack start");
+    if (startId === endId) throw new Error("cannot pack a node with itself");
+
+    // Derive the primary-parent-chain range. Try both directions:
+    // walk up from endId until we hit startId, else walk up from
+    // startId until we hit endId. If neither walk reaches the other,
+    // the two nodes are not ancestor-descendant on the primary
+    // chain — the pack backend would reject this anyway, but we
+    // surface a clearer error up-front.
+    const walkUpTo = (from: NodeId, target: NodeId): NodeId[] | null => {
+      const range: NodeId[] = [];
+      const guard = new Set<NodeId>();
+      let cur: NodeId | null = from;
+      while (cur !== null && !guard.has(cur)) {
+        guard.add(cur);
+        range.unshift(cur);
+        if (cur === target) return range;
+        const parents: NodeId[] = chat.nodes[cur]?.parent_ids ?? [];
+        cur = parents.length > 0 ? parents[0] : null;
+      }
+      return null;
+    };
+
+    let range = walkUpTo(endId, startId);
+    // If the user picked in reverse order (start is actually the
+    // newer node), flip and try the other direction.
+    if (range === null) {
+      const reversed = walkUpTo(startId, endId);
+      if (reversed !== null) {
+        range = reversed;
+      }
+    }
+    if (range === null) {
+      throw new Error(
+        "pack range invalid: the two ChatNodes must be ancestor and " +
+          "descendant along the primary-parent chain",
+      );
+    }
+    // Clear pending state up-front; API errors shouldn't leave the UI
+    // stuck in "pending pack" mode.
+    set({ pendingPackStartId: null });
+    const res = await api.packChain(chat.id, {
+      packed_range: range,
+      use_detailed_index: knobs.use_detailed_index,
+      preserve_last_n: knobs.preserve_last_n,
+      pack_instruction: knobs.pack_instruction,
+      must_keep: knobs.must_keep,
+      must_drop: knobs.must_drop,
+      target_tokens: knobs.target_tokens,
+      model: knobs.model,
     });
     await get().refreshChatFlow();
     get().selectNode(res.node_id);
