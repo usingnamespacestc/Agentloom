@@ -543,12 +543,40 @@ def _render_source_output_for_brief(source: WorkFlowNode) -> str:
         return out or "(no textual judge output — see verdict fields)"
     if source.step_kind == StepKind.DELEGATE and source.sub_workflow is not None:
         # DELEGATE carries no output_message of its own — its "result"
-        # is whatever the sub-WorkFlow produced. Pick the latest
-        # terminal non-BRIEF node's output so the node-brief
-        # summarizes the delegation's effective payload, not an
-        # empty container.
+        # is whatever the sub-WorkFlow produced. Under auto_plan the
+        # chronological tail is usually a judge_post whose ``content``
+        # is empty (the verdict is structured in separate fields), so
+        # a naive "latest non-brief with output_message" picker returns
+        # an empty string and the node-brief LLM concludes the delegate
+        # "produced no output". 2026-04-22 integration test found this:
+        # three succeeded delegates all got briefs that read "该委托节点
+        # 未产生任何输出内容". Prefer in priority order:
+        #   1. judge_post.accept.merged_response (layer-aggregated reply)
+        #   2. judge_post.accept → latest worker draft (atomic happy path)
+        #   3. Latest worker DRAFT output (no judge_post)
+        #   4. Latest non-BRIEF / non-JUDGE_CALL output (any content)
+        #   5. The empty-output sentinel
         sub = source.sub_workflow
-        terminal: WorkFlowNode | None = None
+        post_judges = [
+            sn
+            for sn in sub.nodes.values()
+            if sn.step_kind == StepKind.JUDGE_CALL
+            and sn.judge_variant == JudgeVariant.POST
+            and sn.status == NodeStatus.SUCCEEDED
+            and sn.judge_verdict is not None
+        ]
+        # Latest judge_post first (aggregator wins over earlier atomic).
+        post_judges.sort(
+            key=lambda n: n.finished_at or n.updated_at or n.created_at,
+            reverse=True,
+        )
+        for pj in post_judges:
+            v = pj.judge_verdict
+            if v is not None and v.post_verdict == "accept" and v.merged_response:
+                return v.merged_response
+
+        latest_worker: WorkFlowNode | None = None
+        latest_any: WorkFlowNode | None = None
         for sn in sub.nodes.values():
             if sn.step_kind == StepKind.BRIEF:
                 continue
@@ -556,12 +584,33 @@ def _render_source_output_for_brief(source: WorkFlowNode) -> str:
                 continue
             if sn.output_message is None:
                 continue
-            if terminal is None or (sn.finished_at or utcnow()) > (
-                terminal.finished_at or utcnow()
+            content = (sn.output_message.content or "").strip()
+            if not content:
+                # Empty content (e.g. judge_call whose verdict lives in
+                # structured fields, or an llm_call that only produced
+                # tool_uses) never makes a usable brief input — skip.
+                continue
+            if sn.step_kind == StepKind.JUDGE_CALL:
+                # A judge_call's textual content is its free-form prose;
+                # prefer real workers over a judge's preamble.
+                continue
+            if (
+                sn.step_kind == StepKind.DRAFT
+                and sn.role == WorkNodeRole.WORKER
             ):
-                terminal = sn
-        if terminal is not None and terminal.output_message is not None:
-            return terminal.output_message.content or ""
+                if latest_worker is None or (sn.finished_at or utcnow()) > (
+                    latest_worker.finished_at or utcnow()
+                ):
+                    latest_worker = sn
+            else:
+                if latest_any is None or (sn.finished_at or utcnow()) > (
+                    latest_any.finished_at or utcnow()
+                ):
+                    latest_any = sn
+        if latest_worker is not None and latest_worker.output_message is not None:
+            return latest_worker.output_message.content or ""
+        if latest_any is not None and latest_any.output_message is not None:
+            return latest_any.output_message.content or ""
         return "(sub-WorkFlow produced no textual output)"
     if source.output_message is not None:
         return source.output_message.content or ""
