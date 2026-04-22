@@ -66,6 +66,54 @@ class CompactSnapshot(BaseModel):
     preserved_before_summary: bool = False
 
 
+class PackSnapshot(BaseModel):
+    """Structured output of a "pack" ChatNode — ChatFlow-layer topic
+    packaging, symmetric with but not identical to
+    :class:`CompactSnapshot`.
+
+    Where compact implicitly covers a root→leaf ChatNode prefix, pack
+    covers an **arbitrary contiguous range** of ChatNodes chosen by
+    the user and recorded explicitly in ``packed_range``. The pack
+    ChatNode's parent is ``packed_range[-1]`` (the last packed
+    ChatNode) and its ``agent_response.text`` carries ``summary``.
+
+    From the pack ChatNode itself and every descendant downstream of
+    it, ancestor walks in ``_build_chat_context`` substitute
+    ``summary`` for every ChatNode in ``packed_range`` and stop
+    walking past the pack. From the pre-pack siblings and the global
+    canvas the range remains fully visible as if pack never ran.
+
+    Pack is nestable: a member of ``packed_range`` may itself be a
+    pack ChatNode, resolved recursively at walk time.
+
+    ``use_detailed_index`` / ``preserve_last_n`` are the per-
+    invocation knobs the user can twist; their defaults match
+    compact-all-on so pack run with all-defaults looks like a
+    mid-graph compact.
+    """
+
+    summary: str = ""
+    #: ChatNode ids covered by this pack, in topological order along
+    #: the primary-parent chain — first element is the earliest
+    #: packed ChatNode, last element is ``parent_ids[0]`` of the pack
+    #: ChatNode itself. Non-empty at commit time.
+    packed_range: list[NodeId] = Field(default_factory=list)
+    #: When True (default), each packed ChatNode also keeps its own
+    #: ChatBoardItem so downstream refs can cite members individually.
+    #: When False, only pack's own item is emitted and members collapse
+    #: into one monolithic summary for citation purposes.
+    use_detailed_index: bool = True
+    #: Number of most-recent ChatNodes inside the range to keep
+    #: verbatim (as ``preserved_messages``) instead of folding into
+    #: ``summary``. 0 = no preserved tail (typical for a mid-graph
+    #: pack). Compact's analogous knob lives on ChatFlowSettings;
+    #: pack's is per-invocation because pack is always user-initiated.
+    preserve_last_n: int = 0
+    #: Verbatim tail messages carried past the pack cutoff, matching
+    #: ``preserve_last_n``. Empty when ``preserve_last_n == 0``.
+    preserved_messages: list[WireMessage] = Field(default_factory=list)
+
+
 class WorkFlowNode(NodeBase):
     """A single step inside a WorkFlow.
 

@@ -19,7 +19,7 @@ from agentloom.schemas.common import (
     generate_node_id,
     utcnow,
 )
-from agentloom.schemas.workflow import CompactSnapshot, WireMessage, WorkFlow
+from agentloom.schemas.workflow import CompactSnapshot, PackSnapshot, WireMessage, WorkFlow
 
 
 #: Canned greeting written to a brand-new ChatFlow's root node. Static
@@ -193,6 +193,18 @@ class ChatFlowNode(NodeBase):
     #: when the compaction was explicit; engine-triggered compacts
     #: leave it ``None``.
     compact_snapshot: CompactSnapshot | None = None
+    #: Mid-chain pack marker — ChatFlow-layer sibling of
+    #: ``compact_snapshot``. When non-``None`` this ChatNode is the
+    #: user-initiated pack point for a contiguous range of ChatNodes
+    #: listed in ``pack_snapshot.packed_range``; ``agent_response.text``
+    #: holds the pack summary and downstream context builds substitute
+    #: the summary for the range (see
+    #: :func:`agentloom.engine.chatflow_engine._build_chat_context`).
+    #: Unlike compact which implicitly covers a root→leaf prefix, pack
+    #: covers an explicit mid-chain slice; pre-pack siblings / global
+    #: canvas views still see the range unchanged. A pack ChatNode
+    #: must not also carry ``compact_snapshot``.
+    pack_snapshot: PackSnapshot | None = None
     #: Forget-counter state for pre-compact ChatNodes the agent has
     #: pulled back via ``get_node_context``. Keys are source ChatNode
     #: ids; values are the remaining counter (n = memory capacity,
@@ -224,6 +236,19 @@ class ChatFlowNode(NodeBase):
     #: turn consumed. ``None`` while the turn is still running and on
     #: legacy nodes predating the field.
     output_response_tokens: int | None = None
+
+    @model_validator(mode="after")
+    def _validate_pack_compact_exclusive(self) -> "ChatFlowNode":
+        """A ChatNode is either a compact marker, a pack marker, or
+        neither — never both. The two snapshot types drive different
+        ancestor-walk substitutions (implicit root→leaf vs explicit
+        mid-range), and a node populating both would make
+        ``_build_chat_context`` ambiguous."""
+        if self.compact_snapshot is not None and self.pack_snapshot is not None:
+            raise ValueError(
+                "ChatFlowNode may carry compact_snapshot OR pack_snapshot, not both"
+            )
+        return self
 
 
 class ChatFlow(BaseModel):
