@@ -70,7 +70,7 @@
 | **WorkFlow** | 内层 DAG。节点是代表一个 agent 工作单元的 `WorkNode`。 |
 | **WorkNode** | 类型之一：`llm_call` / `tool_call` / `judge_call` / `sub_agent_delegation` / `compact` / `merge`。执行完后变为实线（冻结、不可变）。 |
 | **Planner** | 递归分解器。把一个 auto_plan 的 ChatNode 展开成 WorkFlow DAG，并在 judge_pre / judge_during / judge_post 各关卡上插入检查点。 |
-| **Blackboard** | 跨节点的结构化共享状态（missing_inputs / critiques / blockers / issues），judge 负责读写。 |
+| **MemoryBoard** | 每个 ChatNode / WorkNode 各自产出一条 brief（简要描述 + source_kind + 源节点 id），组成 ChatBoard / WorkBoard 两块可检索的看板，供 judge、compact、get_node_context 这类下游消费者按 id 召回原文。 |
 | **执行模式** | 每节点可选：`native_react`（单一 ReAct 循环）/ `semi_auto`（显式 plan 阶段，一次性执行）/ `auto_plan`（递归 planner + judge 驱动重试）。 |
 
 ---
@@ -115,6 +115,14 @@
 - [x] 结构化 citation + coverage 兜底：当 compact / merge LLM 忘了引用源
       节点 id 时，engine 会把未被引用的节点的原文尾巴截断后追加进去，保证
       下游上下文不会成为孤儿
+- [x] **MemoryBoard**：ChatBoard（ChatNode 级）+ WorkBoard（WorkNode 级）
+      两块 brief 看板；judge / compact / reader-skill 按 id 召回原文
+- [x] **粘滞遗忘（sticky-restore）**：`get_node_context` 命中会把源节点钉进
+      当前 ChatNode 的 `sticky_restored`，并沿对话链逐轮衰减；fork 后
+      独立衰减、merge 时取 MAX，下一轮 compact 不会再次把它压掉
+- [x] `inbound_context` 分段预览 API：ChatFlow 右栏把即将喂给 LLM 的上下文
+      按 summary_preamble / preserved / ancestor / sticky_restored / current_turn
+      分段展示，合成段与真实段视觉上区分开
 
 ### Provider + 工具
 - [x] OpenAI 兼容 provider（Volcengine / Ark / Ollama / OpenAI）
@@ -128,6 +136,8 @@
 ### UX
 - [x] React Flow canvas：sticky notes、compact 徽章、merge 徽章、等待用户
       高亮、active-work 面板
+- [x] 画布右下角 **MemoryBoard 浮窗**（ChatFlow / WorkFlow 通用）：列出当前
+      flow 的所有 brief，点击条目跳转到源节点
 - [x] ChatFlow 设置：执行模式、default / judge / tool-call / compact 模型、
       compact 阈值、ground-ratio 阈值
 
@@ -144,6 +154,25 @@
 - [x] SSE 事件总线：按 workflow 订阅 + 嵌套转发
 - [x] 分层 token-bucket 限流
 - [x] Pytest：后端 385+ 个单测 + 前端 55+ 个单测全绿
+
+---
+
+## 待开发
+
+下面这些是已经设计过、但还没动手（或只完成了 scaffolding）的方向：
+
+- [ ] **打包（pack）**——Layer-1 WorkNode kind，和 compress 对偶：把 WorkFlow /
+      ChatFlow 的产物打包成可交付件（文档、代码 patch、结构化报告），让一段
+      agent 活儿的产出不是"散落在若干 node 里"而是一件可复用资产。
+- [ ] **认知节点 ReAct DAG 展开**——planning / pre-check / monitoring /
+      post-check 这批"认知 WorkNode"统一支持 ReAct 式 DAG 展开（两端 cognitive，
+      中间 tool_call），跟 MCP runtime（M7.5）搭车。当前止血手段是在 planner
+      prompt 里注入 capability 白名单。
+- [ ] **Judge 深读 skill**——judge_post 没法按需拉取 sibling 全文。等 MCP /
+      skills 就绪后包成一个显式 skill，并处理好 tool_result 溢出时的回退路径。
+- [ ] **Engine 动作 = tool-use**——把 planner.decompose、judge verdict 这些
+      engine 自产动作统一改写成显式的 tool_call，让它们和用户工具/内置工具走同
+      一套 schema + 日志 + blackboard 写入路径。MCP runtime 落地之后再动。
 
 ---
 

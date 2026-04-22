@@ -81,7 +81,7 @@ Concretely, that means:
 | **WorkFlow** | The inner DAG. Nodes are `WorkNode`s representing a unit of agent work. |
 | **WorkNode** | One of `llm_call` / `tool_call` / `judge_call` / `sub_agent_delegation` / `compact` / `merge`. Solid once executed (frozen, immutable). |
 | **Planner** | A recursive decomposer that expands an auto-plan ChatNode into a WorkFlow DAG, with judge_pre / judge_during / judge_post checkpoints. |
-| **Blackboard** | Structured cross-node state (missing_inputs, critiques, blockers, issues) that judges read and write. |
+| **MemoryBoard** | Each ChatNode / WorkNode emits a brief (short description + source_kind + source node id), collected into the ChatBoard / WorkBoard. Downstream consumers (judge, compact, `get_node_context`) recall originals by id. |
 | **Execution mode** | Per-node selector: `native_react` (single ReAct loop) / `semi_auto` (explicit plan phase, one pass) / `auto_plan` (recursive planner with judge-driven retry). |
 
 ---
@@ -129,6 +129,18 @@ Concretely, that means:
 - [x] Structural citation + coverage fallback: when the compact/merge LLM
       forgets to cite source node IDs, the engine appends truncated raw
       tails for the uncited nodes so downstream context is never rootless
+- [x] **MemoryBoard**: ChatBoard (ChatNode-level) + WorkBoard
+      (WorkNode-level) brief indexes; judges, compact, and the reader
+      skill recall originals by id
+- [x] **Sticky-restore**: `get_node_context` hits pin the source node
+      into the current ChatNode's `sticky_restored`; the pin decays
+      per-turn down the chain, forks decay independently, merges take
+      the per-source MAX, and the next compact leaves it intact
+- [x] `inbound_context` segmented preview API: the ChatFlow right pane
+      renders the context that the LLM is about to see as
+      summary_preamble / preserved / ancestor / sticky_restored /
+      current_turn segments so synthetic and real turns are visually
+      distinct
 
 ### Providers + tools
 - [x] OpenAI-compatible providers (Volcengine / Ark / Ollama / OpenAI)
@@ -142,6 +154,9 @@ Concretely, that means:
 ### UX
 - [x] React Flow canvas with sticky notes, compact badges, merge badges,
       awaiting-user highlight, active-work panel
+- [x] **MemoryBoard floating panel** (bottom-right, shared across
+      ChatFlow / WorkFlow canvases): lists every brief in the current
+      flow; click an entry to jump the canvas to the source node
 - [x] ChatFlow settings: execution mode, default / judge / tool-call /
       compact models, compact triggers, ground-ratio thresholds
 
@@ -159,6 +174,31 @@ Concretely, that means:
 - [x] SSE event bus with per-workflow subscriptions + nested forwarding
 - [x] Hierarchical token-bucket rate limiting
 - [x] Pytest: 385+ backend tests + 55+ frontend tests passing
+
+---
+
+## In development
+
+Designed but not yet built (or only scaffolded):
+
+- [ ] **Pack** — a Layer-1 WorkNode kind dual to `compress`: bundles a
+      WorkFlow / ChatFlow's output into a deliverable artifact (document,
+      code patch, structured report) so an agent's work product is a
+      reusable asset rather than a scatter of nodes.
+- [ ] **Cognitive-node ReAct DAG expansion** — planning / pre-check /
+      monitoring / post-check WorkNodes will uniformly support ReAct-style
+      DAG expansion (cognitive endpoints with tool_calls between them),
+      riding with the MCP runtime (M7.5). The current stopgap is injecting
+      a capability whitelist into planner prompts.
+- [ ] **Judge deep-read skill** — `judge_post` cannot pull a sibling's
+      full text on demand today. Bundle this as an explicit skill once
+      MCP / skills land, and handle `tool_result` overflow fallback
+      cleanly.
+- [ ] **Engine actions as tool-use** — rewrite engine-produced actions
+      like `planner.decompose` and `judge.verdict` as explicit
+      `tool_call`s so they share the same schema / logging / blackboard
+      write path as user and built-in tools. Revisit after the MCP
+      runtime ships.
 
 ---
 
