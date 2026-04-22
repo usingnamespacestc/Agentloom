@@ -63,6 +63,81 @@
 
 ---
 
+## 整体架构 · 一个请求是如何被拆解的
+
+```mermaid
+flowchart TB
+  subgraph CF["<b>ChatFlow</b> · 对话即 DAG（用户看到的外层）"]
+    direction LR
+    U((User)) --> CN1[ChatNode A<br/>简单问答]
+    CN1 --> CN2[ChatNode B<br/>复杂任务<br/>auto_plan]
+    CN2 -. fork .-> CN2B[ChatNode B']
+    CN2 --> MG([merge ChatNode])
+    CN2B --> MG
+    MG --> CN3[ChatNode C]
+  end
+
+  CN2 -. ⤢ 钻入 .-> WF
+
+  subgraph WF["<b>内层 WorkFlow</b> · 动态计划 + 多级审核"]
+    direction TB
+    JPRE{{"judge_pre<br/>① 前置审核<br/>任务是否明确?"}} --> PL["planner<br/>② 分解为 worker DAG"]
+    PL --> PJ{{"plan_judge<br/>③ 计划审核<br/>分解是否合理?"}}
+    PJ --> W1["worker 1<br/>tool_call"]
+    PJ --> W2["worker 2<br/><b>sub_agent_delegation</b>"]
+    PJ --> W3["worker 3<br/>tool_call"]
+    W1 --> WJ1{{"worker_judge"}}
+    W2 --> WJ2{{"worker_judge"}}
+    W3 --> WJ3{{"worker_judge"}}
+    WJ1 --> JPOST{{"judge_post<br/>④ 产出审核<br/>目标是否达成?"}}
+    WJ2 --> JPOST
+    WJ3 --> JPOST
+    JPOST -- pass --> OUT([agent_response])
+    JPOST -. fail + redo_targets .-> PL
+  end
+
+  W2 -. <b>递归</b>展开 .-> SUB
+
+  subgraph SUB["<b>嵌套 WorkFlow</b> · 子 agent 委派（深度可任意叠加）"]
+    direction TB
+    SJP{{judge_pre}} --> SPL[planner]
+    SPL --> SW1[worker · tool_call]
+    SPL --> SW2[worker · tool_call]
+    SW1 --> SJP2{{judge_post}}
+    SW2 --> SJP2
+  end
+
+  classDef judge fill:#fef3c7,stroke:#f59e0b,color:#78350f;
+  classDef plan fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a;
+  classDef work fill:#ecfdf5,stroke:#10b981,color:#064e3b;
+  classDef delegate fill:#fce7f3,stroke:#ec4899,color:#831843;
+  class JPRE,JPOST,PJ,WJ1,WJ2,WJ3,SJP,SJP2 judge;
+  class PL,SPL plan;
+  class W1,W3,SW1,SW2 work;
+  class W2 delegate;
+```
+
+**读法**：
+
+1. **ChatFlow 层**承载用户视角的对话——简单问题一个 ChatNode 就够，复杂任务
+   的 ChatNode 被标为 `auto_plan`，钻进去就是它自己的 WorkFlow。分支 / 合流 /
+   压缩都在这一层发生。
+2. **WorkFlow 层**是 agent 内部解题的 DAG。从一个 ChatNode 出发，先过
+   **judge_pre** 确认任务明确、缺失的输入先要补齐；然后 **planner** 把任务拆
+   成若干 worker 组成的有向图；再过 **plan_judge** 审核这份分解是否合理。
+3. **并行执行**：计划通过后，所有同层 worker 一起跑——tool_call 直接做工具调
+   用，`sub_agent_delegation` 则递归展开成一张嵌套 WorkFlow（深度不限，每层
+   都有自己的 pre/plan/post 三级审核）。
+4. **收敛审核**：每个 worker 的产出都会被自己的 `worker_judge` 审一次，最后
+   由 **judge_post** 统一判决目标是否达成。不达成就根据 `redo_targets` 精确
+   重跑受影响的子树，而不是整个 workflow 重来。
+
+一条贯穿的原则——**所有 judge / planner / compact / merge 本身也都是
+WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核的 prompt、
+分解策略、重试判据都是用户可以直接审视并替换的 YAML 模板。
+
+---
+
 ## 核心概念
 
 | 概念 | 是什么 |

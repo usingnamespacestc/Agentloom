@@ -75,6 +75,89 @@ Concretely, that means:
 
 ---
 
+## Architecture · how a request decomposes
+
+```mermaid
+flowchart TB
+  subgraph CF["<b>ChatFlow</b> · conversation as a DAG (outer, user-facing)"]
+    direction LR
+    U((User)) --> CN1[ChatNode A<br/>simple Q&A]
+    CN1 --> CN2[ChatNode B<br/>complex task<br/>auto_plan]
+    CN2 -. fork .-> CN2B[ChatNode B']
+    CN2 --> MG([merge ChatNode])
+    CN2B --> MG
+    MG --> CN3[ChatNode C]
+  end
+
+  CN2 -. drill in ⤢ .-> WF
+
+  subgraph WF["<b>Inner WorkFlow</b> · dynamic planning + multi-stage judging"]
+    direction TB
+    JPRE{{"judge_pre<br/>① pre-check<br/>is the task well-formed?"}} --> PL["planner<br/>② decompose into worker DAG"]
+    PL --> PJ{{"plan_judge<br/>③ plan review<br/>is the decomposition sound?"}}
+    PJ --> W1["worker 1<br/>tool_call"]
+    PJ --> W2["worker 2<br/><b>sub_agent_delegation</b>"]
+    PJ --> W3["worker 3<br/>tool_call"]
+    W1 --> WJ1{{"worker_judge"}}
+    W2 --> WJ2{{"worker_judge"}}
+    W3 --> WJ3{{"worker_judge"}}
+    WJ1 --> JPOST{{"judge_post<br/>④ output review<br/>goal achieved?"}}
+    WJ2 --> JPOST
+    WJ3 --> JPOST
+    JPOST -- pass --> OUT([agent_response])
+    JPOST -. fail + redo_targets .-> PL
+  end
+
+  W2 -. <b>recurse</b> .-> SUB
+
+  subgraph SUB["<b>Nested WorkFlow</b> · sub-agent delegation (depth is unbounded)"]
+    direction TB
+    SJP{{judge_pre}} --> SPL[planner]
+    SPL --> SW1[worker · tool_call]
+    SPL --> SW2[worker · tool_call]
+    SW1 --> SJP2{{judge_post}}
+    SW2 --> SJP2
+  end
+
+  classDef judge fill:#fef3c7,stroke:#f59e0b,color:#78350f;
+  classDef plan fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a;
+  classDef work fill:#ecfdf5,stroke:#10b981,color:#064e3b;
+  classDef delegate fill:#fce7f3,stroke:#ec4899,color:#831843;
+  class JPRE,JPOST,PJ,WJ1,WJ2,WJ3,SJP,SJP2 judge;
+  class PL,SPL plan;
+  class W1,W3,SW1,SW2 work;
+  class W2 delegate;
+```
+
+**How to read it:**
+
+1. **ChatFlow layer** is the user-facing conversation. Simple questions fit
+   in a single ChatNode; complex tasks get an `auto_plan` ChatNode with its
+   own inner WorkFlow. Forks, merges, and compaction all happen at this
+   layer.
+2. **WorkFlow layer** is the agent's internal problem-solving DAG. From a
+   single ChatNode, **judge_pre** first checks that the task is
+   well-formed (and asks the user / fills in missing inputs if not). Then
+   **planner** decomposes it into a DAG of workers. **plan_judge** reviews
+   whether that decomposition is sound.
+3. **Parallel execution**: once the plan passes, sibling workers run
+   concurrently. `tool_call` workers hit tools directly;
+   `sub_agent_delegation` workers recursively spawn a nested WorkFlow —
+   depth is unbounded, and each level has its own pre / plan / post judge
+   trio.
+4. **Converging review**: each worker's output is first gated by its own
+   `worker_judge`, then **judge_post** renders the final verdict on
+   whether the original goal was met. Failure doesn't re-run the whole
+   workflow — `redo_targets` replays only the affected sub-tree.
+
+One principle ties it all together: **every judge, planner, compact, and
+merge is itself a WorkFlow fixture**, not engine-special logic. That means
+the prompts for the three-stage judge, the planner's decomposition
+strategy, and the retry criteria are all YAML templates the user can
+inspect and swap out.
+
+---
+
 ## Core concepts
 
 | Concept | What it is |
