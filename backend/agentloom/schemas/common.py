@@ -80,18 +80,6 @@ class StepKind(str, Enum):
     #: success and once at WorkFlow terminal time. The description is
     #: written to a ``BoardItem`` row. See MemoryBoard design 2026-04-20.
     BRIEF = "brief"
-    #: Custom mid-graph variant of :attr:`COMPRESS`. Compress always
-    #: runs root→leaf; pack targets an **arbitrary contiguous range**
-    #: ending at ``parent_ids[0]`` (the "last packed node") and
-    #: recorded in :class:`PackSnapshot.packed_range`. From the pack
-    #: node and every node downstream of it, ancestor walks hide the
-    #: packed range and substitute the pack summary; from pre-pack or
-    #: global-canvas views the range remains visible. Pack is
-    #: nestable: a member of ``packed_range`` may itself be a pack,
-    #: resolved recursively. ``delegate`` / ``sub_agent_delegation`` is
-    #: topologically a pack of its internal WorkNodes. See pack design
-    #: 2026-04-19.
-    PACK = "pack"
 
 
 class NodeScope(str, Enum):

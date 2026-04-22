@@ -25,7 +25,6 @@ from agentloom.schemas.chatflow import (
 from agentloom.schemas.provider import ModelInfo, ProviderConfig, ProviderKind
 from agentloom.schemas.workflow import (
     CompactSnapshot,
-    PackSnapshot,
     WireMessage,
     WorkFlow,
     WorkFlowNode,
@@ -46,7 +45,6 @@ __all__ = [
     "ModelInfo",
     "NodeId",
     "NodeStatus",
-    "PackSnapshot",
     "PendingTurn",
     "ProviderConfig",
     "ProviderKind",
