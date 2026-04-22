@@ -36,6 +36,13 @@ from agentloom.schemas.common import StepKind
 _CODE_FENCE_RE = re.compile(
     r"^\s*```(?:json|JSON)?\s*\n?(?P<body>.*?)\n?\s*```\s*$", re.DOTALL
 )
+# See judge_parser._strip_think_tags for the rationale; same regex pair.
+_THINK_PAIR_RE = re.compile(
+    r"<think\b[^>]*>.*?</think>\s*", re.DOTALL | re.IGNORECASE
+)
+_THINK_OPEN_RE = re.compile(
+    r"<think\b[^>]*>.*", re.DOTALL | re.IGNORECASE
+)
 
 
 class PlannerParseError(ValueError):
@@ -131,8 +138,15 @@ def _strip_code_fence(text: str) -> str:
     return m.group("body") if m else text
 
 
+def _strip_think_tags(text: str) -> str:
+    """See :func:`agentloom.engine.judge_parser._strip_think_tags`."""
+    text = _THINK_PAIR_RE.sub("", text)
+    text = _THINK_OPEN_RE.sub("", text)
+    return text
+
+
 def _extract_json_object(text: str) -> str:
-    stripped = _strip_code_fence(text.strip())
+    stripped = _strip_think_tags(_strip_code_fence(text.strip()))
     first = stripped.find("{")
     last = stripped.rfind("}")
     if first == -1 or last == -1 or last < first:

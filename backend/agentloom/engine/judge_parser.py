@@ -32,6 +32,22 @@ _CODE_FENCE_RE = re.compile(
     r"^\s*```(?:json|JSON)?\s*\n?(?P<body>.*?)\n?\s*```\s*$", re.DOTALL
 )
 
+#: Complete ``<think>...</think>`` pairs. Non-greedy so multiple think
+#: blocks don't collapse into one super-block. DOTALL because reasoning
+#: spans newlines. Case-insensitive because some llama.cpp reasoning
+#: builds emit ``<Think>`` or ``<THINK>``.
+_THINK_PAIR_RE = re.compile(
+    r"<think\b[^>]*>.*?</think>\s*", re.DOTALL | re.IGNORECASE
+)
+#: Orphan open tag with no matching close — happens when ``max_tokens``
+#: cuts the response off mid-thought. Everything from the open tag to
+#: end-of-string is dropped: the JSON never arrived anyway, and if some
+#: garbage follows the orphan ``<think>`` we don't want its braces
+#: fooling the first-``{``/last-``}`` extraction below.
+_THINK_OPEN_RE = re.compile(
+    r"<think\b[^>]*>.*", re.DOTALL | re.IGNORECASE
+)
+
 # JudgeVerdict fields whose Python type is a list. Models sometimes emit
 # ``"redo_targets": null`` (etc.) instead of ``[]``; pydantic rejects that
 # because the fields are typed ``list[...]``, not ``list[...] | None``.
@@ -61,11 +77,34 @@ def _strip_code_fence(text: str) -> str:
     return m.group("body") if m else text
 
 
+def _strip_think_tags(text: str) -> str:
+    """Remove reasoning-channel ``<think>...</think>`` blocks from
+    *text*. Two passes:
+
+    1. Strip every complete pair (non-greedy, so multiple blocks stay
+       separate).
+    2. Strip any orphan-open tag — ``<think>`` with no matching close,
+       which happens when the model's ``max_tokens`` cut the response
+       before the close tag or before the JSON arrived.
+
+    Protocol-level reasoning channels (Anthropic thinking blocks,
+    DeepSeek ``reasoning_content``, Volcengine ``thinking_content``)
+    are already pulled into ``message.extras["thinking"]`` by the
+    provider adapters, so this helper only fires on models that emit
+    inline ``<think>`` tags in the content field (many llama.cpp /
+    ggml-hosted reasoning models: Qwen3, R1-distill, GLM).
+    """
+    text = _THINK_PAIR_RE.sub("", text)
+    text = _THINK_OPEN_RE.sub("", text)
+    return text
+
+
 def _extract_json_object(text: str) -> str:
     """Best-effort: return the substring from the first '{' to the
     last '}' inclusive. Handles leading chit-chat like 'Here is the
-    verdict:\\n{...}'."""
-    stripped = _strip_code_fence(text.strip())
+    verdict:\\n{...}' and inline ``<think>...</think>`` reasoning tags
+    that some locally-served reasoning models emit before the JSON."""
+    stripped = _strip_think_tags(_strip_code_fence(text.strip()))
     first = stripped.find("{")
     last = stripped.rfind("}")
     if first == -1 or last == -1 or last < first:
