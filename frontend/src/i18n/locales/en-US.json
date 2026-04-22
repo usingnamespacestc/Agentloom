@@ -39,7 +39,14 @@
       "tool_call": "Tool call",
       "judge_call": "Judge",
       "delegate": "Sub-agent",
-      "brief": "Brief"
+      "brief": "Brief",
+      "compress": "Compress",
+      "merge": "Merge",
+      "pack": "Pack"
+    },
+    "pack": {
+      "packed_count": "Packs {{count}} node(s)",
+      "summary_label": "Summary"
     },
     "role": {
       "pre_judge": "pre-judge",

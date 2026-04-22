@@ -189,6 +189,22 @@ export interface ChatFlowStoreState {
   hoveredEdge: { parent: NodeId; child: NodeId } | null;
   setHoveredEdge: (edge: { parent: NodeId; child: NodeId } | null) => void;
 
+  /** Pack hover: the WorkNode ids that a currently-hovered pack covers.
+   * Driven by the pack card's ``onMouseEnter/Leave``; WorkFlowNodeCard
+   * subscribes and draws a highlight ring on members whose id is in
+   * this set. ``null`` = no pack is being hovered.
+   *
+   * Stored as an id list (not a Set) so shallow equality in Zustand's
+   * ``subscribeWithSelector`` works predictably — callers compute
+   * membership as ``hoveredPackRange?.includes(id) ?? false`` (ok for
+   * MVP range sizes; switch to Set or derived memo if ranges grow past
+   * a few dozen). */
+  hoveredPackRange: NodeId[] | null;
+  /** Id of the pack whose range is currently highlighted. ``null``
+   * clears both the id and the range. */
+  hoveredPackId: NodeId | null;
+  setHoveredPack: (packId: NodeId | null, range: NodeId[] | null) => void;
+
   /** Load a chatflow from the server and subscribe to its events. */
   loadChatFlow: (id: string) => Promise<void>;
   /** Manually inject a chatflow (used by tests and by a create handler
@@ -299,6 +315,7 @@ const INITIAL: Omit<
   | "moveChatFlowToFolder"
   | "patchChatFlow"
   | "setHoveredEdge"
+  | "setHoveredPack"
   | "loadChatFlow"
   | "setChatFlow"
   | "selectNode"
@@ -345,6 +362,8 @@ const INITIAL: Omit<
   viewMode: "chatflow",
   rightPanelWidth: RIGHT_PANEL_DEFAULT,
   hoveredEdge: null,
+  hoveredPackRange: null,
+  hoveredPackId: null,
   sseSubscription: null,
   sseFactory: null,
   streamingDeltas: {},
@@ -557,6 +576,10 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
 
   setHoveredEdge(edge) {
     set({ hoveredEdge: edge });
+  },
+
+  setHoveredPack(packId, range) {
+    set({ hoveredPackId: packId, hoveredPackRange: range });
   },
 
   async patchChatFlow(patch) {

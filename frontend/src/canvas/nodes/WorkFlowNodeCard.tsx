@@ -36,6 +36,8 @@ const KIND_ACCENT: Record<string, string> = {
   judge_call: "border-amber-300 bg-amber-50",
   delegate: "border-violet-300 bg-violet-50",
   brief: "border-sky-200 bg-white",
+  compress: "border-teal-300 bg-teal-50",
+  pack: "border-rose-300 bg-rose-50",
 };
 
 function truncate(text: string, n = 140): string {
@@ -48,6 +50,7 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
   const { node, isSelected, isRoot, isLeaf, maxContextTokens } =
     data as WorkFlowNodeData;
   const isBrief = node.step_kind === "brief";
+  const isPack = node.step_kind === "pack";
   // Role-based styling takes precedence over step_kind — see roleStyles.ts.
   // Legacy (direct-mode) nodes have role === null and fall back to the
   // original step_kind accent so the MVP look is preserved.
@@ -57,10 +60,33 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
     KIND_ACCENT[node.step_kind] ??
     "border border-gray-300 bg-white";
 
+  // Pack hover wiring: pack cards drive the hover state; member cards
+  // consume it and draw a rose halo. The lookup is a plain
+  // ``includes`` — fine for MVP range sizes.
+  const setHoveredPack = useChatFlowStore((s) => s.setHoveredPack);
+  const hoveredPackRange = useChatFlowStore((s) => s.hoveredPackRange);
+  const hoveredPackId = useChatFlowStore((s) => s.hoveredPackId);
+  const isPackMemberHighlighted =
+    !isPack &&
+    hoveredPackRange !== null &&
+    hoveredPackRange.includes(node.id);
+  const isHoveredPackSelf = isPack && hoveredPackId === node.id;
+
+  const packHandlers =
+    isPack && node.pack_snapshot
+      ? {
+          onMouseEnter: () =>
+            setHoveredPack(node.id, node.pack_snapshot!.packed_range),
+          onMouseLeave: () => setHoveredPack(null, null),
+        }
+      : {};
+
   return (
     <div
       data-testid={`workflow-node-${node.id}`}
       data-role={node.role ?? "none"}
+      data-pack-member={isPackMemberHighlighted ? "true" : undefined}
+      {...packHandlers}
       className={[
         "relative rounded-md w-52 p-2 text-[11px] shadow-sm",
         // When there's no roleStyle, the legacy KIND_ACCENT string only
@@ -68,6 +94,12 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
         roleStyle ? "" : "border",
         accent,
         isSelected ? "ring-2 ring-blue-300" : "",
+        // Hover ring on pack members — distinct from selection so a
+        // user can keep their selected node while hovering a pack to
+        // peek at its range. Overlapping packs don't fight: hover
+        // whichever pack you want, its members light up.
+        isPackMemberHighlighted ? "ring-2 ring-rose-400" : "",
+        isHoveredPackSelf ? "ring-2 ring-rose-500" : "",
       ].join(" ")}
     >
       {!isRoot && !isBrief && (
@@ -102,6 +134,7 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
         <SubAgentDelegationBody node={node} />
       )}
       {node.step_kind === "brief" && <BriefBody node={node} />}
+      {node.step_kind === "pack" && <PackBody node={node} />}
 
       <NodeIdLine nodeId={node.id} />
 
@@ -362,6 +395,41 @@ function BriefBody({ node }: { node: WorkFlowNode }) {
       title={text}
     >
       {expanded ? text : truncate(text, 140)}
+    </div>
+  );
+}
+
+function PackBody({ node }: { node: WorkFlowNode }) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const snap = node.pack_snapshot;
+  if (!snap) {
+    return <div className="italic text-gray-400">—</div>;
+  }
+  const count = snap.packed_range.length;
+  const summary = snap.summary.trim();
+  return (
+    <div
+      data-testid={`pack-body-${node.id}`}
+      className="select-none text-[10px] leading-snug text-gray-700"
+    >
+      <div className="mb-1 text-[10px] font-medium text-rose-700">
+        {t("node.pack.packed_count", { count })}
+      </div>
+      {summary ? (
+        <div
+          className="cursor-pointer break-words"
+          onClick={(e) => {
+            e.stopPropagation();
+            setExpanded((v) => !v);
+          }}
+          title={summary}
+        >
+          {expanded ? summary : truncate(summary, 140)}
+        </div>
+      ) : (
+        <div className="italic text-gray-400">—</div>
+      )}
     </div>
   );
 }

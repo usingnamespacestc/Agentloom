@@ -32,6 +32,7 @@ export const STEP_KINDS = [
   "compress",
   "merge",
   "brief",
+  "pack",
 ] as const;
 
 export type StepKind = (typeof STEP_KINDS)[number];
@@ -199,6 +200,9 @@ export interface WorkFlowNode extends NodeBaseFields {
 
   // compress (Tier 1)
   compact_snapshot?: CompactSnapshot | null;
+
+  // pack (user-initiated mid-graph range summary)
+  pack_snapshot?: PackSnapshot | null;
 }
 
 export interface StickyNote {
@@ -269,6 +273,22 @@ export interface CompactSnapshot {
   summary: string;
   preserved_messages: WireMessage[];
   preserved_before_summary: boolean;
+}
+
+/**
+ * Mirror of ``agentloom.schemas.workflow.PackSnapshot``.
+ * Populated on WorkFlowNodes with ``step_kind="pack"``. Unlike
+ * ``CompactSnapshot`` (which implicitly covers the root→leaf prefix),
+ * ``PackSnapshot.packed_range`` carries the explicit contiguous range
+ * of WorkNode ids the pack summarizes. The pack node's parent is
+ * ``packed_range[-1]`` (the last packed node).
+ */
+export interface PackSnapshot {
+  summary: string;
+  packed_range: NodeId[];
+  use_detailed_index: boolean;
+  preserve_last_n: number;
+  preserved_messages: WireMessage[];
 }
 
 /**
