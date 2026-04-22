@@ -2931,6 +2931,13 @@ class ChatFlowEngine:
             # parent's list means a first-round planner already sees the
             # right slice without waiting for the sub's judge_pre verdict.
             capabilities=list(parent.capabilities),
+            # Delegation depth fuse: each sub-WorkFlow is one level
+            # deeper than the planner that spawned it. When it hits
+            # the budget, ``_after_planner_judge`` forces any further
+            # ``decompose`` plan into an atomic worker so the tree
+            # can't keep fanning out.
+            delegation_depth=parent.delegation_depth + 1,
+            delegation_depth_budget=parent.delegation_depth_budget,
         )
         # Feed the planner-authored task description to judge_pre as the
         # conversation it distills the trio from — mirrors the top-level
@@ -3386,14 +3393,46 @@ class ChatFlowEngine:
 
         # Continue + decompose: spawn one sub_agent_delegation per
         # subtask, wired by the ``after`` graph. Each runs its own
-        # AUTO-mode sub-WorkFlow recursively (no depth cap by design).
-        # Aggregation happens in ``_after_delegation`` once all siblings
-        # in the decompose group complete.
+        # AUTO-mode sub-WorkFlow recursively. Depth-fused: a WorkFlow
+        # at or beyond ``delegation_depth_budget`` forces any further
+        # ``decompose`` plan into an atomic draft so the tree can't
+        # keep fanning out (the integration-test incident 2026-04-22
+        # had 62 nodes 3 tool_calls from one "DeepWiki + Cloudflare"
+        # prompt). Aggregation at the layer above still happens in
+        # ``_after_delegation`` once all siblings complete.
         if (
             decision == "continue"
             and plan.mode == "decompose"
             and plan.subtasks is not None
         ):
+            if workflow.delegation_depth >= workflow.delegation_depth_budget:
+                log.info(
+                    "delegation-depth fuse: workflow=%s depth=%d budget=%d — "
+                    "forcing decompose plan into atomic draft",
+                    workflow.id,
+                    workflow.delegation_depth,
+                    workflow.delegation_depth_budget,
+                )
+                atomic_brief = AtomicBrief(
+                    step_kind=StepKind.DRAFT,
+                    description=(
+                        "Handle the remaining task directly in a single "
+                        "draft — delegation depth cap reached, no further "
+                        "decomposition allowed."
+                    ),
+                    expected_outcome=(
+                        "Concrete, user-ready response to the original "
+                        "task description, synthesized without spawning "
+                        "additional sub-workflows."
+                    ),
+                )
+                self._spawn_worker(
+                    workflow,
+                    planner_judge_node,
+                    atomic_brief,
+                    resolved_model=resolved_model,
+                )
+                return
             self._spawn_decompose_delegations(workflow, planner_judge_node, plan)
             return
 

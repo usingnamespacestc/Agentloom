@@ -371,6 +371,21 @@ class WorkFlow(BaseModel):
     #: lives at the ChatFlow layer, never inside a WorkFlow (§3.5).
     pending_user_prompt: str | None = None
 
+    #: Auto-mode recursion depth. 0 = outermost ChatNode-level WorkFlow;
+    #: each ``sub_agent_delegation`` sub-WorkFlow is depth+1. The
+    #: planner-judge pipeline uses this as a fuse: when depth hits
+    #: ``MAX_DELEGATION_DEPTH`` (set on WorkFlow.delegation_depth_budget)
+    #: a ``decompose`` plan is forced into ``atomic`` so the sub never
+    #: fans out another layer of delegates. Added 2026-04-22 after
+    #: integration tests showed auto_plan decomposing 62+ node trees
+    #: on mildly-multipart prompts.
+    delegation_depth: int = 0
+    #: Maximum recursive planner delegation depth. Hitting this cap
+    #: degrades the plan to atomic so the worker runs directly. Keep
+    #: small — one layer of fan-out is usually enough for multi-part
+    #: prompts; deeper trees are almost always over-decomposition.
+    delegation_depth_budget: int = 2
+
     sticky_notes: dict[str, StickyNote] = Field(default_factory=dict)
 
     @property
