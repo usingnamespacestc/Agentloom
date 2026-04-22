@@ -50,6 +50,7 @@ from agentloom.providers.types import (
 )
 from agentloom.providers.types import ToolUse as ProviderToolUse
 from agentloom.schemas import WorkFlow, WorkFlowNode
+from agentloom.schemas.chatflow import CompactPreserveMode
 from agentloom.schemas.common import (
     EditableText,
     EditProvenance,
@@ -144,7 +145,10 @@ DEFAULT_COMPACT_TARGET_PCT = 0.5
 #: Default number of trailing messages kept verbatim on the downstream
 #: side of a compact. Smaller = more aggressive compaction, larger =
 #: more fidelity. Chatflow settings will override per-flow in step 5.
-DEFAULT_PRESERVE_RECENT_TURNS = 3
+DEFAULT_COMPACT_KEEP_RECENT_COUNT = 3
+#: Default strategy for deciding the verbatim tail. ``by_count`` matches
+#: the original engine behavior (N-based preserve, summary capped).
+DEFAULT_COMPACT_PRESERVE_MODE: CompactPreserveMode = "by_count"
 #: Fallback context window (in tokens) used when the model's actual
 #: ``context_window`` is unknown. Matches the frontend's
 #: ``DEFAULT_MAX_CONTEXT_TOKENS`` so UI bar and engine threshold agree.
@@ -253,6 +257,29 @@ def _truncate_text_to_tokens(text: str, max_tokens: int) -> str:
     if len(ids) <= max_tokens:
         return text
     return enc.decode(ids[:max_tokens])
+
+
+def _greedy_pack_tail_within_budget(
+    messages: list[Message], budget_tokens: int
+) -> list[Message]:
+    """Pick the longest suffix of *messages* that fits in *budget_tokens*.
+
+    Walks the list from the newest side back: admits each message if
+    adding it still fits; stops at the first overflow (cannot skip a
+    middle message — that would leave a conversational hole). Returns
+    the kept messages in original (chronological) order.
+    """
+    if budget_tokens <= 0 or not messages:
+        return []
+    remaining = budget_tokens
+    packed_reversed: list[Message] = []
+    for msg in reversed(messages):
+        msg_tokens = _estimate_tokens_from_provider_messages([msg])
+        if msg_tokens > remaining:
+            break
+        packed_reversed.append(msg)
+        remaining -= msg_tokens
+    return list(reversed(packed_reversed))
 
 
 _COMPACT_FIXTURE_CACHE: dict[str, tuple[dict[str, Any], dict[str, str]]] = {}
@@ -560,7 +587,8 @@ class WorkflowEngine:
         context_window_lookup: ContextWindowLookup | None = None,
         compact_trigger_pct: float = DEFAULT_COMPACT_TRIGGER_PCT,
         compact_target_pct: float = DEFAULT_COMPACT_TARGET_PCT,
-        compact_preserve_recent_turns: int = DEFAULT_PRESERVE_RECENT_TURNS,
+        compact_keep_recent_count: int = DEFAULT_COMPACT_KEEP_RECENT_COUNT,
+        compact_preserve_mode: CompactPreserveMode = DEFAULT_COMPACT_PRESERVE_MODE,
         compact_model: ProviderModelRef | None = None,
         board_writer: BoardWriter | None = None,
         board_reader: BoardReader | None = None,
@@ -589,7 +617,8 @@ class WorkflowEngine:
         #: via the ChatFlowEngine wiring at construction time.
         self._compact_trigger_pct = compact_trigger_pct
         self._compact_target_pct = compact_target_pct
-        self._compact_preserve_recent_turns = compact_preserve_recent_turns
+        self._compact_keep_recent_count = compact_keep_recent_count
+        self._compact_preserve_mode: CompactPreserveMode = compact_preserve_mode
         self._compact_model = compact_model
         #: Per-``execute()`` filter — tool names hidden from the LLM and
         #: refused if invoked. Populated from the chatflow's
@@ -623,7 +652,8 @@ class WorkflowEngine:
         #: against a single shared engine instance.
         self._effective_compact_trigger_pct: float | None = compact_trigger_pct
         self._effective_compact_target_pct: float = compact_target_pct
-        self._effective_compact_preserve_recent_turns: int = compact_preserve_recent_turns
+        self._effective_compact_keep_recent_count: int = compact_keep_recent_count
+        self._effective_compact_preserve_mode: CompactPreserveMode = compact_preserve_mode
         self._effective_compact_model: ProviderModelRef | None = compact_model
 
     async def execute(
@@ -636,7 +666,8 @@ class WorkflowEngine:
         chatflow_ground_ratio_grace_nodes: int | object = _UNSET,
         chatflow_compact_trigger_pct: float | None | object = _UNSET,
         chatflow_compact_target_pct: float | object = _UNSET,
-        chatflow_compact_preserve_recent_turns: int | object = _UNSET,
+        chatflow_compact_keep_recent_count: int | object = _UNSET,
+        chatflow_compact_preserve_mode: CompactPreserveMode | object = _UNSET,
         chatflow_compact_model: ProviderModelRef | None | object = _UNSET,
         chatflow_id: str | None = None,
         post_node_hook: PostNodeHook | None = None,
@@ -685,10 +716,14 @@ class WorkflowEngine:
             self._effective_compact_target_pct = chatflow_compact_target_pct  # type: ignore[assignment]
         else:
             self._effective_compact_target_pct = self._compact_target_pct
-        if chatflow_compact_preserve_recent_turns is not _UNSET:
-            self._effective_compact_preserve_recent_turns = chatflow_compact_preserve_recent_turns  # type: ignore[assignment]
+        if chatflow_compact_keep_recent_count is not _UNSET:
+            self._effective_compact_keep_recent_count = chatflow_compact_keep_recent_count  # type: ignore[assignment]
         else:
-            self._effective_compact_preserve_recent_turns = self._compact_preserve_recent_turns
+            self._effective_compact_keep_recent_count = self._compact_keep_recent_count
+        if chatflow_compact_preserve_mode is not _UNSET:
+            self._effective_compact_preserve_mode = chatflow_compact_preserve_mode  # type: ignore[assignment]
+        else:
+            self._effective_compact_preserve_mode = self._compact_preserve_mode
         if chatflow_compact_model is not _UNSET:
             self._effective_compact_model = chatflow_compact_model  # type: ignore[assignment]
         else:
@@ -968,8 +1003,31 @@ class WorkflowEngine:
         # decides whether to spawn judge_post or an llm_call follow-up).
         # The hook also fires for FAILED nodes so post_judge crashes can
         # be retried — the hook itself filters which kinds it acts on.
+        #
+        # Wrapped in try/except because the hook runs arbitrary chat-layer
+        # code (spawning planner/worker/judge nodes). A raise here would
+        # otherwise bubble up through ``asyncio.gather`` and cancel every
+        # sibling in the same batch, leaving the WorkFlow half-built and
+        # the chat layer reporting the opaque "no terminal llm_call".
+        # The hook has already logged enough to diagnose; swallowing it
+        # here lets the driver loop see the next topological pass, where
+        # the defensive fallthrough guards (e.g. planner_judge's
+        # nodes_before check) fire a halt_to_post_judge so the user gets
+        # a real error instead of a stalled WorkFlow.
         if self._post_node_hook is not None:
-            self._post_node_hook(workflow, node)
+            try:
+                self._post_node_hook(workflow, node)
+            except Exception:  # noqa: BLE001 — engine boundary
+                log.exception(
+                    "post_node_hook crashed on workflow=%s node=%s "
+                    "(step_kind=%s role=%s judge_variant=%s status=%s)",
+                    workflow.id,
+                    node.id,
+                    node.step_kind.value if node.step_kind else None,
+                    node.role.value if node.role else None,
+                    node.judge_variant.value if node.judge_variant else None,
+                    node.status.value if node.status else None,
+                )
 
     async def _invoke_and_freeze(
         self,
@@ -1154,7 +1212,7 @@ class WorkflowEngine:
         """Splice a COMPACT WorkNode in front of *node* and re-parent
         *node* onto it.
 
-        - Carves off the last ``compact_preserve_recent_turns`` provider
+        - Carves off the last ``compact_keep_recent_count`` provider
           messages as verbatim tail.
         - Serializes the remaining head into the compact worker's
           ``messages_to_compact`` param.
@@ -1171,7 +1229,15 @@ class WorkflowEngine:
         from agentloom.templates.instantiate import instantiate_fixture
 
         tagged = _build_tagged_context_from_ancestors(workflow, node)
-        keep = max(0, min(len(tagged), self._effective_compact_preserve_recent_turns))
+        # by_budget: summary first, tail is packed post-hoc in _run_compact,
+        # so feed the full ancestry to the summarizer (keep=0).
+        if self._effective_compact_preserve_mode == "by_budget":
+            keep = 0
+        else:
+            keep = max(
+                0,
+                min(len(tagged), self._effective_compact_keep_recent_count),
+            )
         head_tagged = tagged[:-keep] if keep else tagged
         tail = [m for _, m in tagged[-keep:]] if keep else []
         head_serialized = _render_messages_to_compact(head_tagged)
@@ -1250,27 +1316,52 @@ class WorkflowEngine:
             raise RuntimeError(
                 f"compact node {node.id} missing pre-populated snapshot"
             )
-        # Hard-cap the summary to the requested target_tokens. Without
-        # this, a chatty summarizer can return a summary larger than
-        # target, which breaks the ``trigger_pct + target_pct ≤ 1.0``
-        # invariant (post-compact context could then exceed the model's
-        # window). Truncation is lossy but strictly safer than letting
-        # the next turn blow past the wire budget.
+        # Summary handling splits by preserve-mode:
+        # - by_count: target_pct is advisory on the preserve side; the
+        #   LLM's summary is kept as-is (N tail messages already carved
+        #   off at insert time). No hard cap — the invariant relies on
+        #   the fixed-N tail, not on a summary bound.
+        # - by_budget: target_pct is the *total* budget for the compact
+        #   region. We greedy-pack the tail from ancestors into whatever
+        #   is left after the summary's tokens. We still hard-cap the
+        #   summary itself at target × ctx as a safety net: if the
+        #   summarizer runs long, overflow reads as "no tail preserved"
+        #   which is already a degenerate case; letting the summary
+        #   itself blow past the window would strand the next turn.
         ctx = self._context_window_for(node.resolved_model or node.model_override)
-        target_tokens = max(256, int(ctx * self._effective_compact_target_pct))
+        mode = self._effective_compact_preserve_mode
         summary_tokens = _count_text_tokens(summary)
-        if summary_tokens > target_tokens:
-            log.warning(
-                "compact summary exceeds target: node=%s summary_tokens=%d "
-                "target_tokens=%d — truncating",
-                node.id,
-                summary_tokens,
-                target_tokens,
+        if mode == "by_budget":
+            target_tokens = max(256, int(ctx * self._effective_compact_target_pct))
+            if summary_tokens > target_tokens:
+                log.warning(
+                    "compact summary exceeds target: node=%s summary_tokens=%d "
+                    "target_tokens=%d — truncating",
+                    node.id,
+                    summary_tokens,
+                    target_tokens,
+                )
+                summary = _truncate_text_to_tokens(summary, target_tokens)
+                summary_tokens = _count_text_tokens(summary)
+            # Greedy knapsack from the tail: we want the *newest*
+            # messages, so iterate the ancestor chain in reverse and
+            # admit each as long as cumulative tokens fit in the
+            # remaining budget. Ancestor chain is re-derived from the
+            # compact node (its own parent_ids still hold the original
+            # chain — insertion re-parented the downstream node onto
+            # us, not us onto anyone new).
+            tagged = _build_tagged_context_from_ancestors(workflow, node)
+            packed = _greedy_pack_tail_within_budget(
+                [msg for _, msg in tagged], target_tokens - summary_tokens
             )
-            summary = _truncate_text_to_tokens(summary, target_tokens)
-        node.compact_snapshot = node.compact_snapshot.model_copy(
-            update={"summary": summary}
-        )
+            preserved_wire = _provider_to_wire(packed)
+            node.compact_snapshot = node.compact_snapshot.model_copy(
+                update={"summary": summary, "preserved_messages": preserved_wire}
+            )
+        else:
+            node.compact_snapshot = node.compact_snapshot.model_copy(
+                update={"summary": summary}
+            )
         # PR 4.2.a: the compact's summary IS a MemoryBoard brief — write
         # the board_item directly instead of spawning a secondary BRIEF
         # WorkNode to summarize the summary.
@@ -1578,7 +1669,7 @@ class WorkflowEngine:
             context_window_lookup=self._context_window_lookup,
             compact_trigger_pct=self._effective_compact_trigger_pct,
             compact_target_pct=self._effective_compact_target_pct,
-            compact_preserve_recent_turns=self._effective_compact_preserve_recent_turns,
+            compact_keep_recent_count=self._effective_compact_keep_recent_count,
             compact_model=self._effective_compact_model,
             board_writer=self._board_writer,
             board_reader=self._board_reader,

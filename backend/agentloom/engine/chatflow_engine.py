@@ -60,7 +60,7 @@ from agentloom.engine.workflow_engine import (
     DEFAULT_COMPACT_TARGET_PCT,
     DEFAULT_COMPACT_TRIGGER_PCT,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
-    DEFAULT_PRESERVE_RECENT_TURNS,
+    DEFAULT_COMPACT_KEEP_RECENT_COUNT,
     PostNodeHook,
     ProviderCall,
     WorkflowEngine,
@@ -77,7 +77,11 @@ from agentloom.schemas import (
     WorkFlow,
     WorkFlowNode,
 )
-from agentloom.schemas.chatflow import PendingTurnSource, UpstreamFailurePolicy
+from agentloom.schemas.chatflow import (
+    CompactPreserveMode,
+    PendingTurnSource,
+    UpstreamFailurePolicy,
+)
 from agentloom.schemas.common import (
     EditableText,
     ExecutionMode,
@@ -519,11 +523,15 @@ class ChatFlowEngine:
     def get_runtime(self, chatflow_id: str) -> ChatFlowRuntime | None:
         return self._runtimes.get(chatflow_id)
 
-    async def detach(self, chatflow_id: str) -> None:
+    async def detach(self, chatflow_id: str, *, cancel: bool = False) -> None:
         async with self._registry_lock:
             runtime = self._runtimes.pop(chatflow_id, None)
-        if runtime is not None:
-            await runtime.drain()
+        if runtime is None:
+            return
+        if cancel:
+            for t in list(runtime.active_tasks):
+                t.cancel()
+        await runtime.drain()
 
     # ------------------------------------------------------------------ turn submission
 
@@ -686,12 +694,131 @@ class ChatFlowEngine:
             await self._publish_queue_updated(runtime, node_id)
         await self._save(runtime)
 
+    async def _await_ancestor_briefs(
+        self, chatflow: ChatFlow, primary_parent_id: str
+    ) -> None:
+        """Strict gate: every ancestor ChatNode above ``primary_parent_id``
+        on the primary-parent chain must have its scope='chat'
+        ChatBoardItem row committed before compaction proceeds.
+
+        Skips ``primary_parent_id`` itself — the preserved tail keeps
+        that turn verbatim, so its board brief isn't load-bearing for
+        the summary. Every node older than that has its content folded
+        into the summary preamble; a missing brief there means the
+        summarizer would skip over a node whose chat-board description
+        should have fed into downstream retrieval, which hurts recall
+        more than a visible failure does.
+
+        Raises ``ValueError`` the moment an ancestor is found without a
+        scope='chat' BoardItemRow. No poll/retry — the brief writer
+        runs under the runtime lock today, so a missing row indicates
+        the writer genuinely failed, not a race; surfacing that is the
+        point.
+
+        No-ops silently when the engine was constructed without a
+        ``tool_context`` (unit-test engines). That setup never writes
+        real brief rows to the DB — the closure still exists but its
+        FK target isn't there — so gating on them would break every
+        compact-path test that didn't stand up a full tenancy.
+        """
+        if self._tool_ctx is None:
+            return
+        # Walk strictly older than primary_parent_id (skip it).
+        primary = chatflow.nodes.get(primary_parent_id)
+        if primary is None or not primary.parent_ids:
+            return
+        missing: list[str] = []
+        current: str | None = primary.parent_ids[0]
+        from agentloom.db.base import get_session_maker
+        from agentloom.db.models.tenancy import DEFAULT_WORKSPACE_ID
+        from agentloom.db.repositories.board_item import BoardItemRepository
+
+        workspace_id = (
+            self._tool_ctx.workspace_id
+            if self._tool_ctx is not None
+            else DEFAULT_WORKSPACE_ID
+        )
+        async with get_session_maker()() as session:
+            repo = BoardItemRepository(session, workspace_id=workspace_id)
+            while current is not None:
+                node = chatflow.nodes.get(current)
+                if node is None:
+                    break
+                # Greeting root and compact ChatNodes whose inner brief
+                # writer path didn't run are the two skip cases. The
+                # greeting root is pre-seeded by ``make_chatflow`` and
+                # never goes through ``_execute_node``, so no brief
+                # exists — identify it by a missing ``user_message``
+                # (real turns always carry one). Compact nodes do run
+                # the brief writer, so they're included.
+                if node.user_message is None and node.compact_snapshot is None:
+                    if len(node.parent_ids) >= 2:
+                        break
+                    current = node.parent_ids[0] if node.parent_ids else None
+                    continue
+                row = await repo.get_by_source(current)
+                if row is None or row.scope != "chat":
+                    missing.append(current)
+                # Merge stop: same rule as ``_build_chat_context``.
+                if len(node.parent_ids) >= 2:
+                    break
+                current = node.parent_ids[0] if node.parent_ids else None
+        if missing:
+            raise ValueError(
+                "compact blocked — missing scope='chat' ChatBoardItem for "
+                f"ancestor(s) {missing!r} of primary parent {primary_parent_id!r}. "
+                "Wait for the brief writer to commit before retrying compaction."
+            )
+
+    async def _fetch_chat_board_descriptions(
+        self, chatflow_id: str
+    ) -> dict[str, str]:
+        """Return ``{source_node_id: description}`` for every scope='chat'
+        BoardItemRow in the given ChatFlow.
+
+        Used by the runtime context builder to embed a per-ancestor
+        ChatBoardItem recap in the compact summary preamble (see
+        ``_build_chat_context`` for the embedding rules). Returns an
+        empty dict when the engine has no ``tool_context`` (unit-test
+        engines — no tenancy available) or when the DB round-trip
+        fails. CBI embedding is best-effort so a repo hiccup doesn't
+        prevent the turn from running.
+        """
+        if self._tool_ctx is None:
+            return {}
+        from agentloom.db.base import get_session_maker
+        from agentloom.db.models.tenancy import DEFAULT_WORKSPACE_ID
+        from agentloom.db.repositories.board_item import BoardItemRepository
+
+        workspace_id = (
+            self._tool_ctx.workspace_id
+            if self._tool_ctx is not None
+            else DEFAULT_WORKSPACE_ID
+        )
+        try:
+            async with get_session_maker()() as session:
+                repo = BoardItemRepository(session, workspace_id=workspace_id)
+                rows = await repo.list_by_chatflow(chatflow_id)
+        except Exception:  # noqa: BLE001 — CBI lookup is best-effort
+            log.exception(
+                "CBI fetch failed for chatflow=%s — compact preamble will "
+                "fall back to the bare summary",
+                chatflow_id,
+            )
+            return {}
+        return {
+            row.source_node_id: row.description
+            for row in rows
+            if row.scope == "chat"
+        }
+
     def _build_compact_chatnode(
         self,
         chatflow: ChatFlow,
         *,
         parent_id: str,
         preserve_recent_turns: int,
+        preserve_mode: CompactPreserveMode,
         target_tokens: int | None,
         model: ProviderModelRef | None,
         compact_instruction: str | None,
@@ -737,11 +864,28 @@ class ChatFlowEngine:
                 break
             current = node.parent_ids[0] if node.parent_ids else None
 
-        keep = max(0, min(len(tagged_full_real), preserve_recent_turns))
-        head_tagged = tagged_full_real[:-keep] if keep else tagged_full_real
-        tail_wire = (
-            [m for _, m in tagged_full_real[-keep:]] if keep else []
-        )
+        # by_budget defers tail selection to after the summary is known
+        # (the finalizer in ``_finalize_compact_chatnode_snapshot`` does
+        # the greedy pack). At build time we feed the entire chain to the
+        # summarizer (keep=0) and leave preserved_messages empty on the
+        # snapshot.
+        #
+        # Preservation granularity is a ChatNode (one conversational
+        # turn = user_message + agent_response + any tool-use traffic).
+        # We group the flat tagged stream into per-node groups and keep
+        # the last N groups intact — never split a turn across the
+        # summary/preserved boundary.
+        groups_full = _group_tagged_by_chatnode(tagged_full_real)
+        if preserve_mode == "by_budget":
+            keep_groups = 0
+        else:
+            keep_groups = max(0, min(len(groups_full), preserve_recent_turns))
+        head_groups = groups_full[:-keep_groups] if keep_groups else groups_full
+        tail_groups = groups_full[-keep_groups:] if keep_groups else []
+        head_tagged = [
+            (nid, m) for nid, msgs in head_groups for m in msgs
+        ]
+        tail_wire = [m for _, msgs in tail_groups for m in msgs]
         head_wire = [m for _, m in head_tagged]
         full_real_wire = [m for _, m in tagged_full_real]
 
@@ -807,6 +951,67 @@ class ChatFlowEngine:
             ),
         )
 
+    def _finalize_compact_chatnode_snapshot(
+        self,
+        chatflow: ChatFlow,
+        compact_node: ChatFlowNode,
+        summary: str,
+        resolved_for_cap: ProviderModelRef | None,
+    ) -> str:
+        """Apply the ``chatnode_compact_target_pct`` cap + fill in the
+        preserved-tail per ``compact_preserve_mode``. Mutates
+        ``compact_node.compact_snapshot`` and returns the (possibly
+        truncated) summary so the caller can also stash it on
+        ``agent_response``.
+
+        - ``by_count``: the verbatim tail was already baked onto the
+          snapshot at build time; this pass only touches the summary.
+        - ``by_budget``: summary is safety-capped, then tail messages
+          are greedy-packed from the pre-compact chain into whatever
+          token budget is left under ``target_pct × context_window``.
+        """
+        from agentloom.engine.workflow_engine import _truncate_text_to_tokens
+
+        ctx_for_cap = self._inner._context_window_for(resolved_for_cap)
+        target_cap = max(
+            256, int(ctx_for_cap * chatflow.chatnode_compact_target_pct)
+        )
+        summary_tokens = _count_text_tokens(summary)
+        if summary_tokens > target_cap:
+            log.warning(
+                "compact ChatNode %s summary %d tokens > target %d — truncating",
+                compact_node.id,
+                summary_tokens,
+                target_cap,
+            )
+            summary = _truncate_text_to_tokens(summary, target_cap)
+            summary_tokens = _count_text_tokens(summary)
+        snap = compact_node.compact_snapshot
+        if snap is None:
+            return summary
+        if chatflow.compact_preserve_mode == "by_budget":
+            preserved_wire: list = []
+            if compact_node.parent_ids:
+                tagged_full = _build_tagged_chat_context_for_compact(
+                    chatflow, compact_node.parent_ids[0]
+                )
+                groups = _group_tagged_by_chatnode(tagged_full)
+                remaining = target_cap - summary_tokens
+                preserved_wire = _greedy_pack_chatnode_groups_within_budget(
+                    groups, remaining
+                )
+            compact_node.compact_snapshot = snap.model_copy(
+                update={
+                    "summary": summary,
+                    "preserved_messages": preserved_wire,
+                }
+            )
+        else:
+            compact_node.compact_snapshot = snap.model_copy(
+                update={"summary": summary}
+            )
+        return summary
+
     async def compact_chain(
         self,
         chatflow_id: str,
@@ -837,17 +1042,23 @@ class ChatFlowEngine:
         preserve = (
             preserve_recent_turns
             if preserve_recent_turns is not None
-            else DEFAULT_PRESERVE_RECENT_TURNS
+            else DEFAULT_COMPACT_KEEP_RECENT_COUNT
         )
 
         async with runtime.lock:
             chatflow = runtime.chatflow
             if parent_id not in chatflow.nodes:
                 raise KeyError(f"parent {parent_id!r} not in chatflow {chatflow_id!r}")
+            # Strict brief sync gate (PR4 step 1a, 2026-04-21) — see
+            # ``_await_ancestor_briefs`` for rationale. Manual compaction
+            # goes through the same gate as auto-compact so the summary
+            # never folds a node whose brief hasn't landed yet.
+            await self._await_ancestor_briefs(chatflow, parent_id)
             compact_node = self._build_compact_chatnode(
                 chatflow,
                 parent_id=parent_id,
                 preserve_recent_turns=preserve,
+                preserve_mode=chatflow.compact_preserve_mode,
                 target_tokens=target_tokens,
                 model=model,
                 compact_instruction=compact_instruction,
@@ -939,39 +1150,14 @@ class ChatFlowEngine:
                 )
                 compact_node.finished_at = utcnow()
             else:
-                # Hard-cap the summary at ``chatnode_compact_target_pct``
-                # of the resolved model's context window. Preserves the
-                # ``trigger_pct + target_pct ≤ 1.0`` invariant even when
-                # the summarizer ignores its target_tokens guidance.
-                from agentloom.engine.workflow_engine import (
-                    _truncate_text_to_tokens,
-                )
-
                 resolved_for_cap = (
                     compact_node.resolved_model
                     or inner_llm.resolved_model
                     or inner_llm.model_override
                 )
-                ctx_for_cap = self._inner._context_window_for(resolved_for_cap)
-                target_cap = max(
-                    256,
-                    int(ctx_for_cap * chatflow.chatnode_compact_target_pct),
+                summary = self._finalize_compact_chatnode_snapshot(
+                    chatflow, compact_node, summary, resolved_for_cap
                 )
-                summary_tokens = _count_text_tokens(summary)
-                if summary_tokens > target_cap:
-                    log.warning(
-                        "compact ChatNode %s summary %d tokens > target %d — truncating",
-                        compact_id,
-                        summary_tokens,
-                        target_cap,
-                    )
-                    summary = _truncate_text_to_tokens(summary, target_cap)
-                if compact_node.compact_snapshot is not None:
-                    compact_node.compact_snapshot = (
-                        compact_node.compact_snapshot.model_copy(
-                            update={"summary": summary}
-                        )
-                    )
                 compact_node.agent_response = EditableText.by_agent(summary)
                 compact_node.status = NodeStatus.SUCCEEDED
                 compact_node.finished_at = utcnow()
@@ -1709,7 +1895,7 @@ class ChatFlowEngine:
                 tool_call_spawn_model
                 or failed.workflow.tool_call_model_override
             )
-            sibling = self._spawn_turn_node(
+            sibling = await self._spawn_turn_node(
                 runtime,
                 parent_ids=list(failed.parent_ids),
                 user_message_text=failed.user_message.text,
@@ -1825,7 +2011,7 @@ class ChatFlowEngine:
             # already has children (see fork-semantics memory).
             if parent_id not in chatflow.nodes:
                 raise KeyError(f"parent chat node {parent_id} not in chatflow")
-            node = self._spawn_turn_node(
+            node = await self._spawn_turn_node(
                 runtime,
                 parent_ids=[parent_id],
                 user_message_text=pending.text,
@@ -1850,7 +2036,7 @@ class ChatFlowEngine:
         if leaf_id is None:
             # Empty chatflow — bootstrap the first node directly from
             # the pending text. No parent, no queue carry-over.
-            node = self._spawn_turn_node(
+            node = await self._spawn_turn_node(
                 runtime,
                 parent_ids=[],
                 user_message_text=pending.text,
@@ -1898,7 +2084,7 @@ class ChatFlowEngine:
         pending = node.pending_queue.pop(0)
         tail = list(node.pending_queue)
         node.pending_queue = []  # child takes ownership of the tail
-        child = self._spawn_turn_node(
+        child = await self._spawn_turn_node(
             runtime,
             parent_ids=[node_id],
             user_message_text=pending.text,
@@ -1919,7 +2105,7 @@ class ChatFlowEngine:
             else pending.id,
         )
 
-    def _spawn_turn_node(
+    async def _spawn_turn_node(
         self,
         runtime: ChatFlowRuntime,
         *,
@@ -1961,7 +2147,19 @@ class ChatFlowEngine:
         original id still resolves when the real turn eventually runs.
         """
         chatflow = runtime.chatflow
-        context_wire = _build_chat_context(chatflow, parent_ids)
+        # Fetch CBIs so the summary preamble can embed a per-ancestor
+        # ChatBoardItem recap when a compact cutoff is on the chain.
+        # No-op when no board_writer is wired (unit-test engines) —
+        # ``_fetch_chat_board_descriptions`` returns ``{}`` in that case
+        # and ``_build_chat_context`` renders the bare summary.
+        cbi_descriptions = await self._fetch_chat_board_descriptions(
+            chatflow.id
+        )
+        context_wire = _build_chat_context(
+            chatflow,
+            parent_ids,
+            chat_board_descriptions=cbi_descriptions,
+        )
         context_wire.append(WireMessage(role="user", content=user_message_text))
         # Snapshot what this turn's judge_pre (or llm_call, in direct mode)
         # will see as its prompt. The card's TokenBar reads this so growth
@@ -1995,6 +2193,15 @@ class ChatFlowEngine:
         if trigger_pct is not None and parent_ids and not parent_is_fresh_compact:
             ctx = self._inner._context_window_for(resolved)
             if entry_tokens >= int(ctx * trigger_pct):
+                # Strict brief sync gate (PR4 step 1a, 2026-04-21).
+                # Refuse to compact while an ancestor's ChatBoardItem
+                # hasn't been committed yet — we'd otherwise fold a
+                # node whose recall-key is still being distilled, and
+                # a later retrieval against that node would come back
+                # empty. Waives the primary parent (preserved tail
+                # keeps that turn verbatim; its brief is not on the
+                # critical path).
+                await self._await_ancestor_briefs(chatflow, parent_ids[0])
                 forwarded = originating_pending or PendingTurn(
                     text=user_message_text,
                     spawn_model=spawn_model,
@@ -2005,7 +2212,8 @@ class ChatFlowEngine:
                     compact_node = self._build_compact_chatnode(
                         chatflow,
                         parent_id=parent_ids[0],
-                        preserve_recent_turns=chatflow.compact_preserve_recent_turns,
+                        preserve_recent_turns=chatflow.compact_keep_recent_count,
+                        preserve_mode=chatflow.compact_preserve_mode,
                         target_tokens=max(
                             256, int(ctx * chatflow.chatnode_compact_target_pct)
                         ),
@@ -2192,6 +2400,23 @@ class ChatFlowEngine:
         node.model_override = inner.judge_model_override
         return inner.add_node(node)
 
+    def _available_tools_listing(self) -> str:
+        """Comma-joined tool names from the ChatFlowEngine's tool
+        registry, or the literal ``"（空）"`` when no tools are
+        registered. Fed to planner / plan_judge templates so they pick
+        real names instead of hallucinating (2026-04-21 incident:
+        planner insisted on "knowledge_search" indefinitely until the
+        grounding fuse halted the WorkFlow).
+
+        Does NOT filter by the per-chatflow disabled list — the
+        WorkflowEngine enforces that at tool-dispatch time and the
+        planner can revise. The goal here is to stop names from being
+        invented wholesale, not to mirror the full gating logic."""
+        if self._tools is None:
+            return "(empty)"
+        names = sorted(t.name for t in self._tools.all())
+        return ", ".join(names) if names else "(empty)"
+
     # ------------------------------------------------------------ planner spawns
     #
     # The recursive-planner pipeline (auto mode) inserts four extra
@@ -2219,6 +2444,7 @@ class ChatFlowEngine:
             self._fixture_plans["plan"],
             {
                 **_trio_params(inner),
+                "available_tools": self._available_tools_listing(),
                 "prior_plan": prior_plan,
                 "critique": critique,
                 "handoff_notes": handoff_notes,
@@ -2241,6 +2467,7 @@ class ChatFlowEngine:
             self._fixture_plans["plan_judge"],
             {
                 **_trio_params(inner),
+                "available_tools": self._available_tools_listing(),
                 "plan_json": (
                     planner_node.output_message.content
                     if planner_node.output_message
@@ -2297,8 +2524,6 @@ class ChatFlowEngine:
                 parent_ids=parent_ids,
                 sub_workflow=sub_workflow,
                 description=EditableText.by_agent(sub.description),
-                inputs=EditableText.by_agent(sub.inputs) if sub.inputs else None,
-                expected_outcome=EditableText.by_agent(sub.expected_outcome),
             )
             inner.add_node(delegation)
             index_to_node_id[idx] = delegation.id
@@ -2311,10 +2536,11 @@ class ChatFlowEngine:
     ) -> WorkFlow:
         """Construct the inner WorkFlow a delegation node will execute.
 
-        AUTO mode (so the planner pipeline can recurse). Trio comes
-        verbatim from the subtask. Debate budget inherited from the
-        parent WorkFlow. judge_pre seeded at the root with no chat
-        context — the trio is all the sub-WorkFlow gets, deliberately.
+        AUTO mode (so the planner pipeline can recurse). The sub's trio
+        starts empty — judge_pre distills it from the subtask description
+        the parent planner wrote, just like the top-level case where
+        judge_pre reads the user's message. Debate budget inherited from
+        the parent WorkFlow.
         """
         switches = derive_switches_from_mode(ExecutionMode.AUTO_PLAN)
         sub = WorkFlow(
@@ -2323,9 +2549,6 @@ class ChatFlowEngine:
             judge_pre_enabled=switches.judge_pre,
             judge_during_enabled=switches.judge_during,
             judge_post_enabled=switches.judge_post,
-            description=EditableText.by_agent(subtask.description),
-            inputs=EditableText.by_agent(subtask.inputs),
-            expected_outcome=EditableText.by_agent(subtask.expected_outcome),
             debate_round_budget=parent.debate_round_budget,
             judge_retry_budget=parent.judge_retry_budget,
             judge_model_override=parent.judge_model_override,
@@ -2339,9 +2562,13 @@ class ChatFlowEngine:
             # right slice without waiting for the sub's judge_pre verdict.
             capabilities=list(parent.capabilities),
         )
-        # judge_pre is the universal entry gate; the post-node hook then
-        # spawns the planner / worker chain when it votes OK.
-        self._spawn_judge_pre(sub, subtask.description, [])
+        # Feed the planner-authored task description to judge_pre as the
+        # conversation it distills the trio from — mirrors the top-level
+        # path where judge_pre reads the user's turn text.
+        context_wire = [
+            WireMessage(role="user", content=subtask.description)
+        ]
+        self._spawn_judge_pre(sub, subtask.description, context_wire)
         return sub
 
     def _spawn_worker(
@@ -2501,6 +2728,14 @@ class ChatFlowEngine:
                             context_wire=context_wire,
                             resolved_model=chat_node.resolved_model,
                         )
+                    else:
+                        log.warning(
+                            "post_node_hook: DURING judge %s has unexpected "
+                            "role=%r — no handler will run; WorkFlow may stall",
+                            node.id,
+                            node.role,
+                        )
+                    return
                 if node.judge_variant == JudgeVariant.POST:
                     self._after_judge_post(
                         workflow,
@@ -2673,6 +2908,7 @@ class ChatFlowEngine:
         resolved_model: ProviderModelRef | None,
     ) -> None:
         """Decide what to do with the planner's plan."""
+        nodes_before = len(workflow.nodes)
         verdict = planner_judge_node.judge_verdict
         decision = verdict.during_verdict if verdict is not None else None
 
@@ -2826,6 +3062,37 @@ class ChatFlowEngine:
             user_message_text=user_message_text,
             context_wire=context_wire,
         )
+
+        # Defence-in-depth: every branch above should have grown the DAG
+        # (spawn_worker / spawn_planner / spawn_decompose_delegations /
+        # spawn_judge_post via _halt_to_post_judge). If the planner_judge
+        # returns without adding a single node the WorkFlow will starve
+        # — the driver loop runs out of ready nodes and the chat layer
+        # reports "inner workflow had no terminal llm_call". Log loudly
+        # and force a halt so the user sees a real error instead of the
+        # opaque one.
+        if len(workflow.nodes) == nodes_before:
+            log.error(
+                "planner_judge %s returned without spawning anything: "
+                "decision=%r plan_mode=%r verdict=%r — forcing halt_to_post_judge",
+                planner_judge_node.id,
+                decision,
+                plan.mode,
+                verdict,
+            )
+            self._halt_to_post_judge(
+                workflow,
+                parent_node=planner_judge_node,
+                upstream_kind="planner_judge_fallthrough",
+                upstream_summary=(
+                    "internal: planner_judge handler exited without "
+                    "scheduling any follow-up node — the planner pipeline "
+                    "had no branch that matched its verdict. "
+                    f"decision={decision!r} plan.mode={plan.mode!r}"
+                ),
+                user_message_text=user_message_text,
+                context_wire=context_wire,
+            )
 
     def _after_worker(
         self,
@@ -3058,14 +3325,6 @@ class ChatFlowEngine:
             blocks.append(f"## Upstream: {label}\n{out}")
         injected = "\n\n".join(blocks)
 
-        original = sub.inputs.text if sub.inputs else ""
-        new_text = (
-            f"{original}\n\n---\nUpstream dependency outputs:\n\n{injected}"
-            if original
-            else f"Upstream dependency outputs:\n\n{injected}"
-        )
-        sub.inputs = EditableText.by_agent(new_text)
-
         judge_pre = next(
             (
                 n
@@ -3078,13 +3337,16 @@ class ChatFlowEngine:
         )
         if judge_pre is None:
             return
-        templated = instantiate_fixture(
-            self._fixture_plans["judge_pre"],
-            _trio_params(sub),
-            includes=self._fixture_includes,
-        )
-        fresh = _single_node(templated)
-        judge_pre.input_messages = fresh.input_messages
+        # Append upstream outputs as an additional conversation message so
+        # judge_pre distills a trio that references them. The spawn-time
+        # subtask description wire message stays in place at the front.
+        judge_pre.input_messages = [
+            *(judge_pre.input_messages or []),
+            WireMessage(
+                role="user",
+                content=f"Upstream dependency outputs:\n\n{injected}",
+            ),
+        ]
 
     def _after_judge_post(
         self,
@@ -3216,16 +3478,10 @@ class ChatFlowEngine:
                 )
                 clones.append(clone)
             elif original.step_kind == StepKind.DELEGATE:
-                # Reconstruct a SubTask from the delegation's trio and
-                # append the judge's critique to its description so the
-                # fresh sub-WorkFlow's planner sees what to fix.
+                # Reconstruct a SubTask from the delegation's description
+                # and append the judge's critique so the fresh sub-
+                # WorkFlow's judge_pre + planner see what to fix.
                 desc = original.description.text if original.description else ""
-                ins = original.inputs.text if original.inputs else ""
-                exp = (
-                    original.expected_outcome.text
-                    if original.expected_outcome
-                    else ""
-                )
                 critique_suffix = (
                     f"\n\n[critique from prior attempt]\n{target.critique}"
                     if target.critique
@@ -3233,8 +3489,6 @@ class ChatFlowEngine:
                 )
                 subtask = SubTask(
                     description=desc + critique_suffix,
-                    inputs=ins,
-                    expected_outcome=exp,
                     after=[],
                 )
                 sub_workflow = self._build_sub_workflow_for_subtask(
@@ -3245,8 +3499,6 @@ class ChatFlowEngine:
                     parent_ids=[judge_post_node.id],
                     sub_workflow=sub_workflow,
                     description=EditableText.by_agent(desc + critique_suffix),
-                    inputs=EditableText.by_agent(ins) if ins else None,
-                    expected_outcome=EditableText.by_agent(exp),
                     redo_source_id=original.id,
                 )
                 workflow.add_node(clone)
@@ -3484,7 +3736,8 @@ class ChatFlowEngine:
                     None if is_compact_node else chatflow.compact_trigger_pct
                 ),
                 chatflow_compact_target_pct=chatflow.compact_target_pct,
-                chatflow_compact_preserve_recent_turns=chatflow.compact_preserve_recent_turns,
+                chatflow_compact_keep_recent_count=chatflow.compact_keep_recent_count,
+                chatflow_compact_preserve_mode=chatflow.compact_preserve_mode,
                 chatflow_compact_model=chatflow.compact_model,
                 chatflow_id=chatflow.id,
                 post_node_hook=(
@@ -3536,11 +3789,14 @@ class ChatFlowEngine:
                         or "compact worker returned empty summary"
                     )
                 else:
-                    snap = chat_node.compact_snapshot
-                    if snap is not None:
-                        chat_node.compact_snapshot = snap.model_copy(
-                            update={"summary": summary_text}
+                    resolved_for_cap = None
+                    if terminal is not None:
+                        resolved_for_cap = (
+                            terminal.resolved_model or terminal.model_override
                         )
+                    summary_text = self._finalize_compact_chatnode_snapshot(
+                        chatflow, chat_node, summary_text, resolved_for_cap
+                    )
                     chat_node.agent_response = EditableText.by_agent(summary_text)
                     chat_node.status = NodeStatus.SUCCEEDED
             elif runtime_error is not None:
@@ -3576,7 +3832,10 @@ class ChatFlowEngine:
                 chat_node.error = judge_crash_error
             elif terminal is None:
                 chat_node.status = NodeStatus.FAILED
-                chat_node.error = "inner workflow had no terminal llm_call"
+                chat_node.error = (
+                    "inner workflow had no terminal llm_call — "
+                    + _summarize_workflow_for_error(chat_node.workflow)
+                )
             elif (
                 terminal.status == NodeStatus.SUCCEEDED
                 and terminal.output_message is not None
@@ -3620,7 +3879,7 @@ class ChatFlowEngine:
                     chatflow,
                     chat_node,
                     accessed_this_turn,
-                    chatflow.compact_preserve_recent_turns,
+                    chatflow.recalled_context_sticky_turns,
                 )
 
             # ChatBoard cascade (PR 3, 2026-04-20): once the ChatNode has
@@ -3903,6 +4162,33 @@ class ChatFlowEngine:
             log.exception(
                 "chatflow save callback failed for %s", runtime.chatflow.id
             )
+
+
+def _summarize_workflow_for_error(workflow: WorkFlow) -> str:
+    """Compact one-line summary of a WorkFlow's nodes for error messages.
+
+    Used when the chat layer has to raise a "no terminal llm_call" (or
+    similar) diagnostic: a bare message forces us to re-read the DB to
+    know what actually happened, so embed a kind/role/status histogram
+    and the ids of any FAILED nodes right in the error. Keep it short
+    — this string lands in ``ChatFlowNode.error`` and the UI surfaces it
+    as a toast.
+    """
+    counts: dict[str, int] = {}
+    failed_ids: list[str] = []
+    for n in workflow.nodes.values():
+        kind = n.step_kind.value if n.step_kind else "?"
+        role = n.role.value if n.role else "-"
+        status = n.status.value if n.status else "?"
+        key = f"{kind}/{role}:{status}"
+        counts[key] = counts.get(key, 0) + 1
+        if n.status == NodeStatus.FAILED:
+            failed_ids.append(n.id)
+    parts = [f"{k}×{v}" for k, v in sorted(counts.items())]
+    summary = "nodes=[" + ", ".join(parts) + "]"
+    if failed_ids:
+        summary += f" failed_ids={failed_ids[:5]}"
+    return summary
 
 
 def _cascade_fail_workflow(workflow: WorkFlow) -> list[str]:
@@ -5000,6 +5286,7 @@ def _build_chat_context(
     parent_ids: list[str],
     *,
     include_summary_preamble: bool = True,
+    chat_board_descriptions: dict[str, str] | None = None,
 ) -> list[WireMessage]:
     """Build the user/assistant message history from the ancestor chain.
 
@@ -5020,6 +5307,15 @@ def _build_chat_context(
     preserved tail + any turns after the cutoff). Used by
     :meth:`ChatFlowEngine._build_compact_chatnode` so the next compact
     doesn't fold the prior summary back into its own head_wire.
+
+    ``chat_board_descriptions`` (optional) maps ChatNode id →
+    scope='chat' ChatBoardItem description. When supplied, the
+    descriptions for ancestors *folded into the compact summary*
+    (chain[0..cutoff_idx-1]) are appended to the summary preamble as
+    a bulleted block so the LLM sees a per-turn recap of what was
+    compressed — the chat-board equivalent of flipping through index
+    cards for the summarised conversation. Ignored when there's no
+    compact cutoff on the chain.
     """
     if not parent_ids:
         return []
@@ -5056,25 +5352,25 @@ def _build_chat_context(
     if compact_cutoff_idx is not None:
         snap = chatflow.nodes[chain[compact_cutoff_idx]].compact_snapshot
         assert snap is not None  # loop guarantees
+        cbi_block = ""
+        if chat_board_descriptions:
+            cbi_lines: list[str] = []
+            for ancestor_id in chain[:compact_cutoff_idx]:
+                desc = chat_board_descriptions.get(ancestor_id)
+                if desc:
+                    cbi_lines.append(f"- [{ancestor_id}] {desc}")
+            if cbi_lines:
+                cbi_block = (
+                    "\n\n[ChatBoard | 被压缩节点逐条摘要]\n"
+                    + "\n".join(cbi_lines)
+                )
         summary_msg = WireMessage(
             role="user",
             content=(
                 "[Prior conversation — summarized to save context]\n\n"
                 f"{snap.summary}"
+                f"{cbi_block}"
             ),
-        )
-        # Sticky restores live on the direct parent (``parent_ids[0]``)
-        # rather than on the compact ancestor — this lets fork siblings
-        # evolve their sticky state independently while still feeding
-        # off the same summary. Joint-compact merge passes a raw cutoff
-        # id in parent_ids, not an actual descendant ChatNode, so the
-        # lookup can come up empty; fall back to an empty dict.
-        primary_parent = chatflow.nodes.get(parent_ids[0])
-        sticky_for_this_node = (
-            primary_parent.sticky_restored if primary_parent is not None else {}
-        )
-        sticky_msgs = _render_sticky_restored_messages(
-            chatflow, sticky_for_this_node
         )
         # preserved_before_summary=True: the snapshot's preserved list
         # is the shared *prefix* that ran temporally before the summary
@@ -5082,15 +5378,22 @@ def _build_chat_context(
         # summary preamble. Default (False) keeps the historical Tier-2
         # compact shape: summary preamble first, preserved recent-tail
         # second.
+        #
+        # Sticky restores are NOT emitted here anymore — they're deferred
+        # to the very end of the context (just before the caller appends
+        # the current turn's new user message). Rationale: the prefix
+        # `summary + preserved + historical nodes` is append-only across
+        # turns, so keeping it stable maximises prefix-cache hits. Sticky
+        # entries, by contrast, shrink/expire per-turn as the counter
+        # decays, so folding them in at the tail keeps the dynamic band
+        # localised and out of the cacheable prefix.
         if snap.preserved_before_summary:
             messages.extend(snap.preserved_messages)
             if include_summary_preamble:
                 messages.append(summary_msg)
-            messages.extend(sticky_msgs)
         else:
             if include_summary_preamble:
                 messages.append(summary_msg)
-            messages.extend(sticky_msgs)
             messages.extend(snap.preserved_messages)
         start_idx = compact_cutoff_idx + 1
 
@@ -5113,6 +5416,20 @@ def _build_chat_context(
         messages.append(
             WireMessage(role="assistant", content=node.agent_response.text)
         )
+    # Sticky restored recall (deferred tail placement — see comment
+    # above). Emit even when there is no compact cutoff: a sticky entry
+    # can only be registered once compaction has happened, but the
+    # restored-context bundle still belongs at the tail regardless of
+    # whether a compact ancestor is currently on the chain (a sticky
+    # entry can outlive the compact it references via a fork).
+    if compact_cutoff_idx is not None:
+        primary_parent = chatflow.nodes.get(parent_ids[0])
+        sticky_for_this_node = (
+            primary_parent.sticky_restored if primary_parent is not None else {}
+        )
+        messages.extend(
+            _render_sticky_restored_messages(chatflow, sticky_for_this_node)
+        )
     return messages
 
 
@@ -5129,6 +5446,11 @@ def _render_sticky_restored_messages(
 
     Emitted in counter-descending order (most-recently-refreshed
     first) so the LLM sees the highest-priority restores near the top.
+
+    Each restored pair carries an explicit time-hint header so the LLM
+    doesn't mistake the block for "latest conversation" — this content
+    has been *recalled* from earlier history that was already summarised
+    away; treating it as present-tense breaks the narrative ordering.
     """
     out: list[WireMessage] = []
     # Sort by counter desc, then node_id for a stable order.
@@ -5138,7 +5460,10 @@ def _render_sticky_restored_messages(
         node = chatflow.nodes.get(node_id)
         if node is None:
             continue  # stale reference — defensive skip.
-        header = f"[Restored context for chat node {node_id}]"
+        header = (
+            f"[召回早期节点 {node_id} 原文，请视作已发生过的历史上下文——"
+            f"这是从此前被压缩成摘要的对话中取回的内容，不是最新一轮对话]"
+        )
         user_text = node.user_message.text if node.user_message else ""
         agent_text = node.agent_response.text if node.agent_response else ""
         out.append(
@@ -5241,6 +5566,60 @@ def _serialize_wire_chain(msgs: list[WireMessage]) -> str:
     if not msgs:
         return "(empty branch)"
     return "\n\n".join(f"[{m.role}] {m.content}" for m in msgs)
+
+
+def _group_tagged_by_chatnode(
+    tagged: list[tuple[str | None, WireMessage]],
+) -> list[tuple[str | None, list[WireMessage]]]:
+    """Collapse consecutive same-tag entries into per-ChatNode groups.
+
+    Preserves chronological order. A group bundles everything that
+    originated at one ChatNode (typically its user_message +
+    agent_response), so downstream compact logic can treat a whole
+    conversational turn as one indivisible unit — slicing a turn in
+    half on a message boundary loses the user's question or strands an
+    orphan reply, which hurts recall more than it saves tokens.
+
+    ``None`` tags (synthetic preamble rows from a prior compact) are
+    grouped like any other tag; adjacent ``None``s collapse into one
+    synthetic group.
+    """
+    groups: list[tuple[str | None, list[WireMessage]]] = []
+    for nid, msg in tagged:
+        if groups and groups[-1][0] == nid:
+            groups[-1][1].append(msg)
+        else:
+            groups.append((nid, [msg]))
+    return groups
+
+
+def _greedy_pack_chatnode_groups_within_budget(
+    groups: list[tuple[str | None, list[WireMessage]]],
+    budget_tokens: int,
+) -> list[WireMessage]:
+    """Pick the longest suffix of *groups* whose total tokens fit in
+    *budget_tokens*. All-or-nothing per group — we never split a
+    ChatNode so a preserved tail always contains complete turns.
+
+    Walks groups from the newest side back; stops at the first group
+    whose inclusion would overflow (can't skip middle groups — that
+    would punch a hole in the conversation). Returns flat WireMessages
+    in original chronological order.
+    """
+    if budget_tokens <= 0 or not groups:
+        return []
+    remaining = budget_tokens
+    packed_rev: list[list[WireMessage]] = []
+    for _, msgs in reversed(groups):
+        group_tokens = _estimate_tokens_from_wire(msgs)
+        if group_tokens > remaining:
+            break
+        packed_rev.append(msgs)
+        remaining -= group_tokens
+    out: list[WireMessage] = []
+    for msgs in reversed(packed_rev):
+        out.extend(msgs)
+    return out
 
 
 def _build_tagged_chat_context_for_compact(

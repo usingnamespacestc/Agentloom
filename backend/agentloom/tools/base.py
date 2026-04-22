@@ -105,7 +105,7 @@ class ToolContext:
     #: via ``get_node_context``. The engine reads this after each
     #: ChatNode turn to update :attr:`ChatFlowNode.sticky_restored` —
     #: every hit becomes (or refreshes) a sticky entry with counter =
-    #: compact_preserve_recent_turns; every turn that doesn't re-touch
+    #: recalled_context_sticky_turns; every turn that doesn't re-touch
     #: an entry decrements its counter. Empty set means "nothing was
     #: restored this turn". Concurrent sibling ChatNodes use the
     #: ``accessed_scope`` contextvar to keep their per-turn sets

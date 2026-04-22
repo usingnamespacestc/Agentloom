@@ -70,14 +70,21 @@ plan:
                  For full content, call get_node_context(node_id=<id>)
                  to inspect the cited node.
 
-            2. Every following paragraph covers exactly one thing and
-               is **as short as possible** — one or two sentences, no
-               filler, no pleasantries, no restatements, no process
-               narration that won't affect later decisions. Each
-               paragraph ends with a parenthesized list of the node
-               ids it came from, e.g. ``(nodes: n_abc, n_def)``. If the
-               paragraph spans multiple messages, list every relevant
-               id; if it came from one node, list one.
+            2. Every following paragraph corresponds to **one node** —
+               fold all messages under the same node id (typically a
+               user turn + assistant reply, sometimes with tool calls)
+               into a single paragraph that narrates what the user did
+               AND how the assistant responded as one complete
+               exchange. Do NOT split a single node into two paragraphs
+               (e.g. one for the user message, one for the reply).
+               Keep each paragraph **as short as possible** — one or
+               two sentences, no filler, no pleasantries, no
+               restatements, no process narration that won't affect
+               later decisions. End each paragraph with the node id
+               **once**, e.g. ``(nodes: n_abc)``. Only when a paragraph
+               genuinely spans multiple nodes should you list several,
+               e.g. ``(nodes: n_abc, n_def)``; otherwise the same node
+               id must not appear twice in the summary.
 
             Hard rules:
               - Preserve proper nouns, ids, file paths, numbers, dates,

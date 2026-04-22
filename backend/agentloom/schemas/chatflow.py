@@ -43,6 +43,18 @@ PendingTurnSource = Literal["web", "discord", "feishu", "api", "test"]
 #:   stays in one place once the feature lands.
 UpstreamFailurePolicy = Literal["discard", "continue"]
 
+#: How a compact decides which trailing messages to keep verbatim.
+#:
+#: - ``by_count``: preserve exactly the last ``compact_keep_recent_count``
+#:   messages; ``compact_target_pct`` / ``chatnode_compact_target_pct`` are
+#:   ignored on the preserve side (summary is also left uncapped in this mode).
+#: - ``by_budget``: greedy-pack tail messages into the leftover of
+#:   ``target_pct × context_window − tiktoken(summary)``; the fixed N knob
+#:   stops applying.
+#:
+#: Applies to both compact tiers (ChatFlow-layer and WorkFlow-layer).
+CompactPreserveMode = Literal["by_count", "by_budget"]
+
 
 class PendingTurn(BaseModel):
     """A queued-but-not-yet-executed user turn attached to a ChatFlowNode.
@@ -245,8 +257,26 @@ class ChatFlow(BaseModel):
     compact_target_pct: float = 0.3
     #: Number of trailing messages kept verbatim on the downstream side
     #: of a compact. Smaller = more aggressive compaction, larger =
-    #: more fidelity.
-    compact_preserve_recent_turns: int = 3
+    #: more fidelity. Only consulted when
+    #: ``compact_preserve_mode == "by_count"``.
+    compact_keep_recent_count: int = 3
+    #: Strategy for choosing the verbatim tail. ``by_count`` uses the N
+    #: above (and lets the summary run uncapped); ``by_budget`` greedy-
+    #: packs the tail into whatever is left of
+    #: ``target_pct × context_window`` after the summary's tokens are
+    #: subtracted. Applies to both tiers.
+    compact_preserve_mode: CompactPreserveMode = "by_count"
+    #: Stickiness counter-init for entries pulled back into context via
+    #: ``get_node_context``. When a ChatNode/WorkNode is restored, it's
+    #: recorded on the current ChatNode's ``sticky_restored`` map with
+    #: a forget counter starting at this value. Each subsequent turn
+    #: that doesn't re-touch the entry decrements the counter by 1; at
+    #: 0 the entry drops out and falls back to the MemoryBoard-reference
+    #: form. Larger = recalled content stays pinned longer. Independent
+    #: of ``compact_preserve_mode`` (previously shared the same knob
+    #: with the by_count tail length — decoupled in the compact-toggle
+    #: work so by_budget mode no longer accidentally locks this too).
+    recalled_context_sticky_turns: int = 3
     #: Optional model pin for the compact worker itself. Lets users
     #: route compactions to a cheap-and-fast model while keeping a
     #: strong model for the main turn. ``None`` falls back to the
@@ -264,7 +294,7 @@ class ChatFlow(BaseModel):
     #: window, the engine inserts a compact ChatNode *before* the new
     #: turn and forwards the turn into the compact node's pending_queue.
     #: ``None`` disables the ChatFlow-layer trigger. Reuses
-    #: ``compact_preserve_recent_turns`` and ``compact_model``.
+    #: ``compact_keep_recent_count`` and ``compact_model``.
     chatnode_compact_trigger_pct: float | None = 0.6
     #: Target footprint for ChatNode-level compact summaries, as a
     #: fraction of the turn model's context window. Fed to the compact

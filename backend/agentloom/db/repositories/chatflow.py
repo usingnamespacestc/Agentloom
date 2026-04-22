@@ -15,6 +15,7 @@ from agentloom.db.models.chatflow import ChatFlowRow
 from agentloom.db.models.node_index import NodeIndexRow
 from agentloom.db.repositories.base import WorkspaceScopedRepository
 from agentloom.schemas import ChatFlow
+from agentloom.schemas.chatflow import CompactPreserveMode
 from agentloom.schemas.common import (
     ExecutionMode,
     FrozenNodeError,
@@ -130,7 +131,9 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         disabled_tool_names: list[str] | None = ...,  # type: ignore[assignment]
         compact_trigger_pct: float | None = ...,  # type: ignore[assignment]
         compact_target_pct: float | None = ...,  # type: ignore[assignment]
-        compact_preserve_recent_turns: int | None = ...,  # type: ignore[assignment]
+        compact_keep_recent_count: int | None = ...,  # type: ignore[assignment]
+        compact_preserve_mode: CompactPreserveMode | None = ...,  # type: ignore[assignment]
+        recalled_context_sticky_turns: int | None = ...,  # type: ignore[assignment]
         compact_model: ProviderModelRef | None = ...,  # type: ignore[assignment]
         compact_require_confirmation: bool | None = ...,  # type: ignore[assignment]
         chatnode_compact_trigger_pct: float | None = ...,  # type: ignore[assignment]
@@ -203,9 +206,15 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         if compact_target_pct is not ...:
             if compact_target_pct is not None:
                 payload["compact_target_pct"] = compact_target_pct
-        if compact_preserve_recent_turns is not ...:
-            if compact_preserve_recent_turns is not None:
-                payload["compact_preserve_recent_turns"] = compact_preserve_recent_turns
+        if compact_keep_recent_count is not ...:
+            if compact_keep_recent_count is not None:
+                payload["compact_keep_recent_count"] = compact_keep_recent_count
+        if compact_preserve_mode is not ...:
+            if compact_preserve_mode is not None:
+                payload["compact_preserve_mode"] = compact_preserve_mode
+        if recalled_context_sticky_turns is not ...:
+            if recalled_context_sticky_turns is not None:
+                payload["recalled_context_sticky_turns"] = recalled_context_sticky_turns
         if compact_model is not ...:
             payload["compact_model"] = (
                 compact_model.model_dump(mode="json") if compact_model else None
