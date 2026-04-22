@@ -271,6 +271,34 @@ export interface CompactSnapshot {
   preserved_before_summary: boolean;
 }
 
+/**
+ * Mirror of ``agentloom.schemas.chatflow.InboundContextSegment``.
+ *
+ * Kinds:
+ * - ``summary_preamble`` / ``sticky_restored``: synthetic blocks the
+ *   engine constructs; UI renders them in a muted style without node
+ *   id / token / brief chrome.
+ * - ``preserved``: verbatim tail carried by the compact snapshot.
+ * - ``ancestor`` / ``current_turn``: real ChatNode user/assistant pairs.
+ */
+export type InboundContextSegmentKind =
+  | "summary_preamble"
+  | "preserved"
+  | "ancestor"
+  | "sticky_restored"
+  | "current_turn";
+
+export interface InboundContextSegment {
+  kind: InboundContextSegmentKind;
+  messages: WireMessage[];
+  source_node_id: string | null;
+  synthetic: boolean;
+}
+
+export interface InboundContextResponse {
+  segments: InboundContextSegment[];
+}
+
 export interface ChatFlowNode extends NodeBaseFields {
   user_message: EditableText | null;
   agent_response: EditableText;

@@ -19,7 +19,7 @@ from agentloom.schemas.common import (
     generate_node_id,
     utcnow,
 )
-from agentloom.schemas.workflow import CompactSnapshot, WorkFlow
+from agentloom.schemas.workflow import CompactSnapshot, WireMessage, WorkFlow
 
 
 #: Canned greeting written to a brand-new ChatFlow's root node. Static
@@ -54,6 +54,70 @@ UpstreamFailurePolicy = Literal["discard", "continue"]
 #:
 #: Applies to both compact tiers (ChatFlow-layer and WorkFlow-layer).
 CompactPreserveMode = Literal["by_count", "by_budget"]
+
+
+#: Kinds of segment the inbound-context preview endpoint emits. Each
+#: segment bundles one coherent slice of a ChatNode's inbound context
+#: so the frontend can style them independently (e.g. faded for
+#: synthetic sticky pairs, neutral for real ancestor turns).
+#:
+#: - ``summary_preamble``: the single synthetic summary message produced
+#:   by a compact ancestor — ``[Prior conversation — summarized ...]``
+#:   plus the optional ChatBoard recap block.
+#: - ``preserved``: verbatim tail (or prefix, for joint-compact merges)
+#:   carried by the compact snapshot's ``preserved_messages``.
+#: - ``ancestor``: real user/assistant pairs from frozen ChatNode
+#:   ancestors between the compact cutoff and the node being previewed
+#:   (exclusive on both ends). Empty list when the chain has no compact
+#:   cutoff — in that case every pre-node ancestor turns up here.
+#: - ``sticky_restored``: synthetic user/assistant pairs re-materialised
+#:   from ``sticky_restored`` map of the primary parent. Marked
+#:   ``synthetic=True`` so the UI can render them distinctly (no id/
+#:   token/brief chrome). Counter-descending order.
+#: - ``current_turn``: the previewed ChatNode's own user + assistant
+#:   messages (greeting roots: assistant only; merge nodes carry their
+#:   auto-generated user prompt).
+InboundContextSegmentKind = Literal[
+    "summary_preamble",
+    "preserved",
+    "ancestor",
+    "sticky_restored",
+    "current_turn",
+]
+
+
+class InboundContextSegment(BaseModel):
+    """One labeled slice of the inbound context for a ChatNode.
+
+    ``source_node_id`` points at the ChatNode that contributed the
+    segment when meaningful: the compact ancestor for
+    ``summary_preamble`` / ``preserved``, the real ancestor for
+    ``ancestor`` pairs, the recalled node for ``sticky_restored`` pairs,
+    and the previewed node for ``current_turn``. ``None`` for segments
+    that aren't tied to a single node (not used yet, reserved for
+    future block types).
+
+    ``synthetic=True`` flags segments whose messages were *constructed*
+    rather than lifted verbatim — the sticky header, the summary
+    preamble, etc. The frontend uses this to switch to muted styling.
+    """
+
+    kind: InboundContextSegmentKind
+    messages: list[WireMessage] = Field(default_factory=list)
+    source_node_id: str | None = None
+    synthetic: bool = False
+
+
+class InboundContextResponse(BaseModel):
+    """Payload of ``GET /chatflows/{cid}/nodes/{nid}/inbound_context``.
+
+    ``segments`` is emitted in render order — the frontend concatenates
+    their messages to reproduce what the next llm_call would see, and
+    can also style each segment's block according to ``kind`` /
+    ``synthetic``.
+    """
+
+    segments: list[InboundContextSegment] = Field(default_factory=list)
 
 
 class PendingTurn(BaseModel):

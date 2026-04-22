@@ -7,7 +7,7 @@
  * HTTP failures apart from network failures.
  */
 
-import type { BoardItem, ChatFlow, ChatFlowSummary, ExecutionMode, Folder, PendingTurn, PendingTurnSource, ProviderModelRef, StickyNote } from "@/types/schema";
+import type { BoardItem, ChatFlow, ChatFlowSummary, ExecutionMode, Folder, InboundContextResponse, PendingTurn, PendingTurnSource, ProviderModelRef, StickyNote } from "@/types/schema";
 
 export class ApiError extends Error {
   constructor(
@@ -204,6 +204,15 @@ export const api = {
     request<{ ok: boolean }>(`/api/chatflows/${chatflowId}/nodes/${nodeId}/cancel`, {
       method: "POST",
     }),
+
+  /** Segmented inbound-context preview for a ChatNode. Backs the
+   * right-pane conversation display when a compact ancestor or sticky
+   * recall changes what the next llm_call would actually consume
+   * versus a naive walk up ``parent_ids``. */
+  getInboundContext: (chatflowId: string, nodeId: string) =>
+    request<InboundContextResponse>(
+      `/api/chatflows/${chatflowId}/nodes/${nodeId}/inbound_context`,
+    ),
 
   /** Tier 2 manual compact. ``nodeId`` is the parent the compact
    * should hang off; the engine walks the chain up-to-and-including

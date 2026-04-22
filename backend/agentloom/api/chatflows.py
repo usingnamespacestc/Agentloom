@@ -44,10 +44,15 @@ from agentloom.db.repositories.provider import ProviderRepository
 from agentloom.engine.chatflow_engine import (
     ChatFlowEngine,
     DiscardedUpstreamFailure,
+    build_inbound_context_segments,
 )
 from agentloom.engine.events import WorkflowEvent, get_event_bus
 from agentloom.schemas import ChatFlow, PendingTurn, make_chatflow
-from agentloom.schemas.chatflow import CompactPreserveMode, PendingTurnSource
+from agentloom.schemas.chatflow import (
+    CompactPreserveMode,
+    InboundContextResponse,
+    PendingTurnSource,
+)
 from agentloom.schemas.common import ExecutionMode, FrozenNodeError, ProviderModelRef, StickyNote
 from agentloom.mcp.runtime import get_shared_registry
 from agentloom.tools.base import ToolContext
@@ -942,6 +947,45 @@ async def compact_chain(
         node_id=compact_node.id,
         status=compact_node.status.value,
     )
+
+
+@router.get(
+    "/{chatflow_id}/nodes/{node_id}/inbound_context",
+    response_model=InboundContextResponse,
+)
+async def get_inbound_context(
+    chatflow_id: str,
+    node_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> InboundContextResponse:
+    """Return the inbound context for a ChatNode as typed segments.
+
+    Backs the ChatFlow right-pane preview: the UI reconstructs the
+    exact wire-message sequence the next llm_call would consume, and
+    styles each segment (summary preamble, preserved tail, real
+    ancestors, synthetic sticky recalls, current turn) independently.
+    """
+    engine = _get_engine(request)
+    repo = _repo(session)
+    chat = await _attached_chatflow(engine, repo, chatflow_id)
+    if node_id not in chat.nodes:
+        raise HTTPException(
+            404, f"node {node_id} not in chatflow {chatflow_id}"
+        )
+    board_repo = BoardItemRepository(session, workspace_id=DEFAULT_WORKSPACE_ID)
+    rows = await board_repo.list_by_chatflow(chatflow_id)
+    cbi_descriptions: dict[str, str] = {
+        row.source_node_id: row.description
+        for row in rows
+        if row.scope == "chat" and row.description
+    }
+    segments = build_inbound_context_segments(
+        chat,
+        node_id,
+        chat_board_descriptions=cbi_descriptions or None,
+    )
+    return InboundContextResponse(segments=segments)
 
 
 @router.post(

@@ -79,6 +79,7 @@ from agentloom.schemas import (
 )
 from agentloom.schemas.chatflow import (
     CompactPreserveMode,
+    InboundContextSegment,
     PendingTurnSource,
     UpstreamFailurePolicy,
 )
@@ -5475,6 +5476,200 @@ def _render_sticky_restored_messages(
         if agent_text:
             out.append(WireMessage(role="assistant", content=agent_text))
     return out
+
+
+def build_inbound_context_segments(
+    chatflow: ChatFlow,
+    node_id: str,
+    *,
+    chat_board_descriptions: dict[str, str] | None = None,
+) -> list[InboundContextSegment]:
+    """Return the inbound context for *node_id* as typed segments.
+
+    Sibling of :func:`_build_chat_context` intended for the
+    ``GET .../nodes/{id}/inbound_context`` preview endpoint: the
+    frontend can render each segment with its own styling (muted
+    backgrounds for synthetic summary/sticky blocks, neutral for real
+    ancestor turns) while still reproducing the exact wire-message
+    sequence the next llm_call would consume.
+
+    Segment order mirrors the context builder:
+
+    1. ``summary_preamble`` + ``preserved`` (order flipped when
+       ``preserved_before_summary`` is True — joint-compact merge path).
+    2. ``ancestor`` pairs: user/assistant messages from frozen ChatNodes
+       between the compact cutoff and *node_id* (exclusive on both
+       ends). Emitted one segment per ancestor so the UI can attach
+       node-level chrome.
+    3. ``sticky_restored`` pairs: synthetic recall bundles, one segment
+       per restored ChatNode.
+    4. ``current_turn``: the previewed node's own user + assistant
+       messages.
+
+    Unfrozen ancestors contribute no segment (same rule as the context
+    builder). Greeting roots are skipped since they have no
+    ``user_message``; merge ChatNodes appear both as a hard stop for
+    the walk AND as their own ancestor segment (the merge's synthesised
+    user prompt is real context the LLM will see).
+    """
+    if node_id not in chatflow.nodes:
+        raise KeyError(node_id)
+    target = chatflow.nodes[node_id]
+
+    # Walk the primary-parent chain, stopping at merge ChatNodes — same
+    # rule as ``_build_chat_context``.
+    chain: list[str] = []
+    current: str | None = target.parent_ids[0] if target.parent_ids else None
+    while current is not None:
+        chain.append(current)
+        anc = chatflow.nodes[current]
+        if len(anc.parent_ids) >= 2:
+            break
+        current = anc.parent_ids[0] if anc.parent_ids else None
+    chain.reverse()
+
+    compact_cutoff_idx: int | None = None
+    for i, nid in enumerate(chain):
+        snap = chatflow.nodes[nid].compact_snapshot
+        if snap is not None and snap.summary:
+            compact_cutoff_idx = i
+
+    segments: list[InboundContextSegment] = []
+    start_idx = 0
+    if compact_cutoff_idx is not None:
+        compact_nid = chain[compact_cutoff_idx]
+        snap = chatflow.nodes[compact_nid].compact_snapshot
+        assert snap is not None
+        cbi_block = ""
+        if chat_board_descriptions:
+            cbi_lines: list[str] = []
+            for ancestor_id in chain[:compact_cutoff_idx]:
+                desc = chat_board_descriptions.get(ancestor_id)
+                if desc:
+                    cbi_lines.append(f"- [{ancestor_id}] {desc}")
+            if cbi_lines:
+                cbi_block = (
+                    "\n\n[ChatBoard | 被压缩节点逐条摘要]\n"
+                    + "\n".join(cbi_lines)
+                )
+        summary_segment = InboundContextSegment(
+            kind="summary_preamble",
+            messages=[
+                WireMessage(
+                    role="user",
+                    content=(
+                        "[Prior conversation — summarized to save context]\n\n"
+                        f"{snap.summary}"
+                        f"{cbi_block}"
+                    ),
+                )
+            ],
+            source_node_id=compact_nid,
+            synthetic=True,
+        )
+        preserved_segment = InboundContextSegment(
+            kind="preserved",
+            messages=list(snap.preserved_messages),
+            source_node_id=compact_nid,
+            synthetic=False,
+        )
+        if snap.preserved_before_summary:
+            if preserved_segment.messages:
+                segments.append(preserved_segment)
+            segments.append(summary_segment)
+        else:
+            segments.append(summary_segment)
+            if preserved_segment.messages:
+                segments.append(preserved_segment)
+        start_idx = compact_cutoff_idx + 1
+
+    for nid in chain[start_idx:]:
+        node = chatflow.nodes[nid]
+        if not node.is_frozen:
+            continue
+        # Post-cutoff compact ChatNode — same skip as the context
+        # builder so its summary text doesn't leak twice.
+        if node.compact_snapshot is not None:
+            continue
+        msgs: list[WireMessage] = []
+        if node.user_message is not None:
+            msgs.append(
+                WireMessage(role="user", content=node.user_message.text)
+            )
+        msgs.append(
+            WireMessage(role="assistant", content=node.agent_response.text)
+        )
+        segments.append(
+            InboundContextSegment(
+                kind="ancestor",
+                messages=msgs,
+                source_node_id=nid,
+                synthetic=False,
+            )
+        )
+
+    # Sticky restored pairs are read from the target node's own dict —
+    # this represents what was actually sticky-injected into *this*
+    # node's LLM call (inherited-from-parent-with-decay plus any new
+    # get_node_context hits folded in during the turn). The runtime
+    # ``_build_chat_context`` reads the parent's dict because it is
+    # called before the new ChatNode is spawned; the preview endpoint
+    # has the materialised node, so it uses target's dict directly.
+    # Compact ChatNodes have sticky={} by construction, so they emit
+    # no sticky segments — which is correct (compact LLM calls do not
+    # receive sticky-injected recalls).
+    if compact_cutoff_idx is not None:
+        sticky = target.sticky_restored
+        for restored_id, _counter in sorted(
+            sticky.items(), key=lambda kv: (-kv[1], kv[0])
+        ):
+            restored = chatflow.nodes.get(restored_id)
+            if restored is None:
+                continue
+            header = (
+                f"[召回早期节点 {restored_id} 原文，请视作已发生过的历史上下文——"
+                f"这是从此前被压缩成摘要的对话中取回的内容，不是最新一轮对话]"
+            )
+            user_text = restored.user_message.text if restored.user_message else ""
+            agent_text = (
+                restored.agent_response.text if restored.agent_response else ""
+            )
+            msgs = [
+                WireMessage(
+                    role="user",
+                    content=f"{header}\n\n{user_text}" if user_text else header,
+                )
+            ]
+            if agent_text:
+                msgs.append(WireMessage(role="assistant", content=agent_text))
+            segments.append(
+                InboundContextSegment(
+                    kind="sticky_restored",
+                    messages=msgs,
+                    source_node_id=restored_id,
+                    synthetic=True,
+                )
+            )
+
+    current_msgs: list[WireMessage] = []
+    if target.user_message is not None:
+        current_msgs.append(
+            WireMessage(role="user", content=target.user_message.text)
+        )
+    if target.agent_response is not None and target.agent_response.text:
+        current_msgs.append(
+            WireMessage(role="assistant", content=target.agent_response.text)
+        )
+    if current_msgs:
+        segments.append(
+            InboundContextSegment(
+                kind="current_turn",
+                messages=current_msgs,
+                source_node_id=target.id,
+                synthetic=False,
+            )
+        )
+    return segments
 
 
 def _has_compact_ancestor(chatflow: ChatFlow, parent_ids: list[str]) -> bool:

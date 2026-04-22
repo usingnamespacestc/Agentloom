@@ -43,6 +43,7 @@ import { CompactConfirmDialog } from "@/components/CompactConfirmDialog";
 import type {
   ChatFlow,
   ChatFlowNode,
+  InboundContextSegment,
   NodeId,
   PendingTurn,
   ProviderModelRef,
@@ -181,6 +182,44 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
   }, [chatflow, path]);
   const hiddenBeforeCompact =
     path.length - visiblePath.length;
+
+  // Fetch the backend's segmented inbound-context preview so the UI can
+  // render the pieces `visiblePath` can't derive locally — namely the
+  // sticky-restored synthetic recall pairs (no real ChatNode on the
+  // chain) and the ChatBoard bullets that the backend folds into the
+  // summary preamble. Only fetch when the visible chain touches a
+  // compact ancestor; plain pre-compact chats gain nothing from the
+  // round-trip.
+  const [inboundSegments, setInboundSegments] = useState<InboundContextSegment[]>([]);
+  const pathTouchesCompact = useMemo(
+    () => visiblePath.some((nid) => chatflow?.nodes[nid]?.compact_snapshot != null),
+    [chatflow, visiblePath],
+  );
+  useEffect(() => {
+    if (!chatflow || !selectedNodeId || !pathTouchesCompact) {
+      setInboundSegments([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .getInboundContext(chatflow.id, selectedNodeId)
+      .then((r) => {
+        if (!cancelled) setInboundSegments(r.segments);
+      })
+      .catch(() => {
+        if (!cancelled) setInboundSegments([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // chatflow.nodes mutates in place on SSE ticks; key off chatflow.id
+    // and the selected node only so we don't thrash the endpoint on
+    // every streaming chunk.
+  }, [chatflow?.id, selectedNodeId, pathTouchesCompact]);
+  const stickySegments = useMemo(
+    () => inboundSegments.filter((s) => s.kind === "sticky_restored"),
+    [inboundSegments],
+  );
 
   const forkAt = useMemo(() => {
     const m = new Map<NodeId, (typeof forks)[number]>();
@@ -326,12 +365,23 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
             <div className="h-px flex-1 bg-gray-200" />
           </div>
         )}
-        {visiblePath.map((nid) => {
+        {visiblePath.map((nid, idx) => {
           const node = chatflow.nodes[nid];
           if (!node) return null;
           const fork = forkAt.get(nid);
+          // Sticky-restored synthetic recall pairs live between the
+          // chain's historical ancestors and the current turn —
+          // matches `_build_chat_context`'s tail placement. Rendering
+          // them just before the leaf bubble keeps the KV-cache-friendly
+          // "summary + preserved + history" prefix stable in the UI
+          // too, and prevents the muted recall styling from being
+          // mistaken for a live turn.
+          const isLast = idx === visiblePath.length - 1;
           return (
             <div key={nid}>
+              {isLast && stickySegments.length > 0 && (
+                <StickyRestoredBlock segments={stickySegments} />
+              )}
               <ChatMessageBubble
                 node={node}
                 isSelected={nid === selectedNodeId}
@@ -823,6 +873,77 @@ function ChatMessageBubble({
         finishedAt={node.finished_at}
         copyText={agentText || null}
       />
+    </div>
+  );
+}
+
+/** Render a synthetic "recalled earlier node" block. One segment per
+ * source ChatNode (counter-desc sorted by the backend). The muted
+ * amber frame distinguishes these pairs from live turns so the user
+ * reads them as "history that was summarized away and re-pulled via
+ * ``get_node_context``", not as the newest reply. The backend already
+ * prepends a "[召回早期节点 <id> 原文 …]" header to the user message;
+ * we hide that line from the rendered markdown and surface the source
+ * id as a label instead. */
+function StickyRestoredBlock({
+  segments,
+}: {
+  segments: InboundContextSegment[];
+}) {
+  const { t } = useTranslation();
+  if (segments.length === 0) return null;
+  return (
+    <div
+      data-testid="conversation-sticky-restored"
+      className="mb-3 rounded-md border border-amber-200 bg-amber-50/60 px-3 py-2"
+    >
+      <div className="mb-1 flex items-center gap-1 text-[11px] font-semibold text-amber-700">
+        <span aria-hidden>↺</span>
+        {t("conversation.sticky_restored_label")}
+      </div>
+      {segments.map((seg) => (
+        <StickyRestoredSegment key={seg.source_node_id ?? ""} seg={seg} />
+      ))}
+    </div>
+  );
+}
+
+/** Strip the backend's "[召回早期节点 <id> 原文 …]" preamble off the
+ * user message. The header lives on the first user message's first
+ * line; we carry the source id in our own label instead, so dropping
+ * the literal marker de-clutters the rendered markdown without losing
+ * information. */
+function _stripRecallHeader(content: string): string {
+  const idx = content.indexOf("\n\n");
+  if (idx === -1) return "";
+  const head = content.slice(0, idx);
+  if (head.startsWith("[召回早期节点") && head.endsWith("]")) {
+    return content.slice(idx + 2);
+  }
+  return content;
+}
+
+function StickyRestoredSegment({ seg }: { seg: InboundContextSegment }) {
+  return (
+    <div
+      data-testid={`conversation-sticky-segment-${seg.source_node_id ?? "anon"}`}
+      className="mt-2 first:mt-0"
+    >
+      {seg.source_node_id && (
+        <div className="mb-1 text-[10px] font-mono text-amber-700/70">
+          {seg.source_node_id}
+        </div>
+      )}
+      {seg.messages.map((msg, i) => (
+        <PreservedWireBubble
+          key={i}
+          msg={
+            msg.role === "user"
+              ? { ...msg, content: _stripRecallHeader(msg.content) }
+              : msg
+          }
+        />
+      ))}
     </div>
   );
 }
