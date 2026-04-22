@@ -267,15 +267,10 @@ inspect and swap out.
 
 Designed but not yet built (or only scaffolded):
 
-- [ ] **Pack** — a mid-graph custom variant of `compress`. Where compress
-      runs root→leaf over an entire chain, pack targets an **arbitrary
-      contiguous mid-range** and exposes three knobs to the user: use
-      detailed index / preserve last-n / range. Topologically the pack
-      node's parent is the last packed node (plus a `packed_range`
-      metadata list). From the pack node and its downstream chain the
-      packed nodes are **hidden** (pack itself is the summary); from the
-      pre-pack node or the global canvas they remain visible. Pack is
-      **nestable**; delegate / sub-agent is topologically a pack.
+- [ ] **Pack** — a Layer-1 WorkNode kind dual to `compress`: bundles a
+      WorkFlow / ChatFlow's output into a deliverable artifact (document,
+      code patch, structured report) so an agent's work product is a
+      reusable asset rather than a scatter of nodes.
 - [ ] **Cognitive-node ReAct DAG expansion** — planning / pre-check /
       monitoring / post-check WorkNodes will uniformly support ReAct-style
       DAG expansion (cognitive endpoints with tool_calls between them),
