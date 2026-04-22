@@ -60,17 +60,24 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
   const [groundGraceStr, setGroundGraceStr] = useState("");
   // Compact (conversation-compaction) settings. Trigger-pct is an
   // integer percentage 0-100; an empty string sends ``null`` (Tier 1
-  // disabled). Target-pct / preserve-turns use the same percentage /
+  // disabled). Target-pct / keep-recent use the same percentage /
   // integer patterns.
   const [compactTriggerPctStr, setCompactTriggerPctStr] = useState("");
   const [compactTargetPctStr, setCompactTargetPctStr] = useState("");
-  const [compactPreserveTurnsStr, setCompactPreserveTurnsStr] = useState("");
+  const [compactKeepRecentStr, setCompactKeepRecentStr] = useState("");
+  const [recalledStickyTurnsStr, setRecalledStickyTurnsStr] = useState("");
   const [compactModelKey, setCompactModelKey] = useState("");
   const [compactRequireConfirmation, setCompactRequireConfirmation] = useState(true);
   // ChatFlow-layer auto-compact (dual-track). Same string-as-percentage
   // pattern as the WorkFlow tier above.
   const [chatnodeCompactTriggerPctStr, setChatnodeCompactTriggerPctStr] = useState("");
   const [chatnodeCompactTargetPctStr, setChatnodeCompactTargetPctStr] = useState("");
+  // Shared preserve-strategy toggle: "by_count" = honor the N knob and
+  // ignore target-pct on the preserve side; "by_budget" = greedy-pack
+  // tail under target-pct × ctx after summary tokens are subtracted.
+  const [compactPreserveMode, setCompactPreserveMode] = useState<
+    "by_count" | "by_budget"
+  >("by_count");
   // Per-tool visibility: set of built-in tool names the user has
   // enabled for this chatflow. A tool is "checked" iff its name is
   // NOT in the stored ``disabled_tool_names`` list.
@@ -138,8 +145,11 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
       setCompactTargetPctStr(
         String(Math.round((chatflow?.compact_target_pct ?? 0.5) * 100)),
       );
-      setCompactPreserveTurnsStr(
-        String(chatflow?.compact_preserve_recent_turns ?? 3),
+      setCompactKeepRecentStr(
+        String(chatflow?.compact_keep_recent_count ?? 3),
+      );
+      setRecalledStickyTurnsStr(
+        String(chatflow?.recalled_context_sticky_turns ?? 3),
       );
       setCompactModelKey(refKey(chatflow?.compact_model ?? null));
       setCompactRequireConfirmation(chatflow?.compact_require_confirmation ?? true);
@@ -150,6 +160,7 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
       setChatnodeCompactTargetPctStr(
         String(Math.round((chatflow?.chatnode_compact_target_pct ?? 0.4) * 100)),
       );
+      setCompactPreserveMode(chatflow?.compact_preserve_mode ?? "by_count");
     }
   }, [open, chatflow, loadProviders, loadMcpServers, loadTools]);
 
@@ -284,15 +295,24 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
         Number.isFinite(compactTgtParsed) && compactTgtParsed >= 1 && compactTgtParsed <= 95
           ? compactTgtParsed / 100
           : (chatflow?.compact_target_pct ?? 0.5);
-      const compactPreserveTrim = compactPreserveTurnsStr.trim();
-      const compactPreserveParsed =
-        compactPreserveTrim === "" ? NaN : Number(compactPreserveTrim);
-      const compactPreserve =
-        Number.isFinite(compactPreserveParsed) &&
-        Number.isInteger(compactPreserveParsed) &&
-        compactPreserveParsed >= 0
-          ? compactPreserveParsed
-          : (chatflow?.compact_preserve_recent_turns ?? 3);
+      const compactKeepTrim = compactKeepRecentStr.trim();
+      const compactKeepParsed =
+        compactKeepTrim === "" ? NaN : Number(compactKeepTrim);
+      const compactKeepRecent =
+        Number.isFinite(compactKeepParsed) &&
+        Number.isInteger(compactKeepParsed) &&
+        compactKeepParsed >= 0
+          ? compactKeepParsed
+          : (chatflow?.compact_keep_recent_count ?? 3);
+      const recalledStickyTrim = recalledStickyTurnsStr.trim();
+      const recalledStickyParsed =
+        recalledStickyTrim === "" ? NaN : Number(recalledStickyTrim);
+      const recalledSticky =
+        Number.isFinite(recalledStickyParsed) &&
+        Number.isInteger(recalledStickyParsed) &&
+        recalledStickyParsed >= 0
+          ? recalledStickyParsed
+          : (chatflow?.recalled_context_sticky_turns ?? 3);
       const chatnodeTrigTrim = chatnodeCompactTriggerPctStr.trim();
       let chatnodeTrigger: number | null;
       if (chatnodeTrigTrim === "") {
@@ -321,11 +341,13 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
         disabled_tool_names: persistedDisabled,
         compact_trigger_pct: compactTrigger,
         compact_target_pct: compactTarget,
-        compact_preserve_recent_turns: compactPreserve,
+        compact_keep_recent_count: compactKeepRecent,
         compact_model: parseRefKey(compactModelKey),
         compact_require_confirmation: compactRequireConfirmation,
         chatnode_compact_trigger_pct: chatnodeTrigger,
         chatnode_compact_target_pct: chatnodeTarget,
+        compact_preserve_mode: compactPreserveMode,
+        recalled_context_sticky_turns: recalledSticky,
       });
       onClose();
     } finally {
@@ -485,8 +507,10 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
                 onTriggerPctChange={setCompactTriggerPctStr}
                 targetPctStr={compactTargetPctStr}
                 onTargetPctChange={setCompactTargetPctStr}
-                preserveTurnsStr={compactPreserveTurnsStr}
-                onPreserveTurnsChange={setCompactPreserveTurnsStr}
+                keepRecentStr={compactKeepRecentStr}
+                onKeepRecentChange={setCompactKeepRecentStr}
+                recalledStickyTurnsStr={recalledStickyTurnsStr}
+                onRecalledStickyTurnsChange={setRecalledStickyTurnsStr}
                 modelKey={compactModelKey}
                 onModelKeyChange={setCompactModelKey}
                 modelOptions={modelOptions}
@@ -497,6 +521,8 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
                 chatnodeTargetPctStr={chatnodeCompactTargetPctStr}
                 onChatnodeTargetPctChange={setChatnodeCompactTargetPctStr}
                 ctxWindow={compactCtxWindow}
+                preserveMode={compactPreserveMode}
+                onPreserveModeChange={setCompactPreserveMode}
               />
             )}
 
@@ -666,8 +692,10 @@ function CompactSettingsSection({
   onTriggerPctChange,
   targetPctStr,
   onTargetPctChange,
-  preserveTurnsStr,
-  onPreserveTurnsChange,
+  keepRecentStr,
+  onKeepRecentChange,
+  recalledStickyTurnsStr,
+  onRecalledStickyTurnsChange,
   modelKey,
   onModelKeyChange,
   modelOptions,
@@ -678,13 +706,17 @@ function CompactSettingsSection({
   chatnodeTargetPctStr,
   onChatnodeTargetPctChange,
   ctxWindow,
+  preserveMode,
+  onPreserveModeChange,
 }: {
   triggerPctStr: string;
   onTriggerPctChange: (v: string) => void;
   targetPctStr: string;
   onTargetPctChange: (v: string) => void;
-  preserveTurnsStr: string;
-  onPreserveTurnsChange: (v: string) => void;
+  keepRecentStr: string;
+  onKeepRecentChange: (v: string) => void;
+  recalledStickyTurnsStr: string;
+  onRecalledStickyTurnsChange: (v: string) => void;
   modelKey: string;
   onModelKeyChange: (v: string) => void;
   modelOptions: Array<{ key: string; label: string; pinned: boolean }>;
@@ -699,6 +731,11 @@ function CompactSettingsSection({
    * the compact model pin → default model → engine fallback, so the
    * binding stays correct when the user switches compact_model. */
   ctxWindow: number;
+  /** Shared preserve-strategy for both tiers. ``by_count`` honors the N
+   * knob and disables the two target-volume inputs; ``by_budget``
+   * disables the N knob and drives tail selection from target_pct. */
+  preserveMode: "by_count" | "by_budget";
+  onPreserveModeChange: (v: "by_count" | "by_budget") => void;
 }) {
   const { t } = useTranslation();
   // Derive a display string for the tokens sibling of a percent input.
@@ -726,12 +763,68 @@ function CompactSettingsSection({
       const pct = Math.round((tokens / ctxWindow) * 100);
       onPctChange(String(pct));
     };
+  const targetDisabled = preserveMode === "by_count";
+  const keepRecentDisabled = preserveMode === "by_budget";
+  const targetInputClass = `w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none${
+    targetDisabled ? " bg-gray-100 text-gray-400 cursor-not-allowed" : ""
+  }`;
+  const keepRecentInputClass = `mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none${
+    keepRecentDisabled ? " bg-gray-100 text-gray-400 cursor-not-allowed" : ""
+  }`;
   return (
     <div>
       <p className="text-[10px] text-gray-400">
         {t("chatflow_settings.compact_hint")}
       </p>
       <div className="mt-3 space-y-3">
+        {/* Preserve-strategy toggle: left = by_count (记忆力数值), right =
+            by_budget (目标体积). Shared between both tiers — the engine
+            reads a single ``compact_preserve_mode`` field. */}
+        <div>
+          <span className="text-[11px] font-medium text-gray-500">
+            {t("chatflow_settings.compact_preserve_mode_label")}
+          </span>
+          <div
+            role="radiogroup"
+            aria-label={t("chatflow_settings.compact_preserve_mode_label")}
+            className="mt-0.5 flex overflow-hidden rounded border border-gray-300"
+          >
+            <button
+              type="button"
+              role="radio"
+              aria-checked={preserveMode === "by_count"}
+              data-testid="compact-preserve-mode-by-count"
+              onClick={() => onPreserveModeChange("by_count")}
+              className={`flex-1 px-2 py-1.5 text-[11px] ${
+                preserveMode === "by_count"
+                  ? "bg-blue-500 text-white"
+                  : "bg-white text-gray-600 hover:bg-gray-50"
+              }`}
+            >
+              {t("chatflow_settings.compact_preserve_mode_by_count")}
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={preserveMode === "by_budget"}
+              data-testid="compact-preserve-mode-by-budget"
+              onClick={() => onPreserveModeChange("by_budget")}
+              className={`flex-1 border-l border-gray-300 px-2 py-1.5 text-[11px] ${
+                preserveMode === "by_budget"
+                  ? "bg-blue-500 text-white"
+                  : "bg-white text-gray-600 hover:bg-gray-50"
+              }`}
+            >
+              {t("chatflow_settings.compact_preserve_mode_by_budget")}
+            </button>
+          </div>
+          <p className="mt-1 text-[10px] text-gray-400">
+            {preserveMode === "by_count"
+              ? t("chatflow_settings.compact_preserve_mode_by_count_hint")
+              : t("chatflow_settings.compact_preserve_mode_by_budget_hint")}
+          </p>
+        </div>
+
         <h4 className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
           {t("chatflow_settings.compact_chatflow_layer")}
         </h4>
@@ -771,7 +864,8 @@ function CompactSettingsSection({
               value={chatnodeTargetPctStr}
               onChange={(e) => onChatnodeTargetPctChange(e.target.value)}
               data-testid="chatnode-compact-target-pct-input"
-              className="w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+              disabled={targetDisabled}
+              className={targetInputClass}
             />
             <input
               type="number"
@@ -780,7 +874,8 @@ function CompactSettingsSection({
               value={pctStrToTokensStr(chatnodeTargetPctStr)}
               onChange={(e) => onTokensEdit(onChatnodeTargetPctChange)(e.target.value)}
               data-testid="chatnode-compact-target-tokens-input"
-              className="w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+              disabled={targetDisabled}
+              className={targetInputClass}
             />
           </div>
           <p className="mt-1 text-[10px] text-gray-400">
@@ -830,7 +925,8 @@ function CompactSettingsSection({
               value={targetPctStr}
               onChange={(e) => onTargetPctChange(e.target.value)}
               data-testid="compact-target-pct-input"
-              className="w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+              disabled={targetDisabled}
+              className={targetInputClass}
             />
             <input
               type="number"
@@ -839,7 +935,8 @@ function CompactSettingsSection({
               value={pctStrToTokensStr(targetPctStr)}
               onChange={(e) => onTokensEdit(onTargetPctChange)(e.target.value)}
               data-testid="compact-target-tokens-input"
-              className="w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
+              disabled={targetDisabled}
+              className={targetInputClass}
             />
           </div>
           <p className="mt-1 text-[10px] text-gray-400">
@@ -856,19 +953,38 @@ function CompactSettingsSection({
 
         <label className="block">
           <span className="text-[11px] font-medium text-gray-500">
-            {t("chatflow_settings.compact_preserve_turns")}
+            {t("chatflow_settings.compact_keep_recent_count")}
           </span>
           <input
             type="number"
             min={0}
             step={1}
-            value={preserveTurnsStr}
-            onChange={(e) => onPreserveTurnsChange(e.target.value)}
-            data-testid="compact-preserve-turns-input"
+            value={keepRecentStr}
+            onChange={(e) => onKeepRecentChange(e.target.value)}
+            data-testid="compact-keep-recent-count-input"
+            disabled={keepRecentDisabled}
+            className={keepRecentInputClass}
+          />
+          <p className="mt-1 text-[10px] text-gray-400">
+            {t("chatflow_settings.compact_keep_recent_count_hint")}
+          </p>
+        </label>
+
+        <label className="block">
+          <span className="text-[11px] font-medium text-gray-500">
+            {t("chatflow_settings.recalled_context_sticky_turns")}
+          </span>
+          <input
+            type="number"
+            min={0}
+            step={1}
+            value={recalledStickyTurnsStr}
+            onChange={(e) => onRecalledStickyTurnsChange(e.target.value)}
+            data-testid="recalled-context-sticky-turns-input"
             className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 text-xs text-gray-700 focus:border-blue-400 focus:outline-none"
           />
           <p className="mt-1 text-[10px] text-gray-400">
-            {t("chatflow_settings.compact_preserve_turns_hint")}
+            {t("chatflow_settings.recalled_context_sticky_turns_hint")}
           </p>
         </label>
 

@@ -268,6 +268,7 @@ export interface PendingTurn {
 export interface CompactSnapshot {
   summary: string;
   preserved_messages: WireMessage[];
+  preserved_before_summary: boolean;
 }
 
 export interface ChatFlowNode extends NodeBaseFields {
@@ -372,9 +373,28 @@ export interface ChatFlow {
   compact_target_pct: number;
   /**
    * Trailing messages kept verbatim on the downstream side of a
-   * compact. Smaller = more aggressive; larger = more fidelity.
+   * compact. Smaller = more aggressive; larger = more fidelity. Only
+   * consulted when ``compact_preserve_mode === "by_count"``.
    */
-  compact_preserve_recent_turns: number;
+  compact_keep_recent_count: number;
+  /**
+   * Strategy for deciding the verbatim tail on a compact.
+   * ``by_count`` keeps the last N messages (and lets the summary run
+   * uncapped); ``by_budget`` greedy-packs the tail into whatever
+   * is left of ``target_pct × context_window`` after the summary's
+   * tokens are subtracted. Applies to both tiers. Default
+   * ``by_count``.
+   */
+  compact_preserve_mode: "by_count" | "by_budget";
+  /**
+   * Counter-init for sticky-restore: how many turns a recalled
+   * ChatNode/WorkNode stays in context after ``get_node_context``
+   * pulls it back. Decremented by 1 each turn that doesn't re-touch
+   * the entry; at 0 it drops out and falls back to the MemoryBoard-
+   * reference form. Independent of ``compact_preserve_mode``.
+   * Default 3.
+   */
+  recalled_context_sticky_turns: number;
   /** Optional pin for the compact worker itself. ``null`` = inherit. */
   compact_model: ProviderModelRef | null;
   /** Whether explicit UI-driven compacts open a confirmation dialog. */

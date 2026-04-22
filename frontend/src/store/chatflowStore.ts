@@ -172,7 +172,9 @@ export interface ChatFlowStoreState {
     disabled_tool_names?: string[];
     compact_trigger_pct?: number | null;
     compact_target_pct?: number;
-    compact_preserve_recent_turns?: number;
+    compact_keep_recent_count?: number;
+    compact_preserve_mode?: "by_count" | "by_budget";
+    recalled_context_sticky_turns?: number;
     compact_model?: ProviderModelRef | null;
     compact_require_confirmation?: boolean;
     chatnode_compact_trigger_pct?: number | null;
@@ -597,10 +599,22 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
       updated.compact_target_pct = patch.compact_target_pct;
     }
     if (
-      "compact_preserve_recent_turns" in patch
-      && patch.compact_preserve_recent_turns !== undefined
+      "compact_keep_recent_count" in patch
+      && patch.compact_keep_recent_count !== undefined
     ) {
-      updated.compact_preserve_recent_turns = patch.compact_preserve_recent_turns;
+      updated.compact_keep_recent_count = patch.compact_keep_recent_count;
+    }
+    if (
+      "compact_preserve_mode" in patch
+      && patch.compact_preserve_mode !== undefined
+    ) {
+      updated.compact_preserve_mode = patch.compact_preserve_mode;
+    }
+    if (
+      "recalled_context_sticky_turns" in patch
+      && patch.recalled_context_sticky_turns !== undefined
+    ) {
+      updated.recalled_context_sticky_turns = patch.recalled_context_sticky_turns;
     }
     if ("compact_model" in patch) {
       updated.compact_model = patch.compact_model ?? null;
@@ -1025,6 +1039,17 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
 
     const kind = event.kind;
     const data = event.data ?? {};
+
+    // The whole chatflow was deleted (by this tab or elsewhere). Drop
+    // local state so the canvas stops painting the last-known node
+    // status as still-running, close the SSE stream, and refresh the
+    // sidebar so the row disappears.
+    if (kind === "chat.deleted") {
+      get().sseSubscription?.close();
+      get().setChatFlow(null);
+      void get().fetchChatFlowList();
+      return;
+    }
 
     // High-frequency streaming token events: append to the per-node
     // buffer, do NOT trigger a server refresh (one fragment per

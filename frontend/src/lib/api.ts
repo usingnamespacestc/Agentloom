@@ -100,7 +100,9 @@ export const api = {
       disabled_tool_names?: string[];
       compact_trigger_pct?: number | null;
       compact_target_pct?: number;
-      compact_preserve_recent_turns?: number;
+      compact_keep_recent_count?: number;
+      compact_preserve_mode?: "by_count" | "by_budget";
+      recalled_context_sticky_turns?: number;
       compact_model?: ProviderModelRef | null;
       compact_require_confirmation?: boolean;
       chatnode_compact_trigger_pct?: number | null;

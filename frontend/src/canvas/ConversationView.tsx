@@ -827,6 +827,34 @@ function ChatMessageBubble({
   );
 }
 
+function PreservedWireBubble({ msg }: { msg: WireMessage }) {
+  if (msg.role === "user") {
+    return (
+      <div className="mb-2 flex items-end justify-end gap-1">
+        <CopyTextButton text={msg.content} />
+        <div className="prose prose-sm prose-invert max-w-[85%] rounded-2xl bg-blue-500 px-3 py-2 text-[13px] text-white break-words">
+          <Markdown>{msg.content}</Markdown>
+        </div>
+      </div>
+    );
+  }
+  if (msg.role === "assistant") {
+    return (
+      <div className="mb-2 prose prose-sm max-w-none text-[13px] leading-relaxed text-gray-800 break-words">
+        <Markdown>{msg.content}</Markdown>
+      </div>
+    );
+  }
+  // system / tool — dim, monospace pill so they're visible but clearly
+  // non-conversational.
+  return (
+    <div className="mb-2 rounded-md bg-gray-50 px-2 py-1 font-mono text-[11px] text-gray-500 break-words whitespace-pre-wrap">
+      <span className="mr-1 font-semibold uppercase text-gray-400">{msg.role}</span>
+      {msg.content}
+    </div>
+  );
+}
+
 function CompactMessageBubble({
   node,
   isSelected,
@@ -843,7 +871,41 @@ function CompactMessageBubble({
   // mirrors it once the worker finishes. Fall back to snap.summary so we
   // render something as soon as the compact worker writes the snapshot.
   const summary = node.agent_response.text || snap.summary;
+  const preserved = snap.preserved_messages ?? [];
+  const preservedFirst = snap.preserved_before_summary;
   const isRunning = node.status === "running";
+
+  const summaryBlock = (
+    <div
+      data-testid={`conversation-node-${node.id}-compact`}
+      className="mb-2 rounded-md border border-teal-200 bg-teal-50/70 px-3 py-2"
+    >
+      <div className="mb-1 flex items-center gap-1 text-[11px] font-semibold text-teal-700">
+        <span aria-hidden>⟲</span>
+        {t("conversation.compact_summary_label")}
+      </div>
+      {summary ? (
+        <div className="prose prose-sm max-w-none text-[13px] leading-relaxed text-gray-800 break-words">
+          <Markdown>{summary}</Markdown>
+        </div>
+      ) : isRunning ? (
+        <div className="flex items-center gap-1.5 text-[12px] text-teal-600">
+          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-teal-400" />
+          {t("conversation.compact_summary_pending")}
+        </div>
+      ) : (
+        <div className="text-[12px] italic text-gray-400">—</div>
+      )}
+    </div>
+  );
+
+  const preservedBlock = preserved.length ? (
+    <div data-testid={`conversation-node-${node.id}-preserved`}>
+      {preserved.map((msg, i) => (
+        <PreservedWireBubble key={i} msg={msg} />
+      ))}
+    </div>
+  ) : null;
 
   return (
     <div
@@ -856,27 +918,17 @@ function CompactMessageBubble({
           : "border-l-2 border-transparent hover:border-teal-200",
       ].join(" ")}
     >
-      <div
-        data-testid={`conversation-node-${node.id}-compact`}
-        className="rounded-md border border-teal-200 bg-teal-50/70 px-3 py-2"
-      >
-        <div className="mb-1 flex items-center gap-1 text-[11px] font-semibold text-teal-700">
-          <span aria-hidden>⟲</span>
-          {t("conversation.compact_summary_label")}
-        </div>
-        {summary ? (
-          <div className="prose prose-sm max-w-none text-[13px] leading-relaxed text-gray-800 break-words">
-            <Markdown>{summary}</Markdown>
-          </div>
-        ) : isRunning ? (
-          <div className="flex items-center gap-1.5 text-[12px] text-teal-600">
-            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-teal-400" />
-            {t("conversation.compact_summary_pending")}
-          </div>
-        ) : (
-          <div className="text-[12px] italic text-gray-400">—</div>
-        )}
-      </div>
+      {preservedFirst ? (
+        <>
+          {preservedBlock}
+          {summaryBlock}
+        </>
+      ) : (
+        <>
+          {summaryBlock}
+          {preservedBlock}
+        </>
+      )}
       <MetaFooter
         nodeId={showNodeId ? node.id : null}
         usage={aggregateWorkflowUsage(node)}

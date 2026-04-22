@@ -68,7 +68,7 @@ export function CompactConfirmDialog({
     setInstruction("");
     setMustKeep("");
     setMustDrop("");
-    setPreserveStr(String(chatflow.compact_preserve_recent_turns ?? 3));
+    setPreserveStr(String(chatflow.compact_keep_recent_count ?? 3));
     setTargetTokensStr("");
     setModelKey(refKey(chatflow.compact_model ?? null));
     setErrorMessage(null);

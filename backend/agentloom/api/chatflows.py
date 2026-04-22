@@ -47,7 +47,7 @@ from agentloom.engine.chatflow_engine import (
 )
 from agentloom.engine.events import WorkflowEvent, get_event_bus
 from agentloom.schemas import ChatFlow, PendingTurn, make_chatflow
-from agentloom.schemas.chatflow import PendingTurnSource
+from agentloom.schemas.chatflow import CompactPreserveMode, PendingTurnSource
 from agentloom.schemas.common import ExecutionMode, FrozenNodeError, ProviderModelRef, StickyNote
 from agentloom.mcp.runtime import get_shared_registry
 from agentloom.tools.base import ToolContext
@@ -421,7 +421,9 @@ class PatchChatFlowRequest(BaseModel):
     disabled_tool_names: list[str] | None = None
     compact_trigger_pct: float | None = None
     compact_target_pct: float | None = None
-    compact_preserve_recent_turns: int | None = None
+    compact_keep_recent_count: int | None = None
+    compact_preserve_mode: CompactPreserveMode | None = None
+    recalled_context_sticky_turns: int | None = None
     compact_model: ProviderModelRef | None = None
     compact_require_confirmation: bool | None = None
     chatnode_compact_trigger_pct: float | None = None
@@ -465,7 +467,9 @@ async def patch_chatflow(
     for fld in (
         "compact_trigger_pct",
         "compact_target_pct",
-        "compact_preserve_recent_turns",
+        "compact_keep_recent_count",
+        "compact_preserve_mode",
+        "recalled_context_sticky_turns",
         "compact_model",
         "compact_require_confirmation",
         "chatnode_compact_trigger_pct",
@@ -519,7 +523,9 @@ async def patch_chatflow(
         for fld in (
             "compact_trigger_pct",
             "compact_target_pct",
-            "compact_preserve_recent_turns",
+            "compact_keep_recent_count",
+            "compact_preserve_mode",
+            "recalled_context_sticky_turns",
             "compact_model",
             "compact_require_confirmation",
             "chatnode_compact_trigger_pct",
