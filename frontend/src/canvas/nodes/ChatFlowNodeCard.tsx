@@ -205,6 +205,18 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
       {!isRoot && (
         <Handle id="main-target" type="target" position={Position.Left} />
       )}
+      {/* Pack-only target handle on the top edge so the incoming edge
+        * from its packed-range parent visibly drops down into this
+        * card instead of coming in from the left like a normal parent
+        * edge. Matches the user's spec: "打包视觉上要连接到 Node
+        * 下方". */}
+      {isPack && (
+        <Handle id="main-target-top" type="target" position={Position.Top} />
+      )}
+      {/* Source handle on the bottom edge — used by any pack child
+        * hanging off this node. Regular horizontal-flowing children
+        * still use the right-side ``main-source`` handle. */}
+      <Handle id="main-source-bottom" type="source" position={Position.Bottom} />
 
       {/* Delete button — top-right, visible on hover */}
       {canDelete && (

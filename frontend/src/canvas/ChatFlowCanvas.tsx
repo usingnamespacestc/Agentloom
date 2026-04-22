@@ -956,13 +956,41 @@ export function buildGraph(
   const leaves = computeLeafIds(chatflow.nodes);
   const ctxTokens = computeContextTokens(chatflow.nodes);
   const rootSet = new Set(chatflow.root_ids);
+  // Pack ChatNodes drop **below** their parent (the last packed node)
+  // instead of flowing to the right. We override layoutDag's output
+  // here: same x as parent, y offset by one node-height + gap so the
+  // edge bottom→top edge has somewhere to land. Only kicks in when
+  // the pack has no persisted position (first render / user hasn't
+  // dragged it).
+  const PACK_BELOW_GAP = 60;
+  const autoLayoutPosById = new Map<NodeId, { x: number; y: number }>();
+  for (const { node, position } of laidOut) {
+    autoLayoutPosById.set(node.id, position);
+  }
+  const packOverride = new Map<NodeId, { x: number; y: number }>();
+  for (const node of Object.values(chatflow.nodes)) {
+    if (node.pack_snapshot == null) continue;
+    if (node.position_x != null && node.position_y != null) continue;
+    const parentId = node.parent_ids[0];
+    if (!parentId) continue;
+    const parentPos = autoLayoutPosById.get(parentId);
+    if (!parentPos) continue;
+    // ``NODE_HEIGHT`` in layout.ts is 120; reuse a conservative 160
+    // here to account for the pack card's summary body stretching
+    // the height.
+    packOverride.set(node.id, {
+      x: parentPos.x,
+      y: parentPos.y + 160 + PACK_BELOW_GAP,
+    });
+  }
   const chatNodePositions = new Map<NodeId, { x: number; y: number }>();
   const rfNodes: Node<ChatFlowNodeData>[] = laidOut.map(({ node, position }) => {
-    // Prefer server-persisted position over auto-layout.
+    // Prefer server-persisted position over auto-layout. Pack override
+    // only applies when the pack has no persisted position.
     const pos =
       node.position_x != null && node.position_y != null
         ? { x: node.position_x, y: node.position_y }
-        : position;
+        : packOverride.get(node.id) ?? position;
     chatNodePositions.set(node.id, pos);
     const isRoot = rootSet.has(node.id);
     return {
@@ -992,16 +1020,26 @@ export function buildGraph(
       if (!(parentId in chatflow.nodes)) continue;
       const parent = chatflow.nodes[parentId];
       const isMerge = node.parent_ids.length >= 2;
+      const isPack = node.pack_snapshot != null;
       const isDashed = !parent.status || parent.status === "planned" || node.status === "planned";
       rfEdges.push({
         id: `${parentId}->${node.id}`,
         source: parentId,
         target: node.id,
-        sourceHandle: "main-source",
-        targetHandle: "main-target",
+        // Pack children attach to the parent's bottom edge and drop
+        // straight down into the pack card's top edge — makes the
+        // "below-the-range" topology visible at a glance.
+        sourceHandle: isPack ? "main-source-bottom" : "main-source",
+        targetHandle: isPack ? "main-target-top" : "main-target",
         animated: node.status === "running",
         style: {
-          stroke: isMerge ? "#a855f7" : isDashed ? "#9ca3af" : "#374151",
+          stroke: isPack
+            ? "#f43f5e" // rose-500
+            : isMerge
+              ? "#a855f7"
+              : isDashed
+                ? "#9ca3af"
+                : "#374151",
           strokeDasharray: isDashed ? "6 4" : undefined,
           strokeWidth: isMerge ? 2.5 : 1.5,
         },
