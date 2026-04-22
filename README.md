@@ -47,9 +47,11 @@
   让 judge 审阅产出。子 agent 委派会开出一个嵌套的 WorkFlow，它的事件流会往上
   转发到父 WorkFlow。
 
-  ![WorkFlow 内部视图：点击 ChatNode 的 ⤢ 按钮钻入后，可以看到 planner 生成的
-  judge_pre / plan / 并行 worker / judge_post 这张 DAG，每个 WorkNode 都能看到
-  它的输入、输出、状态、耗时。](docs/images/04-workflow-canvas.png)
+  ![WorkFlow 内部视图（S1 retry 流）：auto_plan 模式下 20 个 WorkNode 展开成
+  judge_pre → plan → plan_judge → 多个并行 worker/worker_judge → 4-parent
+  扇入的 post_judge → retry cycle 再跑一轮的 DAG。每个 WorkNode 都能看到
+  自己的输入、输出、状态、耗时；右下角的 WorkBoard 浮窗列出全部 brief。
+  ](docs/images/04-workflow-canvas.png)
 
 - **Plan / Execute 分离。** 每个节点都有两态：虚线（已规划，可编辑）→ 实线（已
   执行，已冻结）。你可以在执行前修改计划，执行后查看现场；想重来就开分支——原来

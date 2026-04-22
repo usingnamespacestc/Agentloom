@@ -56,9 +56,12 @@ Concretely, that means:
   (pre / during / post). Sub-agent delegations spawn nested WorkFlows with
   their own event stream forwarded up to the parent.
 
-  ![Inner WorkFlow view: drilling into a ChatNode via the ⤢ button surfaces
-  the planner-generated judge_pre / plan / parallel workers / judge_post DAG;
-  each WorkNode exposes its inputs, outputs, status, and latency.](docs/images/04-workflow-canvas.png)
+  ![Inner WorkFlow view (S1 retry flow): an auto_plan ChatNode expanded
+  into a 20-WorkNode DAG — judge_pre → plan → plan_judge → parallel
+  worker/worker_judge lanes → a 4-parent post_judge fan-in → a second
+  retry cycle. Every WorkNode shows its inputs, outputs, status, and
+  latency; the bottom-right WorkBoard floats an index of every brief.
+  ](docs/images/04-workflow-canvas.png)
 
 - **Plan / Execute separation.** Every node has two phases: dashed (planned,
   editable) → solid (executed, frozen). You can edit the plan before it
