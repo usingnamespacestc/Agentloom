@@ -1334,7 +1334,11 @@ function WorkFlowConversation({ workflow }: { workflow: WorkFlow | null }) {
   const { path, forks } = useMemo(() => {
     if (!workflow) return { path: [], forks: [] };
     return resolvePath<WorkFlowNode>(
-      { nodes: workflow.nodes, rootIds: workflow.root_ids },
+      {
+        nodes: workflow.nodes,
+        rootIds: workflow.root_ids,
+        isEdgeChild: (n) => n.step_kind !== "brief",
+      },
       workflowSelectedNodeId,
     );
   }, [workflow, workflowSelectedNodeId]);

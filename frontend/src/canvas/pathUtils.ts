@@ -50,6 +50,12 @@ export interface ResolvedPath {
 export interface PathGraph<T extends NodeBaseFields> {
   nodes: Record<NodeId, T>;
   rootIds: NodeId[];
+  /** Optional predicate: nodes returning ``false`` are side annotations
+   * (e.g. WorkFlow briefs stacked above their source WorkNode) that
+   * should not count as branches for fork detection or default-latest
+   * walks. They remain reachable if the user explicitly selects one —
+   * this only affects the childrenOf map, not path-walk endpoints. */
+  isEdgeChild?: (node: T) => boolean;
 }
 
 export function resolvePath<T extends NodeBaseFields>(
@@ -60,9 +66,11 @@ export function resolvePath<T extends NodeBaseFields>(
     return { path: [], forks: [] };
   }
 
+  const isEdgeChild = graph.isEdgeChild ?? (() => true);
   const childrenOf: Record<NodeId, NodeId[]> = {};
   for (const id of Object.keys(graph.nodes)) childrenOf[id] = [];
   for (const [id, node] of Object.entries(graph.nodes)) {
+    if (!isEdgeChild(node)) continue;
     for (const p of node.parent_ids) {
       if (p in childrenOf) childrenOf[p].push(id);
     }
@@ -116,9 +124,11 @@ export function findLatestLeafId<T extends NodeBaseFields>(
   graph: PathGraph<T> | null,
 ): NodeId | null {
   if (!graph || graph.rootIds.length === 0) return null;
+  const isEdgeChild = graph.isEdgeChild ?? (() => true);
   const childrenOf: Record<NodeId, NodeId[]> = {};
   for (const id of Object.keys(graph.nodes)) childrenOf[id] = [];
   for (const [id, node] of Object.entries(graph.nodes)) {
+    if (!isEdgeChild(node)) continue;
     for (const p of node.parent_ids) {
       if (p in childrenOf) childrenOf[p].push(id);
     }

@@ -148,4 +148,29 @@ describe("resolvePath", () => {
     const graph = { nodes: {}, rootIds: ["ghost"] };
     expect(resolvePath(graph, null)).toEqual({ path: [], forks: [] });
   });
+
+  it("isEdgeChild=false nodes don't count as branches at their parent", () => {
+    // Mirrors WorkFlow: `root` has two real children (`a`, `b`) and one
+    // brief side-annotation (`brief`) whose parent_ids = [root]. The
+    // brief must not show up as a third fork branch.
+    type WFish = NodeBaseFields & { step_kind: "draft" | "brief" };
+    const nn = (id: string, parents: string[], kind: "draft" | "brief"): WFish => ({
+      ...n(id, parents),
+      step_kind: kind,
+    });
+    const graph = {
+      nodes: {
+        root: nn("root", [], "draft"),
+        a: nn("a", ["root"], "draft"),
+        b: nn("b", ["root"], "draft"),
+        brief: nn("brief", ["root"], "brief"),
+      },
+      rootIds: ["root"],
+      isEdgeChild: (node: WFish) => node.step_kind !== "brief",
+    };
+    const { forks } = resolvePath(graph, "a");
+    expect(forks).toHaveLength(1);
+    expect(forks[0].nodeId).toBe("root");
+    expect(forks[0].childIds).toEqual(["a", "b"]);
+  });
 });
