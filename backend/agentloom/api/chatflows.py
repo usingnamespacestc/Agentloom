@@ -242,33 +242,6 @@ class CompactChainResponse(BaseModel):
     status: str
 
 
-class PackWorkRangeRequest(BaseModel):
-    """Body for POST /chatflows/{id}/nodes/{chat_node_id}/workflow/pack.
-
-    ``packed_range`` lists WorkNode ids in topological order (earliest →
-    latest, contiguous along parent_ids). ``sub_path`` optionally drills
-    into a nested delegate WorkFlow inside the named ChatNode's inner
-    WorkFlow (same convention as ``sub_path`` on other /workflow/*
-    endpoints).
-    """
-
-    packed_range: list[str]
-    sub_path: list[str] = []
-    use_detailed_index: bool = True
-    preserve_last_n: int = 0
-    pack_instruction: str = ""
-    must_keep: str = ""
-    must_drop: str = ""
-    target_tokens: int | None = None
-
-
-class PackWorkRangeResponse(BaseModel):
-    node_id: str
-    status: str
-    summary: str
-    packed_range: list[str]
-
-
 class MergeChainRequest(BaseModel):
     """Body for POST /chatflows/{id}/merge.
 
@@ -679,71 +652,6 @@ async def put_sticky_notes(
     await repo.save(chat)
     await session.commit()
     return {"ok": True}
-
-
-@router.post(
-    "/{chatflow_id}/nodes/{chat_node_id}/workflow/pack",
-    response_model=PackWorkRangeResponse,
-)
-async def pack_workflow_range(
-    chatflow_id: str,
-    chat_node_id: str,
-    body: PackWorkRangeRequest,
-    request: Request,
-    session_maker: async_sessionmaker[AsyncSession] = Depends(get_session_scope),
-) -> PackWorkRangeResponse:
-    """User-initiated pack of a contiguous WorkNode range inside a
-    ChatNode's inner WorkFlow (or a nested delegate sub-workflow when
-    ``sub_path`` is supplied).
-
-    Adds one PACK WorkNode whose parent is the last id in
-    ``packed_range`` and runs it to completion in place. Session is
-    released while the pack worker runs so long summaries don't pin a
-    connection.
-    """
-    engine = _get_engine(request)
-
-    async with session_maker() as session:
-        repo = _repo(session)
-        chat = await _attached_chatflow(engine, repo, chatflow_id)
-        if chat_node_id not in chat.nodes:
-            raise HTTPException(
-                404, f"chat node {chat_node_id} not in chatflow {chatflow_id}"
-            )
-
-    from agentloom.engine.workflow_engine import PackRangeError
-
-    try:
-        pack_node = await engine.pack_workflow_range(
-            chat.id,
-            chat_node_id,
-            sub_path=body.sub_path,
-            packed_range=body.packed_range,
-            use_detailed_index=body.use_detailed_index,
-            preserve_last_n=body.preserve_last_n,
-            pack_instruction=body.pack_instruction,
-            must_keep=body.must_keep,
-            must_drop=body.must_drop,
-            target_tokens=body.target_tokens,
-        )
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except PackRangeError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
-
-    async with session_maker() as session:
-        await _repo(session).save(chat)
-        await session.commit()
-
-    snap = pack_node.pack_snapshot
-    return PackWorkRangeResponse(
-        node_id=pack_node.id,
-        status=pack_node.status.value,
-        summary=(snap.summary if snap else "") or "",
-        packed_range=list(snap.packed_range) if snap else [],
-    )
 
 
 @router.put("/{chatflow_id}/nodes/{chat_node_id}/workflow/sticky-notes")
