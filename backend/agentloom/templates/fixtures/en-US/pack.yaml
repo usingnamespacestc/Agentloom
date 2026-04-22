@@ -1,0 +1,141 @@
+builtin_id: pack
+name: "Pack"
+description: >
+  Mid-graph custom variant of Compact. Where compact implicitly covers
+  the root→leaf prefix, pack summarizes an **arbitrary contiguous
+  range** of WorkNodes (or ChatNodes) chosen explicitly by the invoker.
+  Output shape is identical to compact's — a short prose summary with
+  per-node citations — so downstream ancestor walks can substitute
+  the pack summary in place of the packed range. The engine wraps the
+  LLM output into a :class:`PackSnapshot`, captures the explicit
+  ``packed_range`` itself, and (optionally) carves off a ``preserve_last_n``
+  verbatim tail before this plan runs.
+params_schema:
+  messages_to_pack:
+    type: string
+    required: true
+    description: >
+      Serialized range messages to summarize. Matches compact's
+      ``messages_to_compact`` shape: each line is
+      ``[node:<id> | role] content`` so the summary can cite source
+      WorkNode ids for drill-down via ``get_node_context``.
+  packed_node_ids:
+    type: string
+    required: true
+    description: >
+      Comma-separated list of node ids in the range, in topological
+      order. The summary is expected to mention each id at least once
+      when ``use_detailed_index`` is true.
+  target_tokens:
+    type: int
+    required: true
+    description: >
+      Rough token budget for the summary. Aim under.
+  use_detailed_index:
+    type: bool
+    required: false
+    description: >
+      When true (default), produce one paragraph per node id, each
+      ending with ``(nodes: <id>)`` — downstream refs can cite
+      individual members of the packed range. When false, produce a
+      single monolithic summary paragraph without per-node citations;
+      the pack collapses into one opaque block.
+  must_keep:
+    type: string
+    required: false
+    description: >
+      Freeform text to preserve verbatim.
+  must_drop:
+    type: string
+    required: false
+    description: >
+      Freeform text to omit.
+  pack_instruction:
+    type: string
+    required: false
+    description: >
+      Freeform user guidance — focus, tone, what matters most in this
+      pack.
+plan:
+  description:
+    text: "Pack a chosen mid-graph range into a summary."
+    provenance: pure_agent
+  execution_mode: native_react
+  nodes:
+    - id: "pack_worker"
+      parent_ids: []
+      step_kind: draft
+      description:
+        text: "Produce a pack summary for the given range."
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            You are a pack worker. Your job: summarize an **explicit
+            mid-graph range** of conversation / work steps into terse
+            prose so downstream consumers see one compact block in
+            place of the full range. Unlike compact (which covers the
+            whole prior history), pack's range is exactly the set of
+            node ids the user chose — never invent, never drop.
+
+            Output format (obey strictly):
+
+            1. First line is a fixed pointer telling the reader how
+               to fetch full content on demand, e.g.:
+                 For full content, call get_node_context(node_id=<id>)
+                 to inspect any node in this pack.
+
+            2. When ``use_detailed_index`` is true, every following
+               paragraph corresponds to **one packed node id**. Fold
+               all messages under the same id (a user turn + assistant
+               reply, plus any tool calls between them) into one
+               paragraph that narrates the exchange as one complete
+               unit. End each paragraph with the id **once**, e.g.
+               ``(nodes: n_abc)``. Only when a paragraph genuinely
+               spans multiple ids should you list several, e.g.
+               ``(nodes: n_abc, n_def)``.
+
+               When ``use_detailed_index`` is false, produce a SINGLE
+               paragraph that summarizes the range holistically, with
+               one closing citation listing ALL packed ids, e.g.
+               ``(packed: n_abc, n_def, n_ghi)``. Do not split into
+               per-node paragraphs in this mode.
+
+            Hard rules:
+              - Preserve proper nouns, ids, file paths, numbers, dates,
+                explicit decisions, and any tool-call results / error
+                messages later turns may need — but keep only the
+                *conclusions* and *key facts*; drop process detail.
+              - Write in neutral third person.
+              - If ``must_keep`` is given, weave it in verbatim. If
+                ``must_drop`` appears in the range, omit it.
+              - Respect ``target_tokens``: aim UNDER; never exceed.
+              - Every cited node id must be one of ``packed_node_ids``.
+                Do not invent ids, and do not cite nodes outside the
+                explicit range.
+              - Output the summary body only (pointer line +
+                paragraphs) — no extra preamble, no postscript, no
+                JSON, no markdown code fences.
+        - role: user
+          content: |
+            Target tokens: {{ target_tokens }}
+            Use detailed index: {{ use_detailed_index }}
+            Packed node ids (this is the exhaustive range — cite only these):
+            {{ packed_node_ids }}
+
+            Must-keep (verbatim):
+            {{ must_keep }}
+
+            Must-drop (omit):
+            {{ must_drop }}
+
+            Invoker instruction:
+            {{ pack_instruction }}
+
+            Messages to pack (each line starts with ``[node:<id> | role]``):
+            ---
+            {{ messages_to_pack }}
+            ---
+
+            Write the pack summary now.
+  root_ids: ["pack_worker"]

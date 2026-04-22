@@ -1,0 +1,129 @@
+builtin_id: pack
+name: "Pack"
+description: >
+  Compact 的中段自定义变体。compact 隐式覆盖从根到叶的前缀；pack 则对
+  调用方**显式指定的一段连通范围**（WorkNode 或 ChatNode）做摘要。输出
+  形态与 compact 完全一致——一段带节点 id 引用的紧凑散文——以便下游
+  ancestor walk 用 pack 摘要替换被打包的整段范围。引擎把 LLM 输出包进
+  :class:`PackSnapshot`，并在本 plan 运行**之前**就已经记录显式的
+  ``packed_range`` 和（可选的）``preserve_last_n`` 逐字尾巴。
+params_schema:
+  messages_to_pack:
+    type: string
+    required: true
+    description: >
+      需要摘要的范围内消息。形态同 compact 的 ``messages_to_compact``：
+      每行 ``[node:<id> | role] content``，摘要可按节点 id 作为引用，
+      下游用 ``get_node_context`` 回取原文。
+  packed_node_ids:
+    type: string
+    required: true
+    description: >
+      范围内节点 id 的逗号分隔列表（拓扑顺序）。当
+      ``use_detailed_index`` 为 true 时，摘要至少要提到每一个 id。
+  target_tokens:
+    type: int
+    required: true
+    description: >
+      摘要的粗略 token 预算。瞄准*低于*这个数，而不是贴着写。
+  use_detailed_index:
+    type: bool
+    required: false
+    description: >
+      默认 true——每个被打包节点单独一段，段末写 ``(节点: <id>)``，
+      下游引用可定位到范围内某一节点。设为 false 时，生成**单段**整体
+      摘要，结尾一次性列出所有被打包 id，形如
+      ``(已打包: n_abc, n_def, n_ghi)``——范围对外折叠成一个整块。
+  must_keep:
+    type: string
+    required: false
+    description: >
+      要逐字保留的自由文本。
+  must_drop:
+    type: string
+    required: false
+    description: >
+      可以放心丢弃的自由文本。
+  pack_instruction:
+    type: string
+    required: false
+    description: >
+      调用方对如何打包的自由指示——重点区域、语气、本次打包要强调什么。
+plan:
+  description:
+    text: "对选定的中段范围做 pack 摘要。"
+    provenance: pure_agent
+  execution_mode: native_react
+  nodes:
+    - id: "pack_worker"
+      parent_ids: []
+      step_kind: draft
+      description:
+        text: "为给定范围产出一段 pack 摘要。"
+        provenance: pure_agent
+      input_messages:
+        - role: system
+          content: |
+            你是 pack 摘要 worker。任务：把一段**用户显式指定的中段**
+            对话 / 执行步骤改写成紧凑散文，让下游 LLM 调用用这一小段
+            代替范围原文继续工作。与 compact（覆盖全部历史）不同，
+            pack 的范围**严格等于用户给出的那组 id**——不要自己
+            扩大或缩小范围。
+
+            输出格式（必须严格遵守）：
+
+            1. 第一行固定写一句提示，告知读者如何按需取回原始内容，
+               例如：
+                 如需完整内容，可调用 get_node_context(node_id=<id>)
+                 查看 pack 内任意节点。
+
+            2. 当 ``use_detailed_index`` 为 true 时，其后每一段对应
+               **一个被打包节点 id**。同一 id 下的所有消息（通常是
+               一条用户提问 + 一条助手回复，有时还有工具调用）合并成
+               一段叙述，把一来一回作为一个完整交互讲清楚，不要拆
+               成两段。段末尾用半角括号写**一次**节点 id，形如
+               ``(节点: n_abc)``；极少数情况下一段需要跨多个 id 才
+               能讲清楚，才可以列多个，如 ``(节点: n_abc, n_def)``。
+
+               当 ``use_detailed_index`` 为 false 时，生成**单段**整
+               体摘要，段末**一次性**列出全部被打包 id，形如
+               ``(已打包: n_abc, n_def, n_ghi)``——不要拆成分段。
+
+            硬性规则：
+              - 专有名词、id、文件路径、数字、日期、明确作出的决策，
+                以及后续轮次可能引用的工具调用结果 / 错误消息，要原
+                样保留——但尽量只保留*结论*与*关键事实*，过程性描述
+                可以省掉。
+              - 用中立的第三人称书写："用户提出了 X。助手回答 Y。"
+                ——不要用第一人称。
+              - 若用户提供了 ``must_keep``，逐字嵌入。若出现
+                ``must_drop`` 的内容，省略。
+              - 尊重 token 预算：瞄准*低于* ``target_tokens``；绝对
+                不能超。
+              - 引用的 id 必须是 ``packed_node_ids`` 里的 id；不要
+                编造，也不要引用范围外的节点。
+              - 只输出摘要正文（首行提示 + 段落）——不要再额外加开
+                场白、结语、JSON、markdown 代码围栏。
+        - role: user
+          content: |
+            目标 tokens：{{ target_tokens }}
+            是否使用详细索引：{{ use_detailed_index }}
+            被打包节点 id（这就是全部范围，只能引用这些）：
+            {{ packed_node_ids }}
+
+            必保（逐字）：
+            {{ must_keep }}
+
+            必删（省略）：
+            {{ must_drop }}
+
+            调用方指示：
+            {{ pack_instruction }}
+
+            待打包消息（每行以 ``[node:<id> | role]`` 开头）：
+            ---
+            {{ messages_to_pack }}
+            ---
+
+            现在写出 pack 摘要。
+  root_ids: ["pack_worker"]
