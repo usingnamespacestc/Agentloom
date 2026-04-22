@@ -956,6 +956,14 @@ export function buildGraph(
   const leaves = computeLeafIds(chatflow.nodes);
   const ctxTokens = computeContextTokens(chatflow.nodes);
   const rootSet = new Set(chatflow.root_ids);
+  // Parents of pack ChatNodes need a bottom source handle; every other
+  // node suppresses it to avoid a visible-but-unconnected dot.
+  const parentsOfPack = new Set<NodeId>();
+  for (const n of Object.values(chatflow.nodes)) {
+    if (n.pack_snapshot == null) continue;
+    const pid = n.parent_ids[0];
+    if (pid) parentsOfPack.add(pid);
+  }
   // Pack ChatNodes drop **below** their parent (the last packed node)
   // instead of flowing to the right. We override layoutDag's output
   // here: same x as parent, y offset by one node-height + gap so the
@@ -1009,6 +1017,7 @@ export function buildGraph(
           chatflow.draft_model,
           contextWindowByModel,
         ),
+        hasPackChild: parentsOfPack.has(node.id),
       },
       selectable: false,
     };

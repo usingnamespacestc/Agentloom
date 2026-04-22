@@ -45,6 +45,11 @@ export interface ChatFlowNodeData extends Record<string, unknown> {
    * provider didn't declare one — in that case the bar falls back to
    * :data:`DEFAULT_MAX_CONTEXT_TOKENS`. */
   maxContextTokens: number | null;
+  /** True when some pack ChatNode has this node as its parent — drives
+   * whether the bottom source handle is rendered at all. Keeping it
+   * off when there's no pack child hides a stray connection dot on
+   * nodes that never spawned a pack. */
+  hasPackChild: boolean;
 }
 
 const TRUNCATE = 90;
@@ -79,6 +84,7 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
     isRoot,
     contextTokens,
     maxContextTokens,
+    hasPackChild,
   } = data as ChatFlowNodeData;
   const isMerge = node.parent_ids.length >= 2;
   const isMergeSettled = isMerge && node.status === "succeeded";
@@ -213,10 +219,14 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
       {isPack && (
         <Handle id="main-target-top" type="target" position={Position.Top} />
       )}
-      {/* Source handle on the bottom edge — used by any pack child
-        * hanging off this node. Regular horizontal-flowing children
-        * still use the right-side ``main-source`` handle. */}
-      <Handle id="main-source-bottom" type="source" position={Position.Bottom} />
+      {/* Source handle on the bottom edge — only rendered when this
+        * node actually has a pack child hanging off it. Parents with
+        * no pack stay clean (no stray connection dot). Regular
+        * horizontal-flowing children still use the right-side
+        * ``main-source`` handle. */}
+      {hasPackChild && (
+        <Handle id="main-source-bottom" type="source" position={Position.Bottom} />
+      )}
 
       {/* Delete button — top-right, visible on hover */}
       {canDelete && (
