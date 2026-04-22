@@ -58,7 +58,7 @@ export function MemoryBoardPanel({
       data-testid={testId}
       onClick={(e) => e.stopPropagation()}
       onContextMenu={(e) => e.stopPropagation()}
-      className="absolute bottom-2 left-2 z-10 w-72 rounded-md border border-gray-300 bg-white/95 shadow-sm"
+      className="absolute bottom-2 right-2 z-10 w-72 rounded-md border border-gray-300 bg-white/95 shadow-sm"
     >
       <button
         type="button"
