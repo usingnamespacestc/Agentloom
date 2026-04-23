@@ -186,6 +186,11 @@ inspect and swap out.
 - [x] Joint-compact: when both branches of a merge overflow the budget,
       a visible joint-compact ChatNode materializes between the sources
       and the merge node instead of silently pre-compacting each branch.
+- [x] **Pack** (ChatFlow-layer range packing): summarize a contiguous
+      range of ChatNodes into a visible pack ChatNode with
+      `packed_range`; supports nested packs and packs spanning
+      fork/merge; UI selects the range with two picks and highlights
+      the packed range on hover.
 - [x] Retry / cancel / delete with cascade
 - [x] Branch navigation (↑↓ siblings, jump to parent/child)
 - [x] Multi-parent merge ChatNodes render as a confluence in the canvas
@@ -201,6 +206,15 @@ inspect and swap out.
 - [x] Judge trio (`pre` / `during` / `post`) with structured verdicts
       (JSON schema + forced tool-use defense-in-depth)
 - [x] Ground-ratio fuse (halts WorkFlows that churn without tool_calls)
+- [x] **Delegation-depth fuse**: recursive planning is capped at 2
+      levels by default — deeper `decompose` plans are rewritten to
+      atomic so a single multi-part prompt can't explode into a
+      200+-node runaway tree
+- [x] **Partial-success aggregation**: a decompose group's aggregator
+      judge_post fires once every member reaches a terminal status
+      (SUCCEEDED / FAILED / CANCELLED), so partial results still
+      surface to the user — paired with a retry-halt message that
+      names each subtask's concrete failure reason
 - [x] Retry budget + redo_targets (re-spawn + re-run affected sub-trees)
 - [x] Tool-loop budget guard
 - [x] Pending user-prompt — agent can explicitly ask the user a question
@@ -211,6 +225,12 @@ inspect and swap out.
       metadata — Ark 131K, Anthropic 200K, etc.)
 - [x] Compact trigger + target percent invariant (sum ≤ 100%)
 - [x] Compact loop fuse (skips recursive compact-the-summary cascade)
+- [x] **Compact input overflow preflight**: when the compact worker's
+      own serialized input would exceed its configured model's context
+      window, ancestor messages are rewritten to `[node:<id>]
+      <MemoryBoard brief>` citations (Pack's citation pattern) before
+      the compact fires. Downstream workers drill back to raw content
+      via `get_node_context` when they need detail.
 - [x] Tagged context with per-ChatNode-id prefixes for compact worker citations
 - [x] Structural citation + coverage fallback: when the compact/merge LLM
       forgets to cite source node IDs, the engine appends truncated raw
@@ -251,7 +271,13 @@ inspect and swap out.
   two-way bound with a trigger+target ≤ 100% invariant.](docs/images/05-settings-panel.png)
 - [x] ConversationView with compact / merge bubbles, token usage, copy,
       markdown rendering
-- [x] i18n (en-US + zh-CN) — all fixture templates translated per locale
+- [x] i18n (en-US + zh-CN) — all fixture templates translated per
+      locale, plus every user-facing engine halt message
+      (ground-ratio fuse, judge_pre / judge_post / revise-budget /
+      retry-halt composer) branches on workspace language
+- [x] MemoryBoard floating panel has a top-edge resize handle and a
+      maximize toggle (256px ↔ 70vh) so long flows stay readable
+- [x] ChatNode cards show an execution-mode badge (Native ReAct / Auto Plan)
 - [x] Structured JSON output (provider / model two-layer `json_mode`)
 
 ### Infra
@@ -259,7 +285,8 @@ inspect and swap out.
 - [x] Alembic migrations
 - [x] SSE event bus with per-workflow subscriptions + nested forwarding
 - [x] Hierarchical token-bucket rate limiting
-- [x] Pytest: 385+ backend tests + 55+ frontend tests passing
+- [x] Pytest: 343 backend tests + 72 frontend tests passing (two
+      pre-existing broken test files are skipped)
 
 ---
 
@@ -267,10 +294,11 @@ inspect and swap out.
 
 Designed but not yet built (or only scaffolded):
 
-- [ ] **Pack** — a Layer-1 WorkNode kind dual to `compress`: bundles a
-      WorkFlow / ChatFlow's output into a deliverable artifact (document,
-      code patch, structured report) so an agent's work product is a
-      reusable asset rather than a scatter of nodes.
+- [ ] **WorkFlow-layer pack** — only ChatFlow-layer pack has shipped
+      (conversation range packing, see features above). The WorkFlow-
+      layer equivalent — bundling an agent's output into a deliverable
+      artifact (document, code patch, structured report) — is still
+      open.
 - [ ] **Cognitive-node ReAct DAG expansion** — planning / pre-check /
       monitoring / post-check WorkNodes will uniformly support ReAct-style
       DAG expansion (cognitive endpoints with tool_calls between them),

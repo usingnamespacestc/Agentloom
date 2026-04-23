@@ -165,6 +165,9 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
 - [x] Joint-compact：当两条待合流分支合起来超预算时，会在两个源节点和 merge
       节点之间材料化一个可见的 joint-compact ChatNode，而不是默默对每条分支做
       一次隐藏的预压缩。
+- [x] **Pack**（ChatFlow 层打包）：对一段连续 ChatNode 范围做主题摘要，生成
+      带 `packed_range` 的可见 pack ChatNode，支持嵌套打包 + 跨 fork/merge
+      打包；UI 上点"开始打包"两点选中范围，悬停 pack 节点高亮其打包范围
 - [x] retry / cancel / delete 级联处理
 - [x] 分支导航（↑↓ 切兄弟，跳转到 parent/child）
 - [x] 多 parent 的 merge ChatNode 在 canvas 上渲染成汇流形态
@@ -179,6 +182,11 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
 - [x] Judge 三段式（`pre` / `during` / `post`），结构化 verdict（JSON Schema +
       强制 tool-use 双保险）
 - [x] Ground-ratio 保险丝：WorkFlow 长时间没有 tool_call 就熔断
+- [x] **Delegation-depth 保险丝**：递归规划最多分解 2 层，更深强转 atomic——
+      防止一条多段 prompt 炸成 200+ 节点的失控树
+- [x] **Decompose 部分成功聚合**：decompose group 全部成员 terminal
+      （SUCCEEDED / FAILED / CANCELLED）即启动聚合 judge_post，partial 结果
+      配合带具体失败原因的 halt message 推给用户
 - [x] Retry budget + redo_targets（重开并重跑受影响的子树）
 - [x] Tool-loop 预算守卫
 - [x] Pending user-prompt：agent 可以在流程中主动提问并暂停，用户回复后流程继续
@@ -188,6 +196,10 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
       Anthropic 200K 等）
 - [x] Compact 触发阈值 + 目标占比不变式（总和 ≤ 100%）
 - [x] Compact 循环保险丝（避免在 summary 之上递归压缩）
+- [x] **Compact 输入溢出 preflight**：当 compact 自身输入将超出 compact_model
+      的上下文窗口时，自动把 ancestor 消息替换为 `[node:<id>] <MemoryBoard
+      brief>` 的引用形式（Pack 同款 citation），保证 compact worker 总能跑完，
+      下游 worker 需要细节时走 `get_node_context` 回溯
 - [x] 带 ChatNode id 前缀的标签化上下文，方便 compact worker 引用
 - [x] 结构化 citation + coverage 兜底：当 compact / merge LLM 忘了引用源
       节点 id 时，engine 会把未被引用的节点的原文尾巴截断后追加进去，保证
@@ -222,7 +234,11 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
   分别指定模型与采样参数，compact 触发/目标阈值两端绑定且总和 ≤ 100%。
   ](docs/images/05-settings-panel.png)
 - [x] ConversationView：compact / merge 气泡、token 用量、复制、markdown 渲染
-- [x] i18n（en-US + zh-CN）——所有 fixture 模板按语言各有一份
+- [x] i18n（en-US + zh-CN）——所有 fixture 模板 + 引擎熔断消息都按语言各一份，
+      包括 `min_ground_ratio` / `judge_retry_budget` / `judge_pre` /
+      `judge_post` 的所有用户可见文本
+- [x] MemoryBoard 浮窗顶部拖动条调整高度 + 一键最大化/还原（70vh ↔ 256px）
+- [x] ChatNode 卡片显示执行模式徽章（Native ReAct / Auto Plan）
 - [x] 结构化 JSON 输出（provider / model 两层 `json_mode`）
 
 ### 基础设施
@@ -230,7 +246,7 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
 - [x] Alembic 迁移
 - [x] SSE 事件总线：按 workflow 订阅 + 嵌套转发
 - [x] 分层 token-bucket 限流
-- [x] Pytest：后端 385+ 个单测 + 前端 55+ 个单测全绿
+- [x] Pytest：后端 343 个单测 + 前端 72 个单测全绿（忽略两个预存损坏的 fixture 文件）
 
 ---
 
@@ -238,9 +254,9 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
 
 下面这些是已经设计过、但还没动手（或只完成了 scaffolding）的方向：
 
-- [ ] **打包（pack）**——Layer-1 WorkNode kind，和 compress 对偶：把 WorkFlow /
-      ChatFlow 的产物打包成可交付件（文档、代码 patch、结构化报告），让一段
-      agent 活儿的产出不是"散落在若干 node 里"而是一件可复用资产。
+- [ ] **WorkFlow 层 pack**——当前 pack 只做了 ChatFlow 层（对话范围打包），
+      WorkFlow 层对应"把一段 agent 活儿的产出打包成可交付件（文档、patch、
+      结构化报告）"的形态尚未做。
 - [ ] **认知节点 ReAct DAG 展开**——planning / pre-check / monitoring /
       post-check 这批"认知 WorkNode"统一支持 ReAct 式 DAG 展开（两端 cognitive，
       中间 tool_call），跟 MCP runtime（M7.5）搭车。当前止血手段是在 planner
