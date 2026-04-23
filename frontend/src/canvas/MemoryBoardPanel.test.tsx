@@ -69,7 +69,11 @@ describe("MemoryBoardPanel", () => {
 
   it("hides the list when collapsed via the header toggle", () => {
     renderPanel([makeItem({ source_node_id: "cn-d" })]);
-    fireEvent.click(screen.getByRole("button"));
+    // The header bar now has two buttons (open/close + maximize) —
+    // click the first (toggle) by role+name rather than the ambiguous
+    // getByRole("button") which would fail on multiple matches.
+    const toggle = screen.getAllByRole("button")[0];
+    fireEvent.click(toggle);
     expect(screen.queryByTestId("mbp-item-cn-d")).not.toBeInTheDocument();
   });
 
