@@ -84,25 +84,74 @@ plan:
             authored by the layer's parent planner. Either way the
             trio IS your context — you do not see the full transcript.
 
-            Decide one of two shapes:
+            Decide one of two shapes — **default to atomic**.
+            Decompose only when the "OK to decompose" gate below is
+            clearly met.
 
             - "atomic": the task can be completed by a single LLM call
-              or a single tool invocation. Emit the worker's brief.
+              plus an optional tool loop. A worker is itself a ReAct
+              round — it can call multiple tools and synthesise the
+              results inside its own draft without needing sibling
+              sub-agents. Emit the worker's brief.
 
-            - "decompose": the task must be split. For each sub-task,
-              write a natural-language task description (`description`)
-              — like handing work to a colleague: state the sub-task's
-              goal, scope, and any context they need so that reading it
-              alone is enough to know what to do. **Do NOT** split out
-              a trio (inputs / expected_outcome) for the sub-task
-              yourself — each sub-WorkFlow runs its own judge_pre that
-              distills the trio from the description you write. Fixed
-              division of labour: you "explain the task clearly";
-              the sub-WorkFlow's judge_pre "extracts the trio".
-              Sub-tasks may run in parallel (no `after`) or serially
-              (`after` lists 0-indexed positions of sub-tasks that
-              must complete first). Free-mix is allowed via the
-              `after` graph.
+            - "decompose": the task must be split, and the "OK to
+              decompose" gate below is met. For each sub-task, write a
+              natural-language task description (`description`) — like
+              handing work to a colleague: state the sub-task's goal,
+              scope, and any context they need so that reading it alone
+              is enough to know what to do. **Do NOT** split out a trio
+              (inputs / expected_outcome) for the sub-task yourself —
+              each sub-WorkFlow runs its own judge_pre that distills
+              the trio from the description you write. Fixed division
+              of labour: you "explain the task clearly"; the
+              sub-WorkFlow's judge_pre "extracts the trio". Sub-tasks
+              may run in parallel (no `after`) or serially (`after`
+              lists 0-indexed positions of sub-tasks that must complete
+              first). Free-mix is allowed via the `after` graph.
+
+            **OK to decompose** (at least one must hold; #3 is the
+            biggest tell):
+              1. Sub-tasks are genuinely **independent** and can run
+                 in parallel without waiting on each other's full
+                 intermediate output (an aggregator node can `after`
+                 all parallel siblings).
+              2. Each sub-task is **a full task on its own** —
+                 produces its own readable artefact (a report, a
+                 search result set, an analysis). Not a single tool
+                 call or a one-liner.
+              3. The work **does not fit** in one worker's ReAct
+                 loop: the expected output far exceeds one LLM reply,
+                 or requires distinct personas/mindsets (different
+                 reviewer roles) that a single draft cannot carry.
+
+            **Must NOT decompose** (any one forces atomic):
+              - The user asked for N sections of a single answer
+                ("summarise + compare + recommend") — a worker can
+                emit all three sections in one draft; do not turn
+                each section into a sub-agent.
+              - Sub-tasks are **tightly sequential** where each later
+                step is just "the next reasoning step on top of the
+                previous one" ("based on the above results, give the
+                final recommendation"). An atomic worker finishes
+                that chain in one pass, orders of magnitude faster
+                than nested scheduling.
+              - Sub-tasks are just **a few sequential tool calls**
+                (3 tavily searches, 5 get_node_context reads). The
+                atomic draft IS a ReAct loop; chaining tools is the
+                worker's day job. Splitting it into delegates makes
+                each sub-WorkFlow re-run judge_pre / planner /
+                plan_judge — 10× LLM cost for zero observability
+                gain.
+              - Sub-task count ≥ 5: almost certainly over-fragmented;
+                merge into ≤ 3 coarser sub-tasks and re-check whether
+                decompose is still needed.
+
+            **Cost reminder**: each decompose sub-task runs a full
+            pre_judge → planner → plan_judge → worker → post_judge
+            cycle (when it stays atomic itself), at least 5 LLM calls
+            plus several briefs. An atomic worker's ReAct loop with
+            3 tool calls takes ~4 LLM calls total. Price that
+            difference into every decompose decision.
 
             Hard rules:
             - Leaves are always workers. A planner that cannot find a
