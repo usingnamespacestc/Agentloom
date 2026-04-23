@@ -125,6 +125,8 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         default_judge_model: ProviderModelRef | None = ...,  # type: ignore[assignment]
         default_tool_call_model: ProviderModelRef | None = ...,  # type: ignore[assignment]
         default_execution_mode: ExecutionMode | None = ...,  # type: ignore[assignment]
+        tool_loop_budget: int | None = ...,  # type: ignore[assignment]
+        auto_mode_revise_budget: int | None = ...,  # type: ignore[assignment]
         judge_retry_budget: int | None = ...,  # type: ignore[assignment]
         min_ground_ratio: float | None = ...,  # type: ignore[assignment]
         ground_ratio_grace_nodes: int | None = ...,  # type: ignore[assignment]
@@ -190,6 +192,11 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         if default_execution_mode is not ...:
             if default_execution_mode is not None:
                 payload["default_execution_mode"] = default_execution_mode.value
+        if tool_loop_budget is not ...:
+            # ``None`` is legal here (= unlimited), mirror verbatim.
+            payload["tool_loop_budget"] = tool_loop_budget
+        if auto_mode_revise_budget is not ...:
+            payload["auto_mode_revise_budget"] = auto_mode_revise_budget
         if judge_retry_budget is not ...:
             if judge_retry_budget is not None:
                 payload["judge_retry_budget"] = judge_retry_budget

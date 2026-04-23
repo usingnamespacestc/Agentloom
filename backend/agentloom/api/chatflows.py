@@ -472,6 +472,8 @@ class PatchChatFlowRequest(BaseModel):
     default_judge_model: ProviderModelRef | None = None
     default_tool_call_model: ProviderModelRef | None = None
     default_execution_mode: ExecutionMode | None = None
+    tool_loop_budget: int | None = None
+    auto_mode_revise_budget: int | None = None
     judge_retry_budget: int | None = None
     min_ground_ratio: float | None = None
     ground_ratio_grace_nodes: int | None = None
@@ -513,6 +515,10 @@ async def patch_chatflow(
         kwargs["default_tool_call_model"] = body.default_tool_call_model
     if "default_execution_mode" in provided:
         kwargs["default_execution_mode"] = body.default_execution_mode
+    if "tool_loop_budget" in provided:
+        kwargs["tool_loop_budget"] = body.tool_loop_budget
+    if "auto_mode_revise_budget" in provided:
+        kwargs["auto_mode_revise_budget"] = body.auto_mode_revise_budget
     if "judge_retry_budget" in provided:
         kwargs["judge_retry_budget"] = body.judge_retry_budget
     if "min_ground_ratio" in provided:
@@ -564,6 +570,12 @@ async def patch_chatflow(
             rt_chat.default_tool_call_model = body.default_tool_call_model
         if "default_execution_mode" in provided and body.default_execution_mode is not None:
             rt_chat.default_execution_mode = body.default_execution_mode
+        if "tool_loop_budget" in provided:
+            # ``None`` is a legal value (= unlimited), so mirror it
+            # through verbatim rather than checking not None.
+            rt_chat.tool_loop_budget = body.tool_loop_budget
+        if "auto_mode_revise_budget" in provided:
+            rt_chat.auto_mode_revise_budget = body.auto_mode_revise_budget
         if "judge_retry_budget" in provided and body.judge_retry_budget is not None:
             rt_chat.judge_retry_budget = body.judge_retry_budget
         if "min_ground_ratio" in provided:
