@@ -331,6 +331,50 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
     }
   }, [chatflow]);
 
+  // Emergency sync flush for pagehide / tab switch: the 500ms debounce
+  // above batches drags nicely during interactive use, but if the user
+  // reloads the tab (or hits browser back) inside that window, the PATCH
+  // never goes out and the drag is lost on the next load. fetch with
+  // ``keepalive: true`` is guaranteed to complete even as the page is
+  // unloading, so flush synchronously here without touching the debounce.
+  // navigator.sendBeacon is the canonical tool for this but only speaks
+  // POST; our positions endpoint is PATCH.
+  useEffect(() => {
+    const emergencyFlush = () => {
+      if (!chatflow || dirtyPositions.current.size === 0) return;
+      const positions = [...dirtyPositions.current]
+        .map((id) => {
+          const pos = dragPositions.current[id];
+          return pos ? { id, x: pos.x, y: pos.y } : null;
+        })
+        .filter(Boolean) as { id: string; x: number; y: number }[];
+      if (positions.length === 0) return;
+      dirtyPositions.current.clear();
+      try {
+        fetch(`/api/chatflows/${chatflow.id}/positions`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ positions }),
+          keepalive: true,
+        });
+      } catch {
+        // The unload path is best-effort; a failed fetch here isn't
+        // actionable and there's no UI left to surface it on.
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") emergencyFlush();
+    };
+    window.addEventListener("pagehide", emergencyFlush);
+    window.addEventListener("beforeunload", emergencyFlush);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", emergencyFlush);
+      window.removeEventListener("beforeunload", emergencyFlush);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [chatflow]);
+
   useEffect(() => {
     if (isDragging.current) return;
     if (chatflow?.id !== lastChatflowId.current) {

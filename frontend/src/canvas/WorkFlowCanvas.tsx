@@ -206,6 +206,57 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
     }
   }, [chatflowId, outerChatNodeId, subPath]);
 
+  // Emergency sync flush on pagehide / tab-switch — mirrors the guard
+  // in ChatFlowCanvas. The 500ms debounce during drag is fine for
+  // interactive batching but leaves a window where a reload drops the
+  // drag. fetch with keepalive completes during unload; scope skipped
+  // for nested sub-workflows since patchWorkflowPositions doesn't
+  // address them (subPath > 0 path today only reads, never writes).
+  useEffect(() => {
+    const emergencyFlush = () => {
+      if (
+        subPath.length > 0
+        || !chatflowId
+        || !outerChatNodeId
+        || dirtyPositions.current.size === 0
+      ) {
+        return;
+      }
+      const positions = [...dirtyPositions.current]
+        .map((id) => {
+          const pos = dragPositions.current[id];
+          return pos ? { id, x: pos.x, y: pos.y } : null;
+        })
+        .filter(Boolean) as { id: string; x: number; y: number }[];
+      if (positions.length === 0) return;
+      dirtyPositions.current.clear();
+      try {
+        fetch(
+          `/api/chatflows/${chatflowId}/nodes/${outerChatNodeId}/workflow/positions`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ positions }),
+            keepalive: true,
+          },
+        );
+      } catch {
+        // best-effort on unload
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") emergencyFlush();
+    };
+    window.addEventListener("pagehide", emergencyFlush);
+    window.addEventListener("beforeunload", emergencyFlush);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", emergencyFlush);
+      window.removeEventListener("beforeunload", emergencyFlush);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [chatflowId, outerChatNodeId, subPath]);
+
   useEffect(() => {
     if (isDragging.current) return;
     if (workflow?.id !== lastWorkflowId.current) {
