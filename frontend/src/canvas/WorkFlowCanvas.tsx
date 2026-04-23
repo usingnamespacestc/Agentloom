@@ -19,6 +19,7 @@ import {
   ReactFlowProvider,
   Background,
   Controls,
+  MarkerType,
   applyNodeChanges,
   useReactFlow,
   type Edge,
@@ -576,6 +577,7 @@ export function buildWorkflowGraph(
     if (briefIds.has(node.id)) continue;
     for (const parentId of node.parent_ids) {
       if (!(parentId in graphNodes)) continue;
+      const edgeColor = node.status === "planned" ? "#9ca3af" : "#374151";
       rfEdges.push({
         id: `${parentId}->${node.id}`,
         source: parentId,
@@ -583,8 +585,18 @@ export function buildWorkflowGraph(
         sourceHandle: "main-source",
         targetHandle: "main-target",
         animated: node.status === "running",
+        markerEnd: {
+          // Direction indicator — a WorkFlow DAG has both fan-out
+          // (planner → delegates, draft → tool_calls) and fan-in
+          // (judge_post aggregating siblings); the arrow disambiguates
+          // which end is the parent when two edges pass near each other.
+          type: MarkerType.ArrowClosed,
+          color: edgeColor,
+          width: 14,
+          height: 14,
+        },
         style: {
-          stroke: node.status === "planned" ? "#9ca3af" : "#374151",
+          stroke: edgeColor,
           strokeDasharray: node.status === "planned" ? "6 4" : undefined,
         },
       });

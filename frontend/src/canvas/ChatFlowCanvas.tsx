@@ -41,6 +41,7 @@ import {
   ReactFlowProvider,
   Background,
   Controls,
+  MarkerType,
   applyNodeChanges,
   useReactFlow,
   type Edge,
@@ -1075,6 +1076,13 @@ export function buildGraph(
       const isMerge = node.parent_ids.length >= 2;
       const isPack = node.pack_snapshot != null;
       const isDashed = !parent.status || parent.status === "planned" || node.status === "planned";
+      const edgeColor = isPack
+        ? "#f43f5e" // rose-500
+        : isMerge
+          ? "#a855f7"
+          : isDashed
+            ? "#9ca3af"
+            : "#374151";
       rfEdges.push({
         id: `${parentId}->${node.id}`,
         source: parentId,
@@ -1085,14 +1093,18 @@ export function buildGraph(
         sourceHandle: isPack ? "main-source-bottom" : "main-source",
         targetHandle: isPack ? "main-target-top" : "main-target",
         animated: node.status === "running",
+        markerEnd: {
+          // Arrowhead in stroke color so direction is readable at a
+          // glance on a DAG with forks, merges, and pack branches —
+          // without the arrow, merge inbound edges look indistinguishable
+          // from forking outbound edges.
+          type: MarkerType.ArrowClosed,
+          color: edgeColor,
+          width: 16,
+          height: 16,
+        },
         style: {
-          stroke: isPack
-            ? "#f43f5e" // rose-500
-            : isMerge
-              ? "#a855f7"
-              : isDashed
-                ? "#9ca3af"
-                : "#374151",
+          stroke: edgeColor,
           strokeDasharray: isDashed ? "6 4" : undefined,
           strokeWidth: isMerge ? 2.5 : 1.5,
         },
