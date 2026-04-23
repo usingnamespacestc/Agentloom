@@ -278,6 +278,11 @@ inspect and swap out.
 - [x] MemoryBoard floating panel has a top-edge resize handle and a
       maximize toggle (256px ↔ 70vh) so long flows stay readable
 - [x] ChatNode cards show an execution-mode badge (Native ReAct / Auto Plan)
+- [x] Canvas drag positions persist across refresh: every dragged
+      node (ChatFlow ChatNodes, WorkFlow inner WorkNodes) is PATCHed
+      to the backend behind a 500ms debounce, with a pagehide /
+      beforeunload emergency flush via `fetch({keepalive: true})` so
+      a rapid close/refresh inside the debounce window still saves
 - [x] Structured JSON output (provider / model two-layer `json_mode`)
 
 ### Infra

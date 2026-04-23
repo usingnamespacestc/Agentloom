@@ -239,6 +239,9 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
       `judge_post` 的所有用户可见文本
 - [x] MemoryBoard 浮窗顶部拖动条调整高度 + 一键最大化/还原（70vh ↔ 256px）
 - [x] ChatNode 卡片显示执行模式徽章（Native ReAct / Auto Plan）
+- [x] 节点拖动位置持久化：画布上手动摆位后，刷新、切回重新打开 CF 都保留；
+      窗口关闭 / 切后台用 `fetch({keepalive: true})` 兜底 flush，
+      防抖 500ms 内刷新也不丢
 - [x] 结构化 JSON 输出（provider / model 两层 `json_mode`）
 
 ### 基础设施
