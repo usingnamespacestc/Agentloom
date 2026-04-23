@@ -215,6 +215,21 @@ plan:
                 a bogus infeasibility.
               Do not answer content-specific questions from the
               summary alone — that treats uncertainty as certainty.
+            - **`get_node_context` scope boundary**: this tool can
+              only fetch **ChatFlow-layer ChatNodes** (turn / merge /
+              pack / compact nodes). It **cannot** fetch sibling
+              WorkNodes (planner / worker / delegate, etc.) in the
+              current WorkFlow — sub-WorkFlows have no "pull by id"
+              path to peer subtask outputs; that's WorkFlow
+              structure, not ChatFlow. When a subtask needs the
+              result of an upstream sibling delegate, the engine has
+              **already injected** that output into the child sub's
+              judge_pre input_messages as an ``Upstream dependency
+              outputs:`` block — just read it, no tool call needed.
+              When writing an aggregator subtask description, do NOT
+              say "call get_node_context to retrieve the three prior
+              subtasks' outputs" — that's not how it works and isn't
+              necessary.
 
             On revision rounds, you receive your own prior plan and the
             judge's critique. Address every blocker. You may keep the

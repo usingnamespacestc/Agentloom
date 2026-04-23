@@ -183,6 +183,18 @@ plan:
                 judge_pre 拿到空对话被迫乱判。
               不要仅凭摘要里的概述来回答具体内容问题——那是
               把不确定当确定。
+            - **`get_node_context` 的 scope 边界**：该工具**只能拉
+              ChatFlow 层的 ChatNode 原文**（turn / merge / pack /
+              compact 节点），**不能**用来拉取当前 WorkFlow 里兄弟
+              WorkNode（planner / worker / delegate 等）的输出。子
+              WorkFlow 无法"按 id 回溯"同级 subtask 的产出——那是
+              WorkFlow 层的结构，不是 ChatFlow。需要上游 subtask
+              的结果时：同级上游 delegate 的输出**已经由引擎自动
+              注入**到当前 sub 的 judge_pre 的 input_messages 里
+              （顶部 "Upstream dependency outputs:" 段），直接读
+              就行，不需要再调任何工具取回。给聚合 subtask 写
+              description 时，不要说"请用 get_node_context 拉前面
+              三个 subtask 的结果"——那不可行，也不该需要。
 
             在修订轮，你会收到自己上一轮的计划和 judge 的批评。
             必须逐条处理每个 blocker。可以保留原形态（atomic vs
