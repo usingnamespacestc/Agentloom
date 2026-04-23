@@ -5210,7 +5210,9 @@ def _format_redo_aggregation(
 
 #: Map structured-status tokens to short human-readable phrases for the
 #: halt prompt. Keys match the vocabulary of ``_classify_sub_outcome`` /
-#: ``_redo_clone_classification``.
+#: ``_redo_clone_classification``. Two variants so the retry-halt
+#: message follows the workspace language (`judge_formatter` handles
+#: i18n for its own prompts; keep them aligned here).
 _STATUS_HUMAN = {
     "ok": "completed successfully",
     "worker_failed": "worker failed",
@@ -5220,6 +5222,28 @@ _STATUS_HUMAN = {
     "sub_judge_post_retry_exhausted": "sub-agent's retry budget ran out",
     "empty": "produced no output",
 }
+_STATUS_HUMAN_ZH = {
+    "ok": "已成功完成",
+    "worker_failed": "worker 执行失败",
+    "sub_pre_halt": "子代理在启动前拒绝",
+    "sub_judge_post_failed": "子代理的评审器崩溃",
+    "sub_judge_post_fail": "子代理的评审器判定失败",
+    "sub_judge_post_retry_exhausted": "子代理的重试预算耗尽",
+    "empty": "未产生任何输出",
+}
+
+
+def _retry_halt_is_zh() -> bool:
+    """Return True when the workspace is configured for Chinese. Falls
+    back to en-US if the tenancy runtime isn't initialised (tests)."""
+    try:
+        from agentloom import tenancy_runtime
+        from agentloom.db.models.tenancy import DEFAULT_WORKSPACE_ID
+
+        lang = tenancy_runtime.get_settings(DEFAULT_WORKSPACE_ID).language
+    except Exception:
+        lang = "en-US"
+    return lang.lower().startswith("zh")
 
 
 def _compose_retry_halt_message(
@@ -5256,19 +5280,33 @@ def _compose_retry_halt_message(
         if n.redo_source_id is not None:
             replaced_by[n.redo_source_id] = n.id
 
+    zh = _retry_halt_is_zh()
+    status_map = _STATUS_HUMAN_ZH if zh else _STATUS_HUMAN
     lines: list[str] = []
     if reason == "budget_exhausted":
-        lines.append(
-            f"I retried {round_index} round(s) but hit the retry budget "
-            f"of {budget} without landing a clean result. Here is where "
-            "each part of the plan stands:"
-        )
+        if zh:
+            lines.append(
+                f"我重试了 {round_index} 轮，仍未拿到干净的结果，已触达 "
+                f"{budget} 轮的重试预算。当前计划的各项状态如下："
+            )
+        else:
+            lines.append(
+                f"I retried {round_index} round(s) but hit the retry budget "
+                f"of {budget} without landing a clean result. Here is where "
+                "each part of the plan stands:"
+            )
     else:  # no_usable_targets
-        lines.append(
-            "The reviewer asked to retry, but none of the targets it "
-            "named could be redone. Here is where each part of the plan "
-            "stands:"
-        )
+        if zh:
+            lines.append(
+                "评审器要求重试，但它指定的目标都无法重新执行。"
+                "当前计划的各项状态如下："
+            )
+        else:
+            lines.append(
+                "The reviewer asked to retry, but none of the targets it "
+                "named could be redone. Here is where each part of the plan "
+                "stands:"
+            )
     lines.append("")
 
     for i, original in enumerate(round_one_members, start=1):
@@ -5285,17 +5323,39 @@ def _compose_retry_halt_message(
         ) or surviving.id
 
         if surviving.step_kind == StepKind.DELEGATE and surviving.sub_workflow is not None:
-            status, _body = _classify_sub_outcome(surviving.sub_workflow)
+            status, body = _classify_sub_outcome(surviving.sub_workflow)
         else:
-            status, _body = _redo_clone_classification(surviving)
-        phrase = _STATUS_HUMAN.get(status, status)
+            status, body = _redo_clone_classification(surviving)
+        phrase = status_map.get(status, status)
 
-        round_note = "" if round_idx == 1 else f" (after {round_idx - 1} retry round(s))"
-        detail = f" — {surviving.error}" if status != "ok" and surviving.error else ""
-        lines.append(f"- **{label}** — {phrase}{round_note}{detail}")
+        if round_idx == 1:
+            round_note = ""
+        elif zh:
+            round_note = f"（经过 {round_idx - 1} 轮重试）"
+        else:
+            round_note = f" (after {round_idx - 1} retry round(s))"
+        # Non-ok members: surface the concrete reason (judge_pre's
+        # blockers / missing_inputs / user_message, or the worker error
+        # string) so the user sees WHY the layer stalled, not just a
+        # generic "refused before starting". Truncated to keep the
+        # overall halt message readable.
+        reason = ""
+        if status != "ok":
+            src = ""
+            if body and body.strip():
+                src = body.strip()
+            elif surviving.error:
+                src = surviving.error
+            if src:
+                cutoff = 240
+                snippet = src if len(src) <= cutoff else src[: cutoff].rstrip() + "…"
+                reason = (f"。详情：{snippet}" if zh else f" — {snippet}")
+        lines.append(f"- **{label}** — {phrase}{round_note}{reason}")
 
     lines.append("")
-    lines.append("How would you like to proceed?")
+    lines.append(
+        "你想怎么往下走？" if zh else "How would you like to proceed?"
+    )
     return "\n".join(lines)
 
 
