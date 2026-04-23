@@ -476,6 +476,77 @@ def _render_messages_to_compact(
     return "\n".join(lines)
 
 
+#: Cap the per-message fallback when a brief isn't available — prevents
+#: a single outsized tool_result dump from defeating the whole point of
+#: the brief-based compaction. 400 chars ≈ 100 tokens, fits the "one
+#: line description" target used elsewhere in the codebase.
+_BRIEF_FALLBACK_MAX_CHARS = 400
+
+
+def _rewrite_tagged_as_briefs(
+    tagged: list[tuple[str | None, Message]],
+    briefs_by_node: dict[str, str],
+) -> list[tuple[str | None, Message]]:
+    """Return a copy of *tagged* where each entry's ``content`` is
+    replaced by ``[brief + node_id]`` so the compact prompt stays small
+    regardless of how bloated the original tool_results were.
+
+    - A MemoryBoard brief takes precedence (one-line prose already
+      distilled by the node-brief LLM).
+    - If no brief exists for a given node_id (synthetic messages,
+      off-axis nodes), fall back to the first 400 chars of the original
+      content — lossy but bounded.
+    - ``node_id is None`` (synthetic preamble, e.g. prior-compact
+      preserved tail) is kept verbatim since it already carries a
+      summary.
+
+    Role, tool_use metadata, and tool_use_id threading are preserved by
+    constructing the concrete Message subclass in place — tool calls
+    can't be hollowed out without breaking OpenAI-style tool-result
+    linkage.
+    """
+    out: list[tuple[str | None, Message]] = []
+    for node_id, msg in tagged:
+        if node_id is None:
+            out.append((node_id, msg))
+            continue
+        brief = briefs_by_node.get(node_id)
+        if brief:
+            new_content = f"[node:{node_id}] {brief.strip()}"
+        else:
+            raw = msg.content or ""
+            if len(raw) > _BRIEF_FALLBACK_MAX_CHARS:
+                raw = raw[:_BRIEF_FALLBACK_MAX_CHARS].rstrip() + "…"
+            new_content = f"[node:{node_id}] {raw}"
+        if isinstance(msg, SystemMessage):
+            out.append((node_id, SystemMessage(content=new_content)))
+        elif isinstance(msg, UserMessage):
+            out.append((node_id, UserMessage(content=new_content)))
+        elif isinstance(msg, AssistantMessage):
+            # Preserve tool_uses so downstream pairing stays valid; the
+            # callee only reads ``content`` for the compact prompt text.
+            out.append(
+                (
+                    node_id,
+                    AssistantMessage(
+                        content=new_content, tool_uses=msg.tool_uses
+                    ),
+                )
+            )
+        elif isinstance(msg, ToolMessage):
+            out.append(
+                (
+                    node_id,
+                    ToolMessage(
+                        content=new_content, tool_use_id=msg.tool_use_id
+                    ),
+                )
+            )
+        else:  # pragma: no cover — exhaustive over Message subtypes
+            out.append((node_id, msg))
+    return out
+
+
 def _any_resolved_model(workflow: WorkFlow) -> ProviderModelRef | None:
     """Pick any main-axis node's ``resolved_model`` as a fallback brief
     model. Used by the DELEGATE-brief path: a DELEGATE WorkNode never
@@ -1134,7 +1205,7 @@ class WorkflowEngine:
             and not _parent_is_fresh_compact(workflow, node)
             and self._needs_compact(messages, ref)
         ):
-            self._insert_compact_worknode(workflow, node, messages, ref)
+            await self._insert_compact_worknode(workflow, node, messages, ref)
             raise _CompactRequested(node.id)
 
         # Expose every tool the registry considers visible under this
@@ -1251,7 +1322,7 @@ class WorkflowEngine:
         threshold = int(ctx * trigger)
         return estimated >= threshold
 
-    def _insert_compact_worknode(
+    async def _insert_compact_worknode(
         self,
         workflow: WorkFlow,
         node: WorkFlowNode,
@@ -1274,6 +1345,17 @@ class WorkflowEngine:
           the compact on its next ready pass; when the compact
           finishes, *node* will run again and build its context from
           the snapshot.
+
+        Brief-fallback (2026-04-23): when the serialized head would
+        overflow the compact model's own context window (e.g. user
+        configured a small ``compact_model`` while main turns run on a
+        larger model), replace raw ancestor messages with their
+        MemoryBoard briefs + node_id citations before serialization.
+        Downstream readers can still drill down via ``get_node_context``,
+        matching the Pack citation pattern. Without this the compact
+        worker would 500 on prompt-too-long and the parent node would
+        never re-run — which is ironic since the whole point of compact
+        is to prevent that.
         """
         from agentloom.templates.instantiate import instantiate_fixture
 
@@ -1293,6 +1375,28 @@ class WorkflowEngine:
         original_tokens = _estimate_tokens_from_provider_messages(messages)
         ctx = self._context_window_for(ref)
         target_tokens = max(256, int(ctx * self._effective_compact_target_pct))
+
+        compact_model = self._effective_compact_model or node.model_override or ref
+        # Preflight: if the serialized head would overflow the compact
+        # model's own window, swap raw messages for brief+id citations.
+        # 0.9 leaves headroom for the compact fixture's system prompt +
+        # target-summary budget (the model still needs tokens to think
+        # + emit).
+        compact_ctx = self._context_window_for(compact_model)
+        head_tokens_est = _count_text_tokens(head_serialized)
+        if head_tokens_est > compact_ctx * 0.9:
+            log.info(
+                "compact head overflow preflight: workflow=%s pending=%s "
+                "est_head_tokens=%d compact_ctx=%d — falling back to "
+                "brief+id citation form",
+                workflow.id,
+                node.id,
+                head_tokens_est,
+                compact_ctx,
+            )
+            briefs_by_node = await self._load_briefs_for_workflow(workflow.id)
+            head_tagged = _rewrite_tagged_as_briefs(head_tagged, briefs_by_node)
+            head_serialized = _render_messages_to_compact(head_tagged)
 
         compact_plan, includes = _get_compact_fixture()
         compact_wf = instantiate_fixture(
@@ -1317,8 +1421,6 @@ class WorkflowEngine:
             summary="",  # filled in by _run_compact after the LLM call
             preserved_messages=preserved_wire,
         )
-
-        compact_model = self._effective_compact_model or node.model_override or ref
         compact_node = WorkFlowNode(
             step_kind=StepKind.COMPRESS,
             parent_ids=list(node.parent_ids),
@@ -1452,6 +1554,29 @@ class WorkflowEngine:
                 continue
             lines.append(f"[{kind}] {desc}")
         return "\n".join(lines)
+
+    async def _load_briefs_for_workflow(
+        self, workflow_id: str
+    ) -> dict[str, str]:
+        """Return ``{source_node_id: one_line_brief}`` for every
+        ``scope=node`` row on *workflow_id*. Used by the compact
+        brief-fallback path (``_insert_compact_worknode``) so an
+        oversize head can be rewritten as ``[node:<id>] <brief>``
+        citations instead of raw content. Empty dict when the engine
+        has no ``board_reader`` wired (bare tests / pre-PR1 runs).
+        """
+        if self._board_reader is None:
+            return {}
+        rows = await self._board_reader(workflow_id=workflow_id)
+        out: dict[str, str] = {}
+        for row in rows:
+            if row.get("scope") != NodeScope.NODE.value:
+                continue
+            sid = row.get("source_node_id")
+            desc = (row.get("description") or "").strip().replace("\n", " ")
+            if sid and desc:
+                out[sid] = desc
+        return out
 
     async def _inject_layer_notes_for_post_judge(
         self, workflow: WorkFlow, node: WorkFlowNode
