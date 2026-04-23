@@ -410,14 +410,34 @@ def _strip_frozen_exempt(dump: dict) -> dict:
 
 
 def _strip_workflow_sticky(wf: dict) -> dict:
-    """Strip sticky_notes from a workflow dict and its nested sub-workflows."""
+    """Strip fields from a workflow dict that should not trip the frozen
+    guard: ``sticky_notes`` (user canvas notes), plus every inner WorkNode's
+    ``position_x`` / ``position_y`` (user drag-positioned layout). The
+    outer-level ``_strip_frozen_exempt`` handles ``position_x`` /
+    ``position_y`` on the ChatFlowNode itself, but the dump-equality check
+    compares nested ``workflow.nodes[*]`` verbatim — without this recursive
+    strip, dragging any WorkNode in a frozen (succeeded) ChatNode's inner
+    workflow raises ``FrozenNodeError`` and the PATCH silently drops the
+    change (the in-memory runtime is still mutated, so a GET sees the new
+    position, but a backend restart or detach reveals the DB never saw it
+    and the node snaps back to auto-layout on the next page load).
+    Recurses into ``sub_workflow`` for nested delegation trees.
+    """
     out = {k: v for k, v in wf.items() if k != "sticky_notes"}
     if "nodes" in out and isinstance(out["nodes"], dict):
         cleaned_nodes = {}
         for nid, node in out["nodes"].items():
-            if isinstance(node, dict) and "sub_workflow" in node and isinstance(node["sub_workflow"], dict):
-                node = {**node, "sub_workflow": _strip_workflow_sticky(node["sub_workflow"])}
-            cleaned_nodes[nid] = node
+            if not isinstance(node, dict):
+                cleaned_nodes[nid] = node
+                continue
+            cleaned = {
+                k: v
+                for k, v in node.items()
+                if k not in ("position_x", "position_y")
+            }
+            if "sub_workflow" in cleaned and isinstance(cleaned["sub_workflow"], dict):
+                cleaned["sub_workflow"] = _strip_workflow_sticky(cleaned["sub_workflow"])
+            cleaned_nodes[nid] = cleaned
         out["nodes"] = cleaned_nodes
     return out
 
