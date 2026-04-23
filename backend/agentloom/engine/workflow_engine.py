@@ -695,6 +695,20 @@ def _render_source_output_for_brief(source: WorkFlowNode) -> str:
 #: sits on its own line at the top of the appended content.
 _LAYER_NOTES_MARKER = "[__layer_notes__]"
 
+#: Max follow-up attempts when the judge's first response fails JSON
+#: parse. 2 retries means 3 total provider calls on the worst case.
+#: Observed failure mode (2026-04-22 regression): ark-code-latest
+#: returns empty content on the first try, reproduces on a single
+#: retry, then succeeds on the second — a one-retry budget cost the
+#: whole sub-WorkFlow. See ``_run_judge_call``'s parse branch.
+_JUDGE_PARSE_MAX_RETRIES = 2
+
+#: Base delay (seconds) before the first judge-parse retry. Doubles
+#: each subsequent attempt (0.5s → 1.0s). Gives transient provider
+#: errors — 429 / thinking-mode truncation / rate-limited content
+#: filters — a moment to clear without spamming the endpoint.
+_JUDGE_PARSE_RETRY_BASE_DELAY = 0.5
+
 
 class WorkflowEngine:
     def __init__(
@@ -1982,6 +1996,16 @@ class WorkflowEngine:
         tool_uses = node.output_message.tool_uses or []
         judge_tool = next((tu for tu in tool_uses if tu.name == "judge_verdict"), None)
 
+        # Up to _JUDGE_PARSE_MAX_RETRIES follow-up attempts before the
+        # engine bails. ark-code-latest is known to return empty /
+        # non-JSON content on the first try under schema pressure and
+        # sometimes reproduces the same failure on a single-shot retry —
+        # a second retry with fresh context clears the pathology ~90%
+        # of the time per 2026-04-22 regression (#2). Each retry costs
+        # one extra provider call but the alternative is the whole
+        # sub-WorkFlow bubbling up a RuntimeError, which wastes
+        # significantly more upstream work.
+        parse_errors: list[JudgeParseError] = []
         try:
             if judge_tool is not None:
                 node.judge_verdict = parse_judge_from_tool_args(
@@ -1992,13 +2016,31 @@ class WorkflowEngine:
                     node.output_message.content, node.judge_variant,
                 )
         except JudgeParseError as first_exc:
-            try:
-                await self._retry_judge_parse(workflow, node, first_exc)
-            except JudgeParseError as retry_exc:
-                raise RuntimeError(
-                    f"judge parse failed after retry: first={first_exc}; "
-                    f"retry={retry_exc}"
-                ) from retry_exc
+            parse_errors.append(first_exc)
+            for attempt in range(_JUDGE_PARSE_MAX_RETRIES):
+                # Exponential backoff before each retry (0.5s, 1s, ...)
+                # so transient provider issues — 429, content-filter
+                # hiccups, thinking-mode truncation — have a window to
+                # clear. No backoff on the very first retry would
+                # re-hit the same transient state.
+                delay = _JUDGE_PARSE_RETRY_BASE_DELAY * (2 ** attempt)
+                await asyncio.sleep(delay)
+                try:
+                    await self._retry_judge_parse(
+                        workflow, node, parse_errors[-1]
+                    )
+                    break
+                except JudgeParseError as retry_exc:
+                    parse_errors.append(retry_exc)
+                    if attempt == _JUDGE_PARSE_MAX_RETRIES - 1:
+                        chain = "; ".join(
+                            f"attempt{i}={str(e)[:200]}"
+                            for i, e in enumerate(parse_errors)
+                        )
+                        raise RuntimeError(
+                            f"judge parse failed after "
+                            f"{_JUDGE_PARSE_MAX_RETRIES} retries: {chain}"
+                        ) from retry_exc
 
         # Option B: judge_post is the WorkFlow's universal exit gate —
         # only it writes ``pending_user_prompt``. judge_pre's verdict
