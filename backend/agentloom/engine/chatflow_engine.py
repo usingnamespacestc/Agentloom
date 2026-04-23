@@ -3648,7 +3648,17 @@ class ChatFlowEngine:
         if owner is None:
             return
         members = _decompose_group_members(workflow, owner.id)
-        if not all(m.status == NodeStatus.SUCCEEDED for m in members):
+        # Aggregate once every member has reached a terminal status
+        # (SUCCEEDED, FAILED, or CANCELLED) — not only when they all
+        # succeeded. The 2026-04-22 self-analysis incident had a 4-member
+        # decompose group where the aggregator sub-agent's pre_judge
+        # halted (FAILED); the all-SUCCEEDED gate suppressed aggregation
+        # and the ChatNode died with "no terminal llm_call". Let the
+        # outer judge_post see the mixed outcomes via
+        # _format_decompose_aggregation and decide retry / accept /
+        # escalate — partial aggregate is a first-class path (M12.4d5).
+        _terminal = {NodeStatus.SUCCEEDED, NodeStatus.FAILED, NodeStatus.CANCELLED}
+        if not all(m.status in _terminal for m in members):
             return
         # Guard against duplicate spawning when multiple delegations
         # finish in rapid succession.
@@ -3754,11 +3764,17 @@ class ChatFlowEngine:
             and n.role == WorkNodeRole.PLAN_JUDGE
         ]
         spawned_any = False
+        _terminal = {NodeStatus.SUCCEEDED, NodeStatus.FAILED, NodeStatus.CANCELLED}
         for owner in plan_judges:
             members = _decompose_group_members(workflow, owner.id)
             if not members:
                 continue
-            if not all(m.status == NodeStatus.SUCCEEDED for m in members):
+            # Same loosening as ``_after_delegation``: require every
+            # member to be terminal (any of SUCCEEDED / FAILED /
+            # CANCELLED), not only SUCCEEDED. _format_decompose_aggregation
+            # handles mixed outcomes and judge_post can still produce a
+            # partial-aggregate user-facing reply.
+            if not all(m.status in _terminal for m in members):
                 continue
             if _decompose_group_already_aggregated(workflow, owner.id):
                 continue
