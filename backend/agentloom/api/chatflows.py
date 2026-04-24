@@ -219,6 +219,11 @@ class NodePosition(BaseModel):
 
 class PatchPositionsRequest(BaseModel):
     positions: list[NodePosition]
+    #: Walk-path for reaching a nested ``sub_workflow``. Empty = the
+    #: immediate inner WorkFlow of ``chat_node_id``. Each entry is a
+    #: WorkNode id whose ``sub_workflow`` is the next hop. Mirrors the
+    #: shape used by :class:`PatchStickyNotesRequest`.
+    sub_path: list[str] = []
 
 
 class CompactChainRequest(BaseModel):
@@ -663,17 +668,14 @@ async def patch_workflow_positions(
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     """Persist user-dragged positions for WorkNodes inside a ChatNode's
-    inner WorkFlow. Mirrors :func:`patch_positions` but scopes the lookup
-    to the named inner WorkFlow."""
+    inner WorkFlow. ``sub_path`` walks into nested sub-workflows exactly
+    like :class:`PatchStickyNotesRequest` does for sticky notes."""
     engine = _get_engine(request)
     repo = _repo(session)
     chat = await _attached_chatflow(engine, repo, chatflow_id)
-    chat_node = chat.nodes.get(chat_node_id)
-    if chat_node is None:
-        raise HTTPException(404, f"chat node {chat_node_id} not found")
-    inner = chat_node.workflow.nodes
+    wf = _resolve_workflow(chat, chat_node_id, body.sub_path)
     for pos in body.positions:
-        node = inner.get(pos.id)
+        node = wf.nodes.get(pos.id)
         if node is not None:
             node.position_x = pos.x
             node.position_y = pos.y

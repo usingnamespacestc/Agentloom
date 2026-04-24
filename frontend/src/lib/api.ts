@@ -314,12 +314,13 @@ export const api = {
     chatflowId: string,
     chatNodeId: string,
     positions: { id: string; x: number; y: number }[],
+    subPath: string[] = [],
   ) =>
     request<{ ok: boolean }>(
       `/api/chatflows/${chatflowId}/nodes/${chatNodeId}/workflow/positions`,
       {
         method: "PATCH",
-        body: JSON.stringify({ positions }),
+        body: JSON.stringify({ positions, sub_path: subPath }),
       },
     ),
 

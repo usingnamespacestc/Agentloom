@@ -1914,3 +1914,50 @@ lifespan 日志一句话汇总：`orphan_sweep: transitioned N stale ... node(s)
 
 - **live 回归**：fixture 改了但没在 live 上跑同样的三方对比 turn 验证。ark-code-latest 是否真的会切到 decompose，只有跑一次才知道。
 - **成本公式可不可以给硬数字**：当前"延迟收益通常胜出"仍是定性判断。如果能写成"独立对象数 ≥2 且每个耗时 ≥20s → 选 decompose"这类硬规则，模型更难在推理里打折。不过这种阈值要先有真实数据校准，暂不强加。
+
+### live 回归补记 (2026-04-24 凌晨)
+
+在原 CF `019db7b1` 上、同一 user message、同一 ark-code-latest 上重跑（新 ChatNode `019dbe40-...`, 690s, succeeded）：
+
+- planner 走 **decompose, 4 subtasks**（3 并行信息收集 + 1 聚合），顶层 4 个 delegate + 1 post_judge，对比原 `019db7e1` 的 atomic 0 delegate 30 节点纯链式
+- plan 节点 thinking 里几乎逐字反向复读了我们的新措辞：
+  > "独立分析后再聚合对比，**符合并行 decompose 的条件**，**可以降低墙钟延迟**，所以选择 decompose…子任务数量是 4 个，**在 ≤4 的范围**"
+
+A/B 干净。三处 prompt 改动逐条命中（`≤4 的范围` ← 数量措辞；`降低墙钟延迟` ← 成本 vs 收益段；`符合并行 decompose 的条件` ← canonical win case）。`feedback_debug_prompt_via_thinking.md` 方法论闭环应验。
+
+
+## 2026-04-24 上午 — frozen-guard 审计 + 3 件收尾
+
+沿着前一天的 "position 拖动丢失" 坑，系统审了一轮所有可能在 frozen 节点上 mutate 的路径。主线都 OK（exempt 集合 + `_strip_workflow_sticky` 递归覆盖了已知用例），但挖出 **1 个 concrete bug**、**1 个 brittle pattern** 和 **0 个回归检测网**。三件依次收尾：
+
+### 发现 1 → fix：嵌套 sub_workflow 内 WorkNode 拖动不持久化
+
+`patch_workflow_positions` 只认 `chat_node.workflow.nodes`（一级），`PatchPositionsRequest` schema 根本没 `sub_path` 字段。前端 `WorkFlowCanvas.tsx` 里显式 `if (subPath.length > 0) return` 跳过写入——注释甚至写了 `subPath > 0 path today only reads, never writes`。用户进 delegate 的 sub_workflow 视图拖节点 → **前端内存变，从不 PATCH**，刷新全丢。
+
+修法对称小改：
+- `PatchPositionsRequest` 加 `sub_path: list[str] = []`
+- 后端复用已有的 `_resolve_workflow(chat, chat_node_id, sub_path)` 解析目标 WorkFlow（跟 sticky-notes 走同一路径）
+- 前端 `patchWorkflowPositions` 新增 `subPath` 参数，`WorkFlowCanvas.tsx` 的 `flushPositions` / `emergencyFlush` 把当前 `subPath` 传下去，去掉 subPath > 0 的早 return
+
+### 发现 2 → 注释：`sticky_restored` 写在 SUCCEEDED 节点上
+
+`_update_sticky_restored_for_node` 严格看是在 frozen 节点上写非 exempt 字段。今天安全的原因微妙：写入发生在节点**首次存库前**（`prior` 里根本没这个 node id → guard 的 per-frozen-node 循环跳过它）。未来任何人写"给已存过的 SUCCEEDED 节点重算 sticky"的批处理，guard 会静默 trip、PATCH 丢改。在 `ChatFlowNode.sticky_restored` 的 docstring 里加一段**Frozen-guard note**，讲清楚 "仅在首次 save 之前写" 的约束和两种未来破局方案（加 exempt 或走旁路 save）。
+
+### 发现 3 → 回归测试：`test_frozen_guard_exempts.py`
+
+meta-test 三条，gitignored（本地 unit 套件）：
+
+1. `test_frozen_guard_exempts_all_ui_only_fields`：构造一个冻住的 CF（外 ChatNode SUCCEEDED + 一级 WorkNode SUCCEEDED + delegate SUCCEEDED + sub_workflow 内 WorkNode SUCCEEDED），把所有 UI-only 字段全 mutate 一遍（两级 `position_x/y`、两级 `sticky_notes`、`pending_queue` 不在这个测试里因为它不在 frozen 时常 mutate）。guard 必须全放行。
+2. `test_frozen_guard_rejects_semantic_field_change`：改外 ChatNode 的 `description`，guard 必须 trip。
+3. `test_frozen_guard_rejects_nested_semantic_field_change`：改嵌套 sub_workflow 里 WorkNode 的 `description`，guard 必须 trip。
+
+正反对照。未来任何人加了新 UI-only 字段但忘了 exempt，(1) 会 fail；改 exempt helper 时不小心放行了语义字段，(2)/(3) 会 fail。
+
+### 测试全量
+
+353 backend unit（+3 新 meta-test），72 frontend unit，lint 清。唯 `ChatFlowCanvas.test.tsx` 有 2 条 unused-import 警告是预存遗留，跟本次无关。
+
+### 未做
+
+- **meta-test 覆盖率更高的版本**：现在的 meta-test 靠手工枚举 UI-only 字段。更硬核的做法是给 `NodeBase` 每个字段打一个 `is_ui_only: bool` 标记，guard 自动读取。不做，因为当前字段数少，手工维护比元数据基础设施便宜。
+- **前端可视化提示**：如果 UI 想提示用户"这是 frozen 节点上的 UI 编辑、仅影响布局不改语义"，可以在拖动 frozen 节点时给个不同的光标/提示。不急。

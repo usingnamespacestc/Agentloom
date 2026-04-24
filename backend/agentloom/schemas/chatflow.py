@@ -215,6 +215,18 @@ class ChatFlowNode(NodeBase):
     #: was fresh on either branch survives the merge). Empty on greeting
     #: roots and on nodes that never invoked ``get_node_context`` below
     #: an active compact ancestor.
+    #:
+    #: **Frozen-guard note**: ``_update_sticky_restored_for_node`` writes
+    #: this field once the ChatNode has transitioned to SUCCEEDED (i.e.
+    #: frozen) — which in isolation would trip the per-node frozen guard.
+    #: Today it only works because the write happens during the *same*
+    #: turn-execution that spawned the node, **before** the first save
+    #: (``prior`` in ``_assert_frozen_chatflow_nodes_unchanged`` has no
+    #: entry for this node yet, so the guard's per-frozen-node loop skips
+    #: it). If any new code path ever mutates ``sticky_restored`` on a
+    #: ChatNode that already exists in a prior-save snapshot, either (a)
+    #: add ``sticky_restored`` to ``_FROZEN_EXEMPT_FIELDS`` or (b) walk a
+    #: different save path that bypasses the guard.
     sticky_restored: dict[str, int] = Field(default_factory=dict)
     #: Estimated tokens in the chain context this ChatNode was spawned
     #: with — i.e. ``_build_chat_context`` output at creation time,

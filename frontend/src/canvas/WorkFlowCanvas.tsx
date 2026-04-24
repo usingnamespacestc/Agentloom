@@ -194,7 +194,7 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
   const [syncTick, setSyncTick] = useState(0);
 
   const flushPositions = useCallback(() => {
-    if (subPath.length > 0 || !chatflowId || !outerChatNodeId || dirtyPositions.current.size === 0) return;
+    if (!chatflowId || !outerChatNodeId || dirtyPositions.current.size === 0) return;
     const positions = [...dirtyPositions.current]
       .map((id) => {
         const pos = dragPositions.current[id];
@@ -203,24 +203,17 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
       .filter(Boolean) as { id: string; x: number; y: number }[];
     dirtyPositions.current.clear();
     if (positions.length > 0) {
-      void api.patchWorkflowPositions(chatflowId, outerChatNodeId, positions);
+      void api.patchWorkflowPositions(chatflowId, outerChatNodeId, positions, subPath);
     }
   }, [chatflowId, outerChatNodeId, subPath]);
 
   // Emergency sync flush on pagehide / tab-switch — mirrors the guard
   // in ChatFlowCanvas. The 500ms debounce during drag is fine for
   // interactive batching but leaves a window where a reload drops the
-  // drag. fetch with keepalive completes during unload; scope skipped
-  // for nested sub-workflows since patchWorkflowPositions doesn't
-  // address them (subPath > 0 path today only reads, never writes).
+  // drag. fetch with keepalive completes during unload.
   useEffect(() => {
     const emergencyFlush = () => {
-      if (
-        subPath.length > 0
-        || !chatflowId
-        || !outerChatNodeId
-        || dirtyPositions.current.size === 0
-      ) {
+      if (!chatflowId || !outerChatNodeId || dirtyPositions.current.size === 0) {
         return;
       }
       const positions = [...dirtyPositions.current]
@@ -237,7 +230,7 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
           {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ positions }),
+            body: JSON.stringify({ positions, sub_path: subPath }),
             keepalive: true,
           },
         );
