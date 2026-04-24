@@ -79,6 +79,7 @@ from agentloom.schemas import (
     WorkFlowNode,
 )
 from agentloom.schemas.chatflow import (
+    CbiEntry,
     CompactPreserveMode,
     InboundContextSegment,
     PendingTurnSource,
@@ -6195,12 +6196,16 @@ def build_inbound_context_segments(
         snap = chatflow.nodes[compact_nid].compact_snapshot
         assert snap is not None
         cbi_block = ""
+        cbi_entries: list[CbiEntry] = []
         if chat_board_descriptions:
             cbi_lines: list[str] = []
             for ancestor_id in chain[:compact_cutoff_idx]:
                 desc = chat_board_descriptions.get(ancestor_id)
                 if desc:
                     cbi_lines.append(f"- [{ancestor_id}] {desc}")
+                    cbi_entries.append(
+                        CbiEntry(node_id=ancestor_id, description=desc)
+                    )
             if cbi_lines:
                 cbi_block = (
                     "\n\n[ChatBoard | 被压缩节点逐条摘要]\n"
@@ -6220,6 +6225,7 @@ def build_inbound_context_segments(
             ],
             source_node_id=compact_nid,
             synthetic=True,
+            cbi_entries=cbi_entries or None,
         )
         preserved_segment = InboundContextSegment(
             kind="preserved",

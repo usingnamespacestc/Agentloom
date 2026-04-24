@@ -86,6 +86,18 @@ InboundContextSegmentKind = Literal[
 ]
 
 
+class CbiEntry(BaseModel):
+    """One ChatBoard-item entry folded into a ``summary_preamble``
+    segment — a pre-compact ancestor's short prose description plus the
+    ChatNode id it came from. The same text also lives verbatim inside
+    the segment's ``messages[0].content`` (LLM-facing), but emitting a
+    structured list here lets the frontend render clickable per-node
+    bullets without re-parsing the marker string the backend joins."""
+
+    node_id: str
+    description: str
+
+
 class InboundContextSegment(BaseModel):
     """One labeled slice of the inbound context for a ChatNode.
 
@@ -100,12 +112,18 @@ class InboundContextSegment(BaseModel):
     ``synthetic=True`` flags segments whose messages were *constructed*
     rather than lifted verbatim — the sticky header, the summary
     preamble, etc. The frontend uses this to switch to muted styling.
+
+    ``cbi_entries`` is populated only on ``summary_preamble`` segments
+    when pre-compact ancestors had ChatBoard descriptions — each entry
+    is also reflected in the segment's text for LLM consumption, but
+    structured here so the UI can render clickable bullets.
     """
 
     kind: InboundContextSegmentKind
     messages: list[WireMessage] = Field(default_factory=list)
     source_node_id: str | None = None
     synthetic: bool = False
+    cbi_entries: list[CbiEntry] | None = None
 
 
 class InboundContextResponse(BaseModel):

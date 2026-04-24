@@ -41,6 +41,7 @@ import { api } from "@/lib/api";
 import type { ProviderSummary } from "@/lib/api";
 import { CompactConfirmDialog } from "@/components/CompactConfirmDialog";
 import type {
+  CbiEntry,
   ChatFlow,
   ChatFlowNode,
   InboundContextSegment,
@@ -220,6 +221,25 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
     () => inboundSegments.filter((s) => s.kind === "sticky_restored"),
     [inboundSegments],
   );
+  // Map compact-ancestor id → structured ChatBoard bullets folded into
+  // that node's summary_preamble. The endpoint only emits a single
+  // summary_preamble per chain (the deepest compact cutoff), so the
+  // map has at most one entry today, but keying by id keeps the
+  // rendering code indifferent if future designs surface more.
+  const cbiByCompactNodeId = useMemo(() => {
+    const m = new Map<string, CbiEntry[]>();
+    for (const seg of inboundSegments) {
+      if (
+        seg.kind !== "summary_preamble"
+        || !seg.source_node_id
+        || !seg.cbi_entries
+      ) {
+        continue;
+      }
+      m.set(seg.source_node_id, seg.cbi_entries);
+    }
+    return m;
+  }, [inboundSegments]);
 
   const forkAt = useMemo(() => {
     const m = new Map<NodeId, (typeof forks)[number]>();
@@ -386,6 +406,7 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
                 node={node}
                 isSelected={nid === selectedNodeId}
                 onSelect={() => selectNode(nid)}
+                cbiBullets={cbiByCompactNodeId.get(nid)}
               />
               {fork && (
                 <BranchSelector
@@ -789,10 +810,12 @@ function ChatMessageBubble({
   node,
   isSelected,
   onSelect,
+  cbiBullets,
 }: {
   node: ChatFlowNode;
   isSelected: boolean;
   onSelect: () => void;
+  cbiBullets?: CbiEntry[];
 }) {
   const { t } = useTranslation();
   const showNodeId = usePreferencesStore((s) => s.showNodeId);
@@ -810,6 +833,7 @@ function ChatMessageBubble({
         node={node}
         isSelected={isSelected}
         onSelect={onSelect}
+        cbiBullets={cbiBullets}
       />
     );
   }
@@ -980,12 +1004,15 @@ function CompactMessageBubble({
   node,
   isSelected,
   onSelect,
+  cbiBullets,
 }: {
   node: ChatFlowNode;
   isSelected: boolean;
   onSelect: () => void;
+  cbiBullets?: CbiEntry[];
 }) {
   const { t } = useTranslation();
+  const selectNode = useChatFlowStore((s) => s.selectNode);
   const showNodeId = usePreferencesStore((s) => s.showNodeId);
   const snap = node.compact_snapshot!;
   // Backend stamps the summary prose on agent_response.text; snap.summary
@@ -1016,6 +1043,34 @@ function CompactMessageBubble({
         </div>
       ) : (
         <div className="text-[12px] italic text-gray-400">—</div>
+      )}
+      {cbiBullets && cbiBullets.length > 0 && (
+        <div
+          data-testid={`conversation-node-${node.id}-cbi`}
+          className="mt-2 border-t border-teal-200/70 pt-2"
+        >
+          <div className="mb-1 text-[11px] font-semibold text-teal-700">
+            {t("conversation.cbi_label")}
+          </div>
+          <ul className="space-y-0.5">
+            {cbiBullets.map((e) => (
+              <li key={e.node_id} className="text-[12px] leading-snug">
+                <button
+                  type="button"
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    selectNode(e.node_id);
+                  }}
+                  className="mr-1 font-mono text-[11px] text-teal-600 underline-offset-2 hover:underline"
+                  title={e.node_id}
+                >
+                  {e.node_id.slice(0, 8)}
+                </button>
+                <span className="text-gray-700">{e.description}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   );

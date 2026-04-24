@@ -303,11 +303,24 @@ export type InboundContextSegmentKind =
   | "sticky_restored"
   | "current_turn";
 
+/**
+ * Mirror of ``agentloom.schemas.chatflow.CbiEntry`` — structured pre-
+ * compact ChatBoard-item bullets folded into a ``summary_preamble``
+ * segment. The segment's text mirrors these verbatim for LLM
+ * consumption; the structured list lets the UI render clickable per-
+ * node bullets without re-parsing the marker string.
+ */
+export interface CbiEntry {
+  node_id: string;
+  description: string;
+}
+
 export interface InboundContextSegment {
   kind: InboundContextSegmentKind;
   messages: WireMessage[];
   source_node_id: string | null;
   synthetic: boolean;
+  cbi_entries: CbiEntry[] | null;
 }
 
 export interface InboundContextResponse {

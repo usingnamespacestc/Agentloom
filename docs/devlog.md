@@ -1961,3 +1961,38 @@ meta-test 三条，gitignored（本地 unit 套件）：
 
 - **meta-test 覆盖率更高的版本**：现在的 meta-test 靠手工枚举 UI-only 字段。更硬核的做法是给 `NodeBase` 每个字段打一个 `is_ui_only: bool` 标记，guard 自动读取。不做，因为当前字段数少，手工维护比元数据基础设施便宜。
 - **前端可视化提示**：如果 UI 想提示用户"这是 frozen 节点上的 UI 编辑、仅影响布局不改语义"，可以在拖动 frozen 节点时给个不同的光标/提示。不急。
+
+
+## 2026-04-24 上午 — ChatBoard 摘要渲染到 compact 气泡
+
+backend 的 `/inbound_context` endpoint 早已在 `summary_preamble` 里融合了 pre-compact 祖先的 CBI 描述文本（[ChatBoard | 被压缩节点逐条摘要]\n- [id] desc），但前端 `CompactMessageBubble` 一直只渲染 `snap.summary` + preserved tail —— CBI 那段对用户不可见。这次给它补上。
+
+不想让前端解析后端的 marker 字符串（脆）。改成**后端结构化发出** + 前端直接消费：
+
+### 后端
+
+`InboundContextSegment` 加可选字段 `cbi_entries: list[CbiEntry] | None`。`CbiEntry = {node_id, description}`。`build_inbound_context_segments` 在拼 `summary_preamble` 时顺手把遍历出的 CBI 条目装进这个列表；无描述时字段保持 `None` 让前端直接跳过渲染。`messages[0].content` 里的 marker 文本保留不动（LLM-facing 契约），结构化字段纯粹是给 UI 用。
+
+新测试：`test_chat_board_descriptions_embedded_in_preamble_only` 追加了 `cbi_entries` 形状断言（pre-cutoff 序、post-cutoff 祖先的描述不泄漏）；新增 `test_cbi_entries_none_when_no_descriptions_provided` 锁 None-skip 路径。11 条 unit + 4 条 integration 全绿。
+
+### 前端
+
+- `schema.ts` 加 `CbiEntry` 接口，`InboundContextSegment.cbi_entries: CbiEntry[] | null`
+- `ConversationView` 在原有 `stickySegments` 旁边新建 `cbiByCompactNodeId: Map<NodeId, CbiEntry[]>`，从 `summary_preamble` 段按 `source_node_id` 索引
+- `ChatMessageBubble` 加 `cbiBullets?: CbiEntry[]` prop 并透传到 `CompactMessageBubble`
+- `CompactMessageBubble` 在 `summary` 下方、`preservedBlock` 之前加一段带顶部分割线的 CBI 列表：
+  - 每条显示 `nodeId.slice(0, 8)` 单色下划线按钮 + 描述文本
+  - 按钮点击走 `selectNode(e.node_id)`，跳转到对应 ChatNode
+  - `ev.stopPropagation()` 防止触发外层的 `onSelect`
+- i18n 新增 `conversation.cbi_label`（zh-CN / en-US）
+
+### 测试与验证
+
+- backend 354 unit + 4 integration；frontend 72 unit + `tsc --noEmit` 清（除 2 条无关的预存 unused-import 警告）
+- live backend `/openapi.json` 已刷新，`InboundContextSegment.cbi_entries` + `CbiEntry` schema 正确暴露
+- 手工 verify：live DB 里没有带 CBI 的 compact chain（测试用 CF 都没过压缩触发线），但 unit 覆盖了路径。下次 compact 落地的 chatflow 打开会看到新渲染。
+
+### 未做 / 后续
+
+- **全量 multi-segment 重写**：memory 里记过 "ConversationView 未来应该直接消费 endpoint 的五段结构，而不是 walk visiblePath 自己从节点 model 推"。本次只接了 CBI 这段增量，完整重写涉及 rewrite 整个 `visiblePath.map()` 成 `segments.map()`，是更大的前端 refactor，留给下次。
+- **CBI 点击跳转后的滚动定位**：`selectNode` 只设了 selectedNodeId，没有滚动到目标气泡。常用路径够用（用户看得到选中高亮），但目标节点被压缩进 summary 时无节点可跳，体验略糙。可以后面加一条"跳到该 node 时如果在 summary 里就高亮 CBI bullet 回去"的回流。

@@ -163,6 +163,7 @@
     "compact_truncated": "上方 {{count}} 轮已被压缩 — 摘要见下方",
     "compact_summary_label": "压缩后的上下文",
     "compact_summary_pending": "（压缩 worker 仍在运行…）",
+    "cbi_label": "ChatBoard 摘要（点击跳转）",
     "sticky_restored_label": "召回的早期节点（通过 get_node_context 拉回）",
     "merge_summary_label": "合并后的上下文",
     "merge_summary_pending": "（合并 worker 仍在运行…）",
