@@ -168,6 +168,11 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
 - [x] **Pack**（ChatFlow 层打包）：对一段连续 ChatNode 范围做主题摘要，生成
       带 `packed_range` 的可见 pack ChatNode，支持嵌套打包 + 跨 fork/merge
       打包；UI 上点"开始打包"两点选中范围，悬停 pack 节点高亮其打包范围
+- [x] **折叠 / 展开（fold/unfold）**：右键 pack 或 compact 节点 → 折叠此范围 →
+      合成一个 "折叠了 N 个节点" 的代理节点挂在 host 上游，被折节点消失、
+      fork / pack 子节点通过 fold 的 top / right / bottom handle 重路由
+      （"内部分支" vs "末端分支" vs "pack 挂下面" 视觉区分）。折叠状态和 fold
+      节点位置 per-chatflow 持久化到 localStorage，刷新不丢
 - [x] retry / cancel / delete 级联处理
 - [x] 分支导航（↑↓ 切兄弟，跳转到 parent/child）
 - [x] 多 parent 的 merge ChatNode 在 canvas 上渲染成汇流形态
@@ -210,8 +215,10 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
       当前 ChatNode 的 `sticky_restored`，并沿对话链逐轮衰减；fork 后
       独立衰减、merge 时取 MAX，下一轮 compact 不会再次把它压掉
 - [x] `inbound_context` 分段预览 API：ChatFlow 右栏把即将喂给 LLM 的上下文
-      按 summary_preamble / preserved / ancestor / sticky_restored / current_turn
-      分段展示，合成段与真实段视觉上区分开
+      按 summary_preamble / preserved / ancestor / **pack_summary** /
+      sticky_restored / current_turn 分段展示，合成段与真实段视觉上区分开；
+      compact 节点气泡内以结构化 **CBI bullets** 列出被折叠的祖先节点，
+      点击可跳转
 
 ### Provider + 工具
 - [x] OpenAI 兼容 provider（Volcengine / Ark / Ollama / OpenAI）
@@ -242,6 +249,10 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
 - [x] 节点拖动位置持久化：画布上手动摆位后，刷新、切回重新打开 CF 都保留；
       窗口关闭 / 切后台用 `fetch({keepalive: true})` 兜底 flush，
       防抖 500ms 内刷新也不丢
+- [x] **浏览器状态持久化**：刷新后当前打开的 ChatFlow、节点 focus、WorkFlow
+      drill 路径、fold 状态和 fold 节点位置全部恢复。`agentloom:ui:*` /
+      `agentloom:fold:*` 分域 localStorage，hydrate 时先对 live chatflow
+      reconcile（跳过已删节点）再还原
 - [x] 结构化 JSON 输出（provider / model 两层 `json_mode`）
 
 ### 基础设施
@@ -249,7 +260,13 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
 - [x] Alembic 迁移
 - [x] SSE 事件总线：按 workflow 订阅 + 嵌套转发
 - [x] 分层 token-bucket 限流
-- [x] Pytest：后端 343 个单测 + 前端 72 个单测全绿（忽略两个预存损坏的 fixture 文件）
+- [x] **启动期 orphan sweep**：进程重启时扫全部 chatflow，把 `running` /
+      `retrying` / `waiting_for_rate_limit` 的孤儿节点（引擎死亡时留下的
+      幽灵态）转成 `FAILED`，避免 UI 里永远 "在跑"
+- [x] **Frozen-guard exempt 不变量测试**：`test_frozen_guard_exempts.py`
+      正反两面固定 UI-only 字段（position / sticky / pending_queue）在
+      frozen 节点上放行、语义字段必触发；防未来加新字段时踩拖动丢失那类坑
+- [x] Pytest：后端 **362** 个单测 + 前端 **78** 个单测全绿，collection 干净
 
 ---
 

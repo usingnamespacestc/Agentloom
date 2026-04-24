@@ -191,6 +191,13 @@ inspect and swap out.
       `packed_range`; supports nested packs and packs spanning
       fork/merge; UI selects the range with two picks and highlights
       the packed range on hover.
+- [x] **Fold / unfold**: right-click a pack or compact ChatNode → "fold
+      this range" → a synthetic "folded N nodes" proxy card appears
+      upstream of the host. Range members disappear; fork / pack
+      children rewire through the fold's top / right / bottom handles
+      ("interior fork" vs "boundary fork" vs "pack-below" visually
+      distinct). Fold state and fold-node drag positions persist
+      per-chatflow in localStorage — survives refresh.
 - [x] Retry / cancel / delete with cascade
 - [x] Branch navigation (↑↓ siblings, jump to parent/child)
 - [x] Multi-parent merge ChatNodes render as a confluence in the canvas
@@ -244,9 +251,11 @@ inspect and swap out.
       the per-source MAX, and the next compact leaves it intact
 - [x] `inbound_context` segmented preview API: the ChatFlow right pane
       renders the context that the LLM is about to see as
-      summary_preamble / preserved / ancestor / sticky_restored /
-      current_turn segments so synthetic and real turns are visually
-      distinct
+      summary_preamble / preserved / ancestor / **pack_summary** /
+      sticky_restored / current_turn segments so synthetic and real
+      turns are visually distinct. Compact ChatNode bubbles also show
+      structured **CBI bullets** listing the folded-away ancestors,
+      clickable to jump.
 
 ### Providers + tools
 - [x] OpenAI-compatible providers (Volcengine / Ark / Ollama / OpenAI)
@@ -283,6 +292,13 @@ inspect and swap out.
       to the backend behind a 500ms debounce, with a pagehide /
       beforeunload emergency flush via `fetch({keepalive: true})` so
       a rapid close/refresh inside the debounce window still saves
+- [x] **Browser-side UI state persistence**: the last opened
+      chatflow, selected ChatNode, WorkFlow drill path, fold state,
+      and fold-node positions all restore on refresh. Keyed under
+      `agentloom:ui:*` / `agentloom:fold:*` with per-chatflow sub-
+      namespaces; hydrate reconciles against the live chatflow so
+      stale ids (deleted nodes, severed drill frames) get dropped
+      instead of stranding the UI in a broken state
 - [x] Structured JSON output (provider / model two-layer `json_mode`)
 
 ### Infra
@@ -290,8 +306,18 @@ inspect and swap out.
 - [x] Alembic migrations
 - [x] SSE event bus with per-workflow subscriptions + nested forwarding
 - [x] Hierarchical token-bucket rate limiting
-- [x] Pytest: 343 backend tests + 72 frontend tests passing (two
-      pre-existing broken test files are skipped)
+- [x] **Startup orphan sweep**: on process boot the lifespan hook
+      scans every chatflow and transitions ghost `running` /
+      `retrying` / `waiting_for_rate_limit` nodes left by a crashed
+      engine to `FAILED`, so the UI never shows a forever-"in-flight"
+      node after a hard kill
+- [x] **Frozen-guard exempt invariant test**: `test_frozen_guard_exempts.py`
+      pins the rule that UI-only fields (positions, sticky, pending
+      queue) pass the frozen guard on succeeded/failed nodes while
+      semantic fields must trip it — prevents the "drag snaps back
+      on refresh" class of bugs when future PRs add new node fields
+- [x] Pytest: **362** backend tests + **78** frontend tests passing;
+      collection is clean (no --ignore flags needed)
 
 ---
 
