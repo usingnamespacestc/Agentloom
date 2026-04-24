@@ -26,7 +26,10 @@ from agentloom.api import (
 from agentloom.config import get_settings
 from agentloom.db.base import get_session_maker
 from agentloom.db.models.tenancy import DEFAULT_WORKSPACE_ID
-from agentloom.db.repositories.chatflow import backfill_missing_node_index
+from agentloom.db.repositories.chatflow import (
+    backfill_missing_node_index,
+    sweep_orphaned_running_nodes,
+)
 from agentloom.db.repositories.mcp_server import MCPServerRepository
 from agentloom.db.repositories.workspace_settings import WorkspaceSettingsRepository
 from agentloom.mcp import runtime as mcp_runtime
@@ -67,6 +70,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
     except Exception:  # noqa: BLE001 — backfill is best-effort
         logging.getLogger(__name__).exception("node_index: backfill failed")
+    try:
+        orphaned = await sweep_orphaned_running_nodes(get_session_maker())
+        if orphaned:
+            logging.getLogger(__name__).info(
+                "orphan_sweep: transitioned %d stale running/retrying/waiting node(s) to failed",
+                orphaned,
+            )
+    except Exception:  # noqa: BLE001 — sweep is best-effort, never fail startup
+        logging.getLogger(__name__).exception("orphan_sweep: failed")
     try:
         yield
     finally:

@@ -6,6 +6,7 @@ frozen nodes cannot be modified on save).
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Iterable
 
 from sqlalchemy import delete, exists, select
@@ -21,6 +22,7 @@ from agentloom.schemas.common import (
     FrozenNodeError,
     NodeStatus,
     ProviderModelRef,
+    utcnow,
 )
 
 
@@ -353,6 +355,97 @@ async def backfill_missing_node_index(
             count += 1
         await session.commit()
         return count
+
+
+_ORPHAN_STATUSES = frozenset(
+    {
+        NodeStatus.RUNNING,
+        NodeStatus.RETRYING,
+        NodeStatus.WAITING_FOR_RATE_LIMIT,
+    }
+)
+
+_ORPHAN_ERROR_MSG = "orphaned: engine restarted mid-run"
+
+
+async def sweep_orphaned_running_nodes(
+    session_maker: async_sessionmaker[Any],
+) -> int:
+    """Transition orphaned in-flight nodes to FAILED at startup.
+
+    The engine keeps its scheduler state (active tasks, rate-limit waits,
+    retry timers) in memory. When the process dies or is hard-killed,
+    any node persisted as ``running`` / ``retrying`` /
+    ``waiting_for_rate_limit`` becomes an orphan — nothing left alive
+    will ever mark it done, so it hangs forever in the UI and blocks
+    downstream edits (frozen guard won't fire, but the engine also
+    won't resume it).
+
+    This sweep runs on app startup, after the engine's in-memory state
+    is guaranteed empty and before any new traffic arrives, so every
+    persisted in-flight status is stale by definition. Mutates the
+    JSONB payload directly (no frozen guard needed — these statuses
+    are non-frozen) and returns the total number of nodes cleaned.
+
+    ``waiting_for_user`` is intentionally left alone — that's a
+    persistent halt-awaiting-resume state, not an orphan.
+    """
+    async with session_maker() as session:
+        rows = (await session.execute(select(ChatFlowRow))).scalars().all()
+        total = 0
+        for row in rows:
+            try:
+                chatflow = ChatFlow.model_validate(_clamp_legacy_compact(row.payload))
+            except Exception:  # noqa: BLE001 — one bad row mustn't block the rest
+                logging.getLogger(__name__).exception(
+                    "orphan_sweep: failed to load chatflow %s", row.id
+                )
+                continue
+            changed = _sweep_chatflow_orphans(chatflow)
+            if changed:
+                row.payload = chatflow.model_dump(mode="json")
+                total += changed
+                logging.getLogger(__name__).debug(
+                    "orphan_sweep: cleaned %d node(s) in chatflow %s (workspace %s)",
+                    changed,
+                    row.id,
+                    row.workspace_id,
+                )
+        if total:
+            await session.commit()
+        return total
+
+
+def _sweep_chatflow_orphans(chatflow: ChatFlow) -> int:
+    now = utcnow()
+    count = 0
+    for chat_node in chatflow.nodes.values():
+        if chat_node.status in _ORPHAN_STATUSES:
+            _mark_node_orphaned(chat_node, now)
+            count += 1
+        workflow = chat_node.workflow
+        if workflow is not None:
+            count += _sweep_workflow_orphans(workflow, now)
+    return count
+
+
+def _sweep_workflow_orphans(workflow: Any, now: Any) -> int:
+    count = 0
+    for wn in workflow.nodes.values():
+        if wn.status in _ORPHAN_STATUSES:
+            _mark_node_orphaned(wn, now)
+            count += 1
+        sub = getattr(wn, "sub_workflow", None)
+        if sub is not None:
+            count += _sweep_workflow_orphans(sub, now)
+    return count
+
+
+def _mark_node_orphaned(node: Any, now: Any) -> None:
+    node.status = NodeStatus.FAILED
+    node.error = node.error or _ORPHAN_ERROR_MSG
+    node.finished_at = now
+    node.updated_at = now
 
 
 def _clamp_legacy_compact(payload: dict) -> dict:
