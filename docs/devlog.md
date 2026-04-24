@@ -1880,3 +1880,37 @@ lifespan 日志一句话汇总：`orphan_sweep: transitioned N stale ... node(s)
 - **sweep 时机**：目前只在启动时扫。更稳的做法是加个周期性 sweep（watchdog），在运行期捕获那些引擎仍在跑但协程泄露的节点；MVP 够用。
 - **lost-engine-state recovery**：sweep 把 RUNNING 转 FAILED，干脆地承认损失；更雄心的设计是把它们转回 PLANNED 让下次 submit 接管——但那需要知道中间状态（哪些 tool call 跑完了、哪些没），现在不存。暂不追求。
 - **pre-existing 坏 import 扫除**：unit 套件里 `test_citation_fallback.py` 和 `test_merge_context.py` 都引了不再存在的内部符号；撞上一次重构没跟上。下次动 chatflow_engine 时顺手修掉。
+
+
+## 2026-04-24 凌晨 — planner anti-decompose 过头：从 ark-code-latest thinking 里看出来的
+
+`019db7b1` CF 的 Agentloom/Dify/LangFlow 三方对比 turn，ChatNode `019db7e1` 的 plan 节点（ark-code-latest）留下了 LLM thinking：
+
+> "拆三个：分析本地 Agentloom / 搜 Dify / 搜 LangFlow，再加综合 = 4 个 subtask。**规则说子数量 ≥5 不行，四个也可以？不对，再想想**。或者 atomic？atomic 的话 worker 可以自己 ReAct 循环…… **拆的话每个子任务都要走一遍流程，成本更高**……atomic 一个 worker 就能搞定……"
+
+这是一个近乎完美的"**prompt 过头**"证据——ark 自己拟出了正确分解（3 个并行叶子 + 1 个聚合），但被我们自己的 prompt 劝退回 atomic。拆开看三处病灶：
+
+1. **"第 3 条最关键"误导**（`plan.yaml` OK to decompose 段）。规则 1（独立并行）和规则 2（子产物完整）才是主要信号；"ReAct 装不下"是罕见边界。标了"#3 最关键"反而让模型把前两条当次要。
+
+2. **子任务数量上限模糊**。原文"≥5 合并成 ≤3"读起来像 4 也该避免，ark 逐字复读了这个模糊带。正常 decompose 2–4 个才是常态。
+
+3. **成本提醒是单边的**。细致罗列了 5 LLM 调用 vs 4 的差价，但没讲**并行带来的墙钟延迟收益** —— 3 个独立信息收集任务，decompose 能把 3×T 压到 1×T。ark 于是只算了成本账，没算收益账，落位 atomic。
+
+### 修法
+
+两套 fixture (zh-CN / en-US) 对称改 3 处：
+
+- OK-to-decompose 段：去掉"第 3 条最关键"，在规则 1 下方加**典型正例**（对比/评估 ≥2 个独立对象 → N 并行叶子 + 1 聚合 → 墙钟逼近单对象耗时）
+- Must-not-decompose 段：子任务数量上限改成 "≥5 合并成 ≤4；**2–4 是正常范围，不必强行并到更少**"
+- **成本提醒**改名**成本 vs 收益**：保留 LLM 调用差价，但补一段墙钟延迟收益 + 决策原则"独立可并行 → 延迟收益通常胜出；强依赖串行 → 额外调度纯属浪费"
+
+47 个 template/parser 相关单测全绿。
+
+### 方法论收获
+
+**LLM 的 thinking 是最好的 prompt debug 日志**。ark-code-latest 在 thinking 里几乎逐字复读了我们自己的规则字眼（"成本更高" / "≥5 不行"），沿着规则链条推理到 atomic——这比任何"模型倾向如此"的黑箱归因都清晰。下次改 prompt 前应该养成**先看至少一条典型 thinking、用模型的话反推 prompt 坑**的习惯。
+
+### 未做 / 后续
+
+- **live 回归**：fixture 改了但没在 live 上跑同样的三方对比 turn 验证。ark-code-latest 是否真的会切到 decompose，只有跑一次才知道。
+- **成本公式可不可以给硬数字**：当前"延迟收益通常胜出"仍是定性判断。如果能写成"独立对象数 ≥2 且每个耗时 ≥20s → 选 decompose"这类硬规则，模型更难在推理里打折。不过这种阈值要先有真实数据校准，暂不强加。

@@ -109,12 +109,18 @@ plan:
               lists 0-indexed positions of sub-tasks that must complete
               first). Free-mix is allowed via the `after` graph.
 
-            **OK to decompose** (at least one must hold; #3 is the
-            biggest tell):
+            **OK to decompose** (any one suffices; #1 and #2 are the
+            primary signals, #3 is a supplementary edge case):
               1. Sub-tasks are genuinely **independent** and can run
                  in parallel without waiting on each other's full
                  intermediate output (an aggregator node can `after`
-                 all parallel siblings).
+                 all parallel siblings). **Canonical win case**: the
+                 user asks to compare / evaluate ≥ 2 independent
+                 objects (products, projects, candidate solutions),
+                 where each object needs its own information gathering
+                 + analysis → decompose into N parallel leaves + 1
+                 aggregator; wall-clock latency approaches the time
+                 of a single object, clearly beating atomic serial.
               2. Each sub-task is **a full task on its own** —
                  produces its own readable artefact (a report, a
                  search result set, an analysis). Not a single tool
@@ -143,15 +149,24 @@ plan:
                 plan_judge — 10× LLM cost for zero observability
                 gain.
               - Sub-task count ≥ 5: almost certainly over-fragmented;
-                merge into ≤ 3 coarser sub-tasks and re-check whether
-                decompose is still needed.
+                merge into ≤ 4 coarser sub-tasks (**2-4 sub-tasks is
+                the normal range — do NOT force consolidation below
+                that**) and re-check whether decompose is still needed.
 
-            **Cost reminder**: each decompose sub-task runs a full
+            **Cost vs benefit**: each decompose sub-task runs a full
             pre_judge → planner → plan_judge → worker → post_judge
             cycle (when it stays atomic itself), at least 5 LLM calls
             plus several briefs. An atomic worker's ReAct loop with
-            3 tool calls takes ~4 LLM calls total. Price that
-            difference into every decompose decision.
+            3 tool calls takes ~4 LLM calls total. **But the real
+            payoff of parallel decompose is wall-clock latency**:
+            N independent sub-tasks running in parallel finish in
+            roughly one sub-task's duration, whereas atomic serial
+            takes N×T. The user-visible latency win usually offsets
+            the extra LLM calls — especially for information
+            gathering / independent analysis, which are I/O-bound.
+            Decision principle: **independent + parallelisable →
+            latency gain typically wins; tightly sequential →
+            extra scheduling is pure waste**.
 
             Hard rules:
             - Leaves are always workers. A planner that cannot find a
