@@ -63,6 +63,7 @@ import { ModelRibbonLayer } from "./ModelRibbonLayer";
 import { MODEL_KINDS, colorForModel, edgeModel } from "./effectiveModel";
 import { ChatFlowNodeCard, type ChatFlowNodeData } from "./nodes/ChatFlowNodeCard";
 import { ChatBriefNodeCard, type ChatBriefNodeData } from "./nodes/ChatBriefNodeCard";
+import { ChatFoldNodeCard, type ChatFoldNodeData } from "./nodes/ChatFoldNodeCard";
 import { StickyNoteNode, type StickyNoteData } from "./nodes/StickyNoteNode";
 import { NODE_HEIGHT } from "./layout";
 import { api, type ProviderSummary } from "@/lib/api";
@@ -78,6 +79,7 @@ interface ContextMenuState {
 const NODE_TYPES = {
   chatflow: ChatFlowNodeCard,
   chatBrief: ChatBriefNodeCard,
+  chatFold: ChatFoldNodeCard,
   stickyNote: StickyNoteNode,
 };
 
@@ -444,11 +446,14 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
     const filtered = changes.filter((c) => c.type !== "select");
     if (filtered.length === 0) return;
     for (const c of filtered) {
-      // Synthetic chat-brief nodes are view-only; skip drag-position
-      // bookkeeping so we never try to PATCH a non-ChatNode id.
-      const isBriefId =
-        c.type === "position" && String(c.id).startsWith(CHAT_BRIEF_NODE_PREFIX);
-      if (c.type === "position" && c.position && !isBriefId) {
+      // Synthetic chat-brief / chat-fold nodes are view-only; skip
+      // drag-position bookkeeping so we never try to PATCH a non-
+      // ChatNode id.
+      const isSyntheticId =
+        c.type === "position"
+        && (String(c.id).startsWith(CHAT_BRIEF_NODE_PREFIX)
+          || String(c.id).startsWith(CHAT_FOLD_NODE_PREFIX));
+      if (c.type === "position" && c.position && !isSyntheticId) {
         dragPositions.current[c.id] = c.position;
         if (isSticky(String(c.id))) {
           updateStickyNote(c.id, { x: c.position.x, y: c.position.y });
@@ -519,10 +524,16 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
   // interrupts the drag — this runs on mouseup regardless.
   const handleNodeDragStop: OnNodeDrag = useCallback((_event, node) => {
     isDragging.current = false;
-    dragPositions.current[node.id] = { x: node.position.x, y: node.position.y };
-    if (isSticky(String(node.id))) {
+    const nid = String(node.id);
+    const isSynthetic =
+      nid.startsWith(CHAT_BRIEF_NODE_PREFIX)
+      || nid.startsWith(CHAT_FOLD_NODE_PREFIX);
+    if (!isSynthetic) {
+      dragPositions.current[node.id] = { x: node.position.x, y: node.position.y };
+    }
+    if (isSticky(nid)) {
       updateStickyNote(node.id, { x: node.position.x, y: node.position.y });
-    } else {
+    } else if (!isSynthetic) {
       dirtyPositions.current.add(node.id);
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(flushPositions, 500);
@@ -531,9 +542,10 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
   }, [flushPositions, updateStickyNote, isSticky]);
 
   const handleNodeClick: NodeMouseHandler = (_event, node) => {
-    // Synthetic chat-brief nodes are view-only; clicking them is a
-    // no-op (they don't map to any ChatNode id in the store).
+    // Synthetic chat-brief / chat-fold nodes are view-only; clicking
+    // them is a no-op (they don't map to any ChatNode id in the store).
     if (String(node.id).startsWith(CHAT_BRIEF_NODE_PREFIX)) return;
+    if (String(node.id).startsWith(CHAT_FOLD_NODE_PREFIX)) return;
     if (isSticky(String(node.id))) {
       setSelectedStickyId(node.id);
     } else {
@@ -578,6 +590,15 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
     event.preventDefault();
     // Synthetic chat-brief nodes have no actions — suppress the menu.
     if (String(node.id).startsWith(CHAT_BRIEF_NODE_PREFIX)) return;
+    // Synthetic fold nodes expose only one action: unfold. Route
+    // through the store directly instead of popping the full node
+    // menu so the user isn't offered irrelevant items (retry / merge /
+    // compact). The host id lives on the fold's data payload.
+    if (String(node.id).startsWith(CHAT_FOLD_NODE_PREFIX)) {
+      const hostId = (node.data as ChatFoldNodeData | undefined)?.hostId;
+      if (hostId) unfoldChatNode(hostId);
+      return;
+    }
     if (isSticky(String(node.id))) {
       setStickyCtxMenu({ x: event.clientX, y: event.clientY, noteId: node.id });
     } else {
@@ -1033,23 +1054,41 @@ function ChatBoardPanel({
 }
 
 /** Pure function so it can be unit-tested without rendering React Flow. */
-/** Fold-state projection. Maps every hidden ChatNode id to the fold
- * host (a pack / compact ChatNode) that is currently absorbing it.
- * Used for edge re-route so range-internal nodes disappear and their
- * external edges flow through the host card instead. */
+/** Prefix for synthetic fold node IDs. Each effective fold injects
+ * one ``chatFold`` rfNode (id = prefix + hostId). Kept distinct from
+ * real ChatNode ids so store lookups never collide. */
+export const CHAT_FOLD_NODE_PREFIX = "_chat_fold_";
+
+/** Fold-state projection. For each hidden ChatNode, records the
+ * synthetic fold node id that represents it on the canvas. The fold
+ * node is positioned upstream of its host (a pack / compact ChatNode);
+ * the host itself stays visible and retains its own card.
+ * ``lastMemberByHost`` lets edge re-route tell apart "fork from the
+ * last range member" (attach to host via fold's right handle) from
+ * "fork from an earlier member" (attach via fold's top handle). */
 export interface FoldProjection {
   hidden: Set<NodeId>;
-  hostByHidden: Map<NodeId, NodeId>;
-  countByHost: Map<NodeId, number>;
+  /** hidden ChatNode id → synthetic fold node id. */
+  foldByHidden: Map<NodeId, NodeId>;
+  /** synthetic fold node id → the host (compact/pack) ChatNode id. */
+  hostByFold: Map<NodeId, NodeId>;
+  /** synthetic fold node id → how many ChatNodes it currently hides. */
+  countByFold: Map<NodeId, number>;
+  /** synthetic fold node id → the last range member (the one that's
+   * adjacent to the host in the original chain). Used to route
+   * "boundary forks" to fold.right and "interior forks" to fold.top. */
+  lastMemberByFold: Map<NodeId, NodeId>;
 }
 
-/** Compute the hidden-set + host-map for a ChatFlow given the user's
- * current fold selection. A fold is only *effective* when the host
- * itself is visible — if packA (folded) is inside packB's (also folded)
- * range, packA is hidden by packB and its own range collapses into
- * packB instead. Attribution prefers the fold with the largest range
- * so cross-range edges end on a single visible host (avoids spurious
- * A↔B cycles when ranges partially overlap). Ties break on id. */
+/** Compute the fold projection. Pack ranges are contiguous primary-
+ * parent chains; compact ranges walk primary-parent up to (but not
+ * across) a merge. A fold is only *effective* when the host itself is
+ * visible — if packA is inside packB's range and both are folded,
+ * packA drops out of attribution. Largest-range-wins attribution on
+ * the remaining folds keeps each fold's hidden class a contiguous
+ * sub-chain of the DAG, which is what prevents the projection from
+ * introducing cycles (DAG quotient by non-convex classes CAN cycle;
+ * convex-chain classes cannot). */
 export function computeFoldProjection(
   chatflow: ChatFlow,
   foldedChatNodeIds: Set<NodeId>,
@@ -1100,20 +1139,40 @@ export function computeFoldProjection(
       return a[0].localeCompare(b[0]);
     });
 
-  const hostByHidden = new Map<NodeId, NodeId>();
-  const countByHost = new Map<NodeId, number>();
-  for (const [foldId, range] of effectiveFolds) {
+  // Pass 4: attribution. For each hidden node, remember which
+  // synthetic fold node it now sits under. Also record the ``last
+  // member`` per fold (the range member adjacent to the host in the
+  // original chain) so edge-re-route can tell apart "boundary fork"
+  // from "interior fork" later.
+  const foldByHidden = new Map<NodeId, NodeId>();
+  const hostByFold = new Map<NodeId, NodeId>();
+  const countByFold = new Map<NodeId, number>();
+  const lastMemberByFold = new Map<NodeId, NodeId>();
+  for (const [hostId, range] of effectiveFolds) {
+    const foldId = `${CHAT_FOLD_NODE_PREFIX}${hostId}`;
+    hostByFold.set(foldId, hostId);
+    countByFold.set(foldId, range.size);
     for (const id of range) {
-      if (!hostByHidden.has(id)) hostByHidden.set(id, foldId);
+      if (!foldByHidden.has(id)) foldByHidden.set(id, foldId);
     }
-    countByHost.set(foldId, range.size);
+    // Last range member = host.parent_ids[0] by construction:
+    //   - pack: pack.parent = pack.packed_range[-1]
+    //   - compact: compact's primary-parent IS the last folded ancestor
+    const hostNode = chatflow.nodes[hostId];
+    const lastMember = hostNode?.parent_ids[0];
+    if (lastMember && range.has(lastMember)) {
+      lastMemberByFold.set(foldId, lastMember);
+    }
   }
 
-  // Pass 4: the hidden set used by canvas / panel matches the attributed
-  // set (intentionally excludes any fold host that ended up hidden —
-  // those contribute zero visible affordance).
-  const hidden = new Set(hostByHidden.keys());
-  return { hidden, hostByHidden, countByHost };
+  const hidden = new Set(foldByHidden.keys());
+  return {
+    hidden,
+    foldByHidden,
+    hostByFold,
+    countByFold,
+    lastMemberByFold,
+  };
 }
 
 export function buildGraph(
@@ -1169,19 +1228,15 @@ export function buildGraph(
   const chatNodePositions = new Map<NodeId, { x: number; y: number }>();
   const rfNodes: Node<ChatFlowNodeData>[] = [];
   for (const { node, position } of laidOut) {
-    // Hidden nodes are absorbed into their fold host — skip them
-    // entirely; the host keeps its card and styling picks up the
-    // ``isFoldHost`` / ``foldedCount`` signal below.
+    // Hidden nodes disappear from the canvas — their content is
+    // represented by the synthetic fold node injected below.
     if (fold.hidden.has(node.id)) continue;
-    // Prefer server-persisted position over auto-layout. Pack override
-    // only applies when the pack has no persisted position.
     const pos =
       node.position_x != null && node.position_y != null
         ? { x: node.position_x, y: node.position_y }
         : packOverride.get(node.id) ?? position;
     chatNodePositions.set(node.id, pos);
     const isRoot = rootSet.has(node.id);
-    const foldedCount = fold.countByHost.get(node.id) ?? 0;
     rfNodes.push({
       id: node.id,
       type: "chatflow",
@@ -1199,65 +1254,148 @@ export function buildGraph(
           contextWindowByModel,
         ),
         hasPackChild: parentsOfPack.has(node.id),
-        isFoldHost: foldedCount > 0,
-        foldedCount,
       },
       selectable: false,
     });
   }
 
-  // Re-route edges through the fold host map. When both endpoints land
-  // on the same visible node (range-internal edge, or collapsing edge
-  // whose source and destination end at the same host), drop it. After
-  // re-route, dedupe edges so parallel rails stacking onto a host
-  // don't render twice.
+  // Synthetic fold nodes — one per active fold. Each sits upstream of
+  // its host (compact/pack), occupying the slot the first hidden
+  // ancestor used to take. Host itself stays visible; fold absorbs
+  // the range on both canvas and edge routing.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const foldNodes: Node<any>[] = [];
+  const foldPositions = new Map<NodeId, { x: number; y: number }>();
+  const FOLD_WIDTH = 160;
+  const FOLD_GAP = 40;
+  for (const [foldId, hostId] of fold.hostByFold) {
+    const hostPos = chatNodePositions.get(hostId);
+    if (!hostPos) continue;
+    const host = chatflow.nodes[hostId];
+    const hostKind: "compact" | "pack" = host?.pack_snapshot
+      ? "pack"
+      : "compact";
+    // Position: directly to the left of the host card, leaving a small
+    // gap. When the host is a pack (drops below its parent), we anchor
+    // slightly above so the fold still reads as "upstream of pack".
+    const foldPos = {
+      x: hostPos.x - FOLD_WIDTH - FOLD_GAP,
+      y: hostPos.y,
+    };
+    foldPositions.set(foldId, foldPos);
+    foldNodes.push({
+      id: foldId,
+      type: "chatFold",
+      position: foldPos,
+      data: {
+        hostId,
+        hostKind,
+        foldedCount: fold.countByFold.get(foldId) ?? 0,
+      } satisfies ChatFoldNodeData,
+      selectable: false,
+      draggable: false,
+    });
+  }
+
+  // Edge re-route through the synthetic fold nodes. The category of an
+  // edge (src→dst) in the original graph is resolved to three cases:
+  //
+  //   - Both endpoints hidden: drop (range-internal).
+  //   - Src visible, dst hidden: ``src → fold`` landing on the fold's
+  //     LEFT handle (``fold-input``). There is only one such edge per
+  //     fold — the chain's entry into the range.
+  //   - Src hidden, dst visible: route via the fold host's source
+  //     handle, chosen by edge semantics:
+  //     * ``dst`` is a pack ChatNode → ``fold-output-bottom`` +
+  //       ``main-target-top`` (preserves the pack-below visual).
+  //     * ``src`` is the range's LAST MEMBER (the one adjacent to the
+  //       host in the original chain) → ``fold-output-right``,
+  //       including the edge into the host itself.
+  //     * ``src`` is an EARLIER range member → ``fold-output-top``,
+  //       signalling "emerged from inside".
+  //   - Both hidden but in different folds: route fold_src →
+  //     fold_dst with default side handles (rare, only arises when
+  //     two non-overlapping folds share an edge crossing them).
   const rerouted = new Map<string, Edge>();
   for (const { node } of laidOut) {
     for (const parentId of node.parent_ids) {
       if (!(parentId in chatflow.nodes)) continue;
       const parent = chatflow.nodes[parentId];
       const isMerge = node.parent_ids.length >= 2;
-      const isPack = node.pack_snapshot != null;
+      const isPackChild = node.pack_snapshot != null;
       const isDashed =
         !parent.status || parent.status === "planned" || node.status === "planned";
-      const edgeColor = isPack
+      const edgeColor = isPackChild
         ? "#f43f5e" // rose-500
         : isMerge
           ? "#a855f7"
           : isDashed
             ? "#9ca3af"
             : "#374151";
-      const srcId = fold.hostByHidden.get(parentId) ?? parentId;
-      const dstId = fold.hostByHidden.get(node.id) ?? node.id;
-      if (srcId === dstId) continue; // internal or host-self collapse
+      const srcFold = fold.foldByHidden.get(parentId);
+      const dstFold = fold.foldByHidden.get(node.id);
+      const srcId = srcFold ?? parentId;
+      const dstId = dstFold ?? node.id;
+      if (srcId === dstId) continue; // internal edge
       const key = `${srcId}->${dstId}`;
       if (rerouted.has(key)) continue; // dedupe parallel rails
+
+      // Resolve handle names based on which endpoint got re-routed and
+      // the edge's semantic category (pack-below, boundary fork, or
+      // interior fork).
+      let sourceHandle: string | undefined;
+      let targetHandle: string | undefined;
+      if (srcFold && !dstFold) {
+        // Hidden → visible: emerging from a fold.
+        const lastMember = fold.lastMemberByFold.get(srcFold);
+        const hostOfSrcFold = fold.hostByFold.get(srcFold);
+        if (dstId === hostOfSrcFold) {
+          // Edge into this fold's own host: always the boundary /
+          // "right-forward" route, even if the host happens to be a
+          // pack (its target handle is its normal left-side one; the
+          // visual pack-below drop is achieved by the fold sitting
+          // upstream, not by re-routing into the pack's top handle).
+          sourceHandle = "fold-output-right";
+          targetHandle = undefined;
+        } else if (isPackChild) {
+          // Pack hanging off a hidden range member (NOT the host) —
+          // drop it below the fold so the existing pack-below visual
+          // convention is preserved.
+          sourceHandle = "fold-output-bottom";
+          targetHandle = "main-target-top";
+        } else if (parentId === lastMember) {
+          // Boundary fork from the last range member — sibling to the host.
+          sourceHandle = "fold-output-right";
+          targetHandle = undefined;
+        } else {
+          // Interior fork from an earlier member.
+          sourceHandle = "fold-output-top";
+          targetHandle = undefined;
+        }
+      } else if (!srcFold && dstFold) {
+        // Visible → hidden: entering a fold from upstream.
+        sourceHandle = undefined;
+        targetHandle = "fold-input";
+      } else if (srcFold && dstFold) {
+        // Hidden → hidden across two folds: no established handle
+        // convention. Default side handles are fine.
+        sourceHandle = undefined;
+        targetHandle = undefined;
+      } else {
+        // Verbatim edge: keep the existing pack-drop / default handles.
+        sourceHandle = isPackChild ? "main-source-bottom" : "main-source";
+        targetHandle = isPackChild ? "main-target-top" : "main-target";
+      }
+
       const isReroutedEdge = srcId !== parentId || dstId !== node.id;
-      const srcHiddenToVisible = srcId !== parentId;
       rerouted.set(key, {
         id: key,
         source: srcId,
         target: dstId,
-        // Keep the pack-drop handle only when both endpoints survived
-        // verbatim; a re-routed edge exiting a fold host leaves its
-        // default side handle to avoid landing on a handle the host
-        // card may not expose.
-        sourceHandle: isReroutedEdge || srcHiddenToVisible
-          ? undefined
-          : isPack
-            ? "main-source-bottom"
-            : "main-source",
-        targetHandle: isReroutedEdge
-          ? undefined
-          : isPack
-            ? "main-target-top"
-            : "main-target",
+        sourceHandle,
+        targetHandle,
         animated: node.status === "running" && !isReroutedEdge,
         markerEnd: {
-          // Arrowhead in stroke color so direction is readable at a
-          // glance on a DAG with forks, merges, and pack branches —
-          // without the arrow, merge inbound edges look indistinguishable
-          // from forking outbound edges.
           type: MarkerType.ArrowClosed,
           color: edgeColor,
           width: 16,
@@ -1272,11 +1410,9 @@ export function buildGraph(
     }
   }
 
-  // Synthetic chat-brief nodes stacked above each ChatNode that has a
-  // ``scope='chat'`` BoardItem. The brief text lives on the BoardItem,
-  // not on a ChatNode — so these are view-only, don't exist in
-  // ``chatflow.nodes``, aren't draggable, and aren't selectable.
-  // Skip briefs for hidden sources — their host already represents them.
+  // Synthetic chat-brief nodes stacked above each visible ChatNode
+  // that has a ``scope='chat'`` BoardItem. Skip briefs for hidden
+  // sources — their fold node already stands in for them.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const briefNodes: Node<any>[] = [];
   for (const id of Object.keys(chatflow.nodes)) {
@@ -1295,7 +1431,10 @@ export function buildGraph(
       draggable: false,
     });
   }
-  return { nodes: [...rfNodes, ...briefNodes], edges: [...rerouted.values()] };
+  return {
+    nodes: [...rfNodes, ...foldNodes, ...briefNodes],
+    edges: [...rerouted.values()],
+  };
 }
 
 // ---------------------------------------------------------------- Context menu
