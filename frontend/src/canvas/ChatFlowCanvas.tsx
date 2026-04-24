@@ -1082,9 +1082,11 @@ export const CHAT_FOLD_NODE_PREFIX = "_chat_fold_";
  * synthetic fold node id that represents it on the canvas. The fold
  * node is positioned upstream of its host (a pack / compact ChatNode);
  * the host itself stays visible and retains its own card.
- * ``lastMemberByHost`` lets edge re-route tell apart "fork from the
+ * ``lastMemberByFold`` lets edge re-route tell apart "fork from the
  * last range member" (attach to host via fold's right handle) from
- * "fork from an earlier member" (attach via fold's top handle). */
+ * "fork from an earlier member" (attach via fold's top handle).
+ * ``nestedInnerByOuter`` records strict-nested fold pairs so the
+ * rendering layer can style the crossing edge as a containment link. */
 export interface FoldProjection {
   hidden: Set<NodeId>;
   /** hidden ChatNode id → synthetic fold node id. */
@@ -1097,17 +1099,97 @@ export interface FoldProjection {
    * adjacent to the host in the original chain). Used to route
    * "boundary forks" to fold.right and "interior forks" to fold.top. */
   lastMemberByFold: Map<NodeId, NodeId>;
+  /** outer fold id → set of inner fold ids whose range sits as a
+   * convex prefix/suffix of the outer's walk. Each inner fold gets
+   * its own rfNode and claims its own range; the chain-continuation
+   * edge crossing the outer/inner boundary is the visual containment
+   * link and is styled distinctly (dashed + muted) in buildGraph. */
+  nestedInnersByOuter: Map<NodeId, Set<NodeId>>;
+}
+
+/** Return ``true`` iff the members of ``innerRange`` occupy a
+ * contiguous PREFIX or SUFFIX of ``outerWalk`` — i.e. the "outer
+ * minus inner" members are still contiguous on the walk. If inner
+ * lives in the middle of the walk, subtracting it leaves two disjoint
+ * outer segments, and split attribution would then project a
+ * directed cycle into the graph (chain edges cross outer↔inner twice
+ * with opposite directions). This function is the cycle-safety gate. */
+function innerOccupiesEndOfOuter(
+  outerWalk: NodeId[],
+  innerRange: Set<NodeId>,
+): boolean {
+  if (innerRange.size === 0) return true;
+  let firstInner = -1;
+  let lastInner = -1;
+  for (let i = 0; i < outerWalk.length; i++) {
+    if (innerRange.has(outerWalk[i])) {
+      if (firstInner === -1) firstInner = i;
+      lastInner = i;
+    }
+  }
+  if (firstInner === -1) return true; // inner not in walk (shouldn't happen if ⊆)
+  // Inner slots must be contiguous in the walk.
+  for (let i = firstInner; i <= lastInner; i++) {
+    if (!innerRange.has(outerWalk[i])) return false;
+  }
+  // And the contiguous inner block must touch an end (prefix or suffix).
+  return firstInner === 0 || lastInner === outerWalk.length - 1;
+}
+
+/** Returns the walk order this fold's range was computed from, in the
+ * same sequence (host.parent_ids[0] as walk[0], walking up). For pack
+ * this mirrors ``packed_range`` REVERSED so position 0 is nearest the
+ * host (matching compact's walk[0] = immediate parent). Used by
+ * ``innerOccupiesEndOfOuter`` so two fold walks can be compared on
+ * the same axis. */
+function foldWalkOrder(
+  chatflow: ChatFlow,
+  hostId: NodeId,
+  range: Set<NodeId>,
+): NodeId[] {
+  const host = chatflow.nodes[hostId];
+  if (!host) return [];
+  if (host.pack_snapshot) {
+    // packed_range is [oldest, …, newest-before-host]; walk[0] wants
+    // "nearest host" so reverse.
+    const reversed = [...host.pack_snapshot.packed_range].reverse();
+    return reversed.filter((nid) => range.has(nid));
+  }
+  // compact (or any other chain host): walk primary-parent up. Stop at
+  // merge boundaries (same rule as _build_chat_context).
+  const out: NodeId[] = [];
+  let current: NodeId | undefined = host.parent_ids[0];
+  while (current !== undefined) {
+    if (!range.has(current)) break;
+    out.push(current);
+    const anc: ChatFlowNode | undefined = chatflow.nodes[current];
+    if (!anc) break;
+    if (anc.parent_ids.length >= 2) break;
+    current = anc.parent_ids[0];
+  }
+  return out;
 }
 
 /** Compute the fold projection. Pack ranges are contiguous primary-
  * parent chains; compact ranges walk primary-parent up to (but not
  * across) a merge. A fold is only *effective* when the host itself is
  * visible — if packA is inside packB's range and both are folded,
- * packA drops out of attribution. Largest-range-wins attribution on
- * the remaining folds keeps each fold's hidden class a contiguous
- * sub-chain of the DAG, which is what prevents the projection from
- * introducing cycles (DAG quotient by non-convex classes CAN cycle;
- * convex-chain classes cannot). */
+ * packA drops out of attribution.
+ *
+ * Attribution strategy:
+ * - **Strict nested**: inner.range ⊆ outer.range, inner.host ∉
+ *   outer.range, and inner occupies a convex prefix/suffix of outer's
+ *   walk. Split attribution — outer claims outer.range \ inner.range,
+ *   inner claims its full range. Both folds emit rfNodes; the
+ *   outer→inner crossing edge visualises containment.
+ * - **Otherwise (partial overlap, non-convex inner-in-middle, or no
+ *   nesting)**: largest-range-wins greedy. Avoids cycles from DAG
+ *   quotient by non-convex classes (see
+ *   ``feedback_dag_projection_cycles.md``).
+ *
+ * Post-attribution: drop any fold whose effective claim came out
+ * empty (partial-overlap loser). Those would render as orphan fold
+ * cards with no in/out edges otherwise. */
 export function computeFoldProjection(
   chatflow: ChatFlow,
   foldedChatNodeIds: Set<NodeId>,
@@ -1127,61 +1209,144 @@ export function computeFoldProjection(
       while (current !== undefined) {
         const anc: ChatFlowNode | undefined = chatflow.nodes[current];
         if (!anc) break;
-        // Merge hard-stop mirrors _build_chat_context: don't fold past
-        // a merge boundary, since a merge's synthesised reply already
-        // carries both pre-merge branches.
         if (anc.parent_ids.length >= 2) break;
         ancestors.add(current);
         current = anc.parent_ids[0];
       }
       rangesByFold.set(foldId, ancestors);
     }
-    // Non-pack / non-compact fold targets are ignored (UI only exposes
-    // the action on valid hosts).
   }
 
-  // Pass 2: raw hidden union — used to flag folds that are themselves
-  // covered by a larger fold ("nested fold swallowed").
+  // Pass 2: raw hidden union — folds whose host is inside another
+  // fold's range become ineffective (the outer fold absorbs them).
   const rawHidden = new Set<NodeId>();
   for (const range of rangesByFold.values()) {
     for (const id of range) rawHidden.add(id);
   }
+  const effective = new Map<NodeId, Set<NodeId>>();
+  for (const [hostId, range] of rangesByFold) {
+    if (!rawHidden.has(hostId)) effective.set(hostId, range);
+  }
 
-  // Pass 3: attribution. Sort folds by (-size, id) so the largest
-  // range wins each hidden node — a range-internal node flows through
-  // the outermost visible fold, keeping the projected DAG acyclic.
-  const effectiveFolds = [...rangesByFold.entries()]
-    .filter(([foldId]) => !rawHidden.has(foldId))
-    .sort((a, b) => {
-      const sizeDiff = b[1].size - a[1].size;
-      if (sizeDiff !== 0) return sizeDiff;
-      return a[0].localeCompare(b[0]);
-    });
+  // Pass 3: detect strict-nested pairs (inner ⊆ outer, inner.host not
+  // in outer.range, inner's range occupies a convex prefix/suffix of
+  // outer's walk). For each inner, pick the SMALLEST outer containing
+  // it (most specific) — so chains of nesting attribute inside-out.
+  const innerToOuter = new Map<NodeId, NodeId>();
+  const effectiveEntries = [...effective.entries()];
+  for (const [innerHost, innerRange] of effectiveEntries) {
+    let chosenOuter: NodeId | null = null;
+    let chosenOuterSize = Infinity;
+    for (const [outerHost, outerRange] of effectiveEntries) {
+      if (outerHost === innerHost) continue;
+      if (innerRange.size >= outerRange.size) continue;
+      // innerRange ⊆ outerRange
+      let isSubset = true;
+      for (const n of innerRange) {
+        if (!outerRange.has(n)) {
+          isSubset = false;
+          break;
+        }
+      }
+      if (!isSubset) continue;
+      // Inner host must remain visible (i.e., not part of outer's range).
+      if (outerRange.has(innerHost)) continue;
+      // Inner must occupy a convex end of outer's walk (prefix or suffix).
+      const outerWalk = foldWalkOrder(chatflow, outerHost, outerRange);
+      if (!innerOccupiesEndOfOuter(outerWalk, innerRange)) continue;
+      // Prefer the smallest qualifying outer so nested chains work.
+      if (outerRange.size < chosenOuterSize) {
+        chosenOuter = outerHost;
+        chosenOuterSize = outerRange.size;
+      }
+    }
+    if (chosenOuter !== null) innerToOuter.set(innerHost, chosenOuter);
+  }
+  const outerToInners = new Map<NodeId, Set<NodeId>>();
+  for (const [inner, outer] of innerToOuter) {
+    if (!outerToInners.has(outer)) outerToInners.set(outer, new Set());
+    outerToInners.get(outer)!.add(inner);
+  }
 
-  // Pass 4: attribution. For each hidden node, remember which
-  // synthetic fold node it now sits under. Also record the ``last
-  // member`` per fold (the range member adjacent to the host in the
-  // original chain) so edge-re-route can tell apart "boundary fork"
-  // from "interior fork" later.
+  // Pass 4: compute each fold's effective claim.
+  //
+  // For outer folds that have inner folds: claim = range \ (∪ inner
+  // ranges). Because inner's members overlap subsequent larger outers
+  // only in exactly the "contained" region, this subtraction preserves
+  // convexity of outer's claim and recursion works naturally — deeper
+  // inners claim first, shallower outers claim the remainder.
+  //
+  // For orphan folds with no nesting: fall back to largest-first
+  // greedy on the remaining hidden nodes.
+  const claimByFold = new Map<NodeId, Set<NodeId>>();
+  // First: every fold with a nesting relationship gets its baseline
+  // claim computed (range minus its direct inners' ranges).
+  for (const [hostId, range] of effective) {
+    const directInners = outerToInners.get(hostId);
+    if (!directInners) {
+      claimByFold.set(hostId, new Set(range));
+      continue;
+    }
+    const claim = new Set(range);
+    for (const innerHost of directInners) {
+      const innerRange = effective.get(innerHost);
+      if (!innerRange) continue;
+      for (const n of innerRange) claim.delete(n);
+    }
+    claimByFold.set(hostId, claim);
+  }
+
+  // Second: resolve overlaps BETWEEN claims (e.g. two sibling folds
+  // that are both inside the same outer and partially overlap each
+  // other, or two non-nested folds with partial overlap). Use largest-
+  // first greedy on claim size to break ties deterministically.
   const foldByHidden = new Map<NodeId, NodeId>();
+  const sortedClaims = [...claimByFold.entries()].sort((a, b) => {
+    const diff = b[1].size - a[1].size;
+    if (diff !== 0) return diff;
+    return a[0].localeCompare(b[0]);
+  });
+  for (const [hostId, claim] of sortedClaims) {
+    const foldId = `${CHAT_FOLD_NODE_PREFIX}${hostId}`;
+    for (const id of claim) {
+      if (!foldByHidden.has(id)) foldByHidden.set(id, foldId);
+    }
+  }
+
+  // Pass 5: assemble output. Drop folds whose effective claim came out
+  // empty (nothing got attributed to them — would render as orphan).
   const hostByFold = new Map<NodeId, NodeId>();
   const countByFold = new Map<NodeId, number>();
   const lastMemberByFold = new Map<NodeId, NodeId>();
-  for (const [hostId, range] of effectiveFolds) {
+  const nestedInnersByOuter = new Map<NodeId, Set<NodeId>>();
+  const claimedByFold = new Map<NodeId, Set<NodeId>>();
+  for (const [hiddenId, foldId] of foldByHidden) {
+    if (!claimedByFold.has(foldId)) claimedByFold.set(foldId, new Set());
+    claimedByFold.get(foldId)!.add(hiddenId);
+  }
+  for (const [hostId] of effective) {
     const foldId = `${CHAT_FOLD_NODE_PREFIX}${hostId}`;
+    const claim = claimedByFold.get(foldId);
+    if (!claim || claim.size === 0) continue; // orphan — don't emit rfNode
     hostByFold.set(foldId, hostId);
-    countByFold.set(foldId, range.size);
-    for (const id of range) {
-      if (!foldByHidden.has(id)) foldByHidden.set(id, foldId);
-    }
-    // Last range member = host.parent_ids[0] by construction:
-    //   - pack: pack.parent = pack.packed_range[-1]
-    //   - compact: compact's primary-parent IS the last folded ancestor
+    countByFold.set(foldId, claim.size);
     const hostNode = chatflow.nodes[hostId];
     const lastMember = hostNode?.parent_ids[0];
-    if (lastMember && range.has(lastMember)) {
+    if (lastMember && claim.has(lastMember)) {
       lastMemberByFold.set(foldId, lastMember);
     }
+  }
+  // Translate outer→inner map from host ids to fold node ids. Only keep
+  // pairs where BOTH folds survived the empty-claim filter.
+  for (const [outerHost, inners] of outerToInners) {
+    const outerFoldId = `${CHAT_FOLD_NODE_PREFIX}${outerHost}`;
+    if (!hostByFold.has(outerFoldId)) continue;
+    const innerSet = new Set<NodeId>();
+    for (const innerHost of inners) {
+      const innerFoldId = `${CHAT_FOLD_NODE_PREFIX}${innerHost}`;
+      if (hostByFold.has(innerFoldId)) innerSet.add(innerFoldId);
+    }
+    if (innerSet.size > 0) nestedInnersByOuter.set(outerFoldId, innerSet);
   }
 
   const hidden = new Set(foldByHidden.keys());
@@ -1191,6 +1356,7 @@ export function computeFoldProjection(
     hostByFold,
     countByFold,
     lastMemberByFold,
+    nestedInnersByOuter,
   };
 }
 
@@ -1401,10 +1567,20 @@ export function buildGraph(
         sourceHandle = undefined;
         targetHandle = "fold-input";
       } else if (srcFold && dstFold) {
-        // Hidden → hidden across two folds: no established handle
-        // convention. Default side handles are fine.
-        sourceHandle = undefined;
-        targetHandle = undefined;
+        // Hidden → hidden across two folds. If these are a nested
+        // outer → inner pair detected by the projection, this edge IS
+        // the visual containment link: route into the inner fold's
+        // left (input) handle and style it distinctly below via
+        // ``isContainment``. Otherwise (rare) fall back to default
+        // side handles.
+        const nestedInners = fold.nestedInnersByOuter.get(srcFold);
+        if (nestedInners && nestedInners.has(dstFold)) {
+          sourceHandle = undefined;
+          targetHandle = "fold-input";
+        } else {
+          sourceHandle = undefined;
+          targetHandle = undefined;
+        }
       } else {
         // Verbatim edge: keep the existing pack-drop / default handles.
         sourceHandle = isPackChild ? "main-source-bottom" : "main-source";
@@ -1412,6 +1588,14 @@ export function buildGraph(
       }
 
       const isReroutedEdge = srcId !== parentId || dstId !== node.id;
+      // Containment edge = outer fold → inner fold of a nested pair.
+      // Style it muted + dashed so the user reads it as "entering a
+      // nested fold" rather than a regular chain continuation.
+      const isContainment =
+        srcFold !== undefined
+        && dstFold !== undefined
+        && (fold.nestedInnersByOuter.get(srcFold)?.has(dstFold) ?? false);
+      const effectiveColor = isContainment ? "#94a3b8" /* slate-400 */ : edgeColor;
       rerouted.set(key, {
         id: key,
         source: srcId,
@@ -1421,13 +1605,13 @@ export function buildGraph(
         animated: node.status === "running" && !isReroutedEdge,
         markerEnd: {
           type: MarkerType.ArrowClosed,
-          color: edgeColor,
+          color: effectiveColor,
           width: 16,
           height: 16,
         },
         style: {
-          stroke: edgeColor,
-          strokeDasharray: isDashed ? "6 4" : undefined,
+          stroke: effectiveColor,
+          strokeDasharray: isDashed || isContainment ? "6 4" : undefined,
           strokeWidth: isMerge ? 2.5 : 1.5,
         },
       });

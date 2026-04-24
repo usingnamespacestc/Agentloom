@@ -2163,6 +2163,59 @@ endpoint 之前对 chain 里的 pack ChatNode 无感：pack host 发 plain `ance
 - **`feedback_dag_projection_cycles.md`**：quotient projection of a DAG by non-convex classes can cycle。canvas fold 的 largest-range attribution 不是随便选的 —— 是 "range 为连续链 + greedy largest-first → 等价类保持连续子链 → 凸 → 投影无环" 的推理结果。未来做类似合并/折叠视图操作时回来看这条。
 - **`feedback_localstorage_ui_pattern.md`**：per-chatflow 持久化的命名约定 + 3-helper 模板 + reconcile 强制 + GC 习惯。下次加新持久化域（toolbar 展开、画布 zoom 之类）照同一套写。
 
+
+## 2026-04-25 上午 — 嵌套 fold：split attribution + containment edge
+
+用户看 `019db244-afbe-7fe1-aa41-e848f85e624a` 那个 CF（一个 pack 在 compact2 的 range 里、pack 自己不在 compact2.range 里的 fork 场景）时发现：同折 compact2 + pack 之后，largest-first attribution 把 pack.range 的 3 个 hidden 节点全归给 compact2，pack 的 fold "没吃到 hidden 节点就 emit 了个空壳"，视觉上两个 fold 看起来像**孤儿**，读不出结构关系。
+
+### 设计：strict-nested 检测 + split 归属
+
+新 gate：当 B.range ⊆ A.range、B.host ∉ A.range、且 B 在 A.walk 里占据**连续前缀或后缀**（即 outer-exclusive 仍是凸的）时，**拆分归属** —— A 只吃 outer-exclusive、B 吃自己的 range。两个 fold 都留下 rfNode；A→B 的 crossing edge 是视觉上的 containment 链。
+
+关键 cycle 安全性：只允许 inner 在 outer 的端点，**中间嵌套依旧走 largest-first 兜底**（比如 `packOuter.range=[a,b,c,d,e]` + `packInner=[c]`，split 会制造 outer→inner→outer 环；`innerOccupiesEndOfOuter` gate 检测到后 fall back）。推理等价于 `feedback_dag_projection_cycles.md` 的凸性保证。
+
+### Orphan fold 过滤
+
+顺带把 partial-overlap 下被 largest-first 吃空的小 fold 过滤掉：`claim.size === 0` 的 fold 不 emit rfNode，不再留悬空的 "folded N nodes" 空壳。
+
+### 代码改动
+
+- `computeFoldProjection`:
+  - 新 helper `innerOccupiesEndOfOuter(walk, innerRange)` —— 凸性 gate
+  - 新 helper `foldWalkOrder(chatflow, hostId, range)` —— pack 返 packed_range reverse，compact 返 primary-parent walk，统一轴向让两者可对比
+  - 双 pass attribution：第一遍每个 fold baseline claim = range \ 直接 inner ranges；第二遍 largest-first 消 tie 和 partial overlap
+  - 新输出 `nestedInnersByOuter: Map<foldId, Set<foldId>>`
+  - Pass 5 emit hostByFold 时过 empty-claim 滤
+
+- `buildGraph`:
+  - `srcFold && dstFold` 分支新增 nested 检测：如果是 outer→inner 对，目标 handle 走 `fold-input`
+  - containment edge 样式：`stroke = #94a3b8`（slate-400 muted）+ `strokeDasharray = "6 4"`（虚线）+ arrow color 跟着 stroke
+
+### 测试（3 新 case）
+
+- `strict nested fold: inner pack inside compact, both visible, split attribution + containment edge` —— 覆盖用户那个 CF 的核心 case：两 fold 都 emit、foldedCount 没重复计、containment edge 有正确 handle + 虚线 slate 样式
+- `inner in middle of outer walk falls back to largest-first (no split)` —— 凸性 gate 生效
+- `partial-overlap fold with zero claim is filtered (no orphan fold card)` —— orphan 过滤器生效
+
+81 frontend unit + tsc --noEmit 清。
+
+### 效果对比
+
+原来（用户报告的 bug）：
+```
+fold_compact2(9 个, claim 全部)    fold_pack(3 个, claim 0)  ← 悬空 orphan
+              ↓                                ?
+          compact2                            pack
+```
+
+现在：
+```
+fold_compact2(6 个) ═══▶(虚线 containment)═══▶ fold_pack(3 个) ──▶ compact2
+                                                            └──▶ pack
+```
+
+两个 fold 之间的嵌套关系靠虚线 slate 的 containment edge 一眼能读。
+
 ### 测试全量
 
 - backend: 354 unit + 4 integration = 358 + 新加 4 pack tests = 362，all green。移除 2 个 dead test 文件后 pytest collection 不再需要 `--ignore`

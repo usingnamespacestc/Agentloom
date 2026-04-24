@@ -513,6 +513,171 @@ describe("buildGraph fold projection", () => {
     expect(byKey.has(`${foldA}->packA`)).toBe(true);
   });
 
+  it("strict nested fold: inner pack inside compact, both visible, split attribution + containment edge", () => {
+    // Mirror of the user-reported CF topology:
+    //   root → early1 → early2 → compact (compact.range walks up,
+    //                                     includes root/early1/early2)
+    //   compact → W → X → Y (pack range = [W, X, Y], pack.parent = Y)
+    //   Y → compact2 (not folded in this test)
+    //   Y → pack (fork child via pack_snapshot)
+    // Fold compact2 + pack together. pack.range ⊆ compact2.range,
+    // pack.host not in compact2.range (it forks off Y), and pack's
+    // range is at the head of compact2's walk = convex.
+    const nodes = {
+      root: makeTurn("root", []),
+      early1: makeTurn("early1", ["root"]),
+      early2: makeTurn("early2", ["early1"]),
+      W: makeTurn("W", ["early2"]),
+      X: makeTurn("X", ["W"]),
+      Y: makeTurn("Y", ["X"]),
+      compact2: makeTurn("compact2", ["Y"], {
+        compact_snapshot: {
+          summary: "c2",
+          preserved_messages: [],
+          preserved_before_summary: false,
+        },
+      }),
+      pack: makeTurn("pack", ["Y"], {
+        pack_snapshot: {
+          summary: "pk",
+          packed_range: ["W", "X", "Y"],
+          use_detailed_index: false,
+          preserve_last_n: 0,
+          preserved_messages: [],
+        },
+      }),
+    };
+    const cf = baseChatFlow(nodes);
+    const folded = new Set<string>(["compact2", "pack"]);
+    const { nodes: rn, edges } = buildGraph(cf, null, {}, {}, folded);
+
+    // BOTH fold rfNodes should appear.
+    const foldIds = rn
+      .filter((n) => n.type === "chatFold")
+      .map((n) => n.id)
+      .sort();
+    expect(foldIds).toEqual(
+      [`${CHAT_FOLD_NODE_PREFIX}compact2`, `${CHAT_FOLD_NODE_PREFIX}pack`].sort(),
+    );
+
+    const compactFold = `${CHAT_FOLD_NODE_PREFIX}compact2`;
+    const packFold = `${CHAT_FOLD_NODE_PREFIX}pack`;
+    // Outer fold absorbs only outer-exclusive (root/early1/early2 = 3);
+    // inner fold absorbs pack's own range (W/X/Y = 3). No double count.
+    expect(rn.find((n) => n.id === compactFold)?.data.foldedCount).toBe(3);
+    expect(rn.find((n) => n.id === packFold)?.data.foldedCount).toBe(3);
+
+    const byKey = new Map(edges.map((e) => [`${e.source}->${e.target}`, e]));
+    // Chain continuation crosses outer→inner via the inner fold's
+    // input handle — this is the containment link.
+    const containment = byKey.get(`${compactFold}->${packFold}`);
+    expect(containment).toBeDefined();
+    expect(containment?.targetHandle).toBe("fold-input");
+    // Containment edge is dashed + slate-400 (muted) to visually
+    // signal "entering a nested fold".
+    expect(containment?.style?.strokeDasharray).toBe("6 4");
+    expect(containment?.style?.stroke).toBe("#94a3b8");
+    // Inner fold → compact2 (outer host) via right handle.
+    expect(byKey.get(`${packFold}->compact2`)?.sourceHandle).toBe(
+      "fold-output-right",
+    );
+    // Inner fold → pack (inner host) also via right handle.
+    expect(byKey.get(`${packFold}->pack`)?.sourceHandle).toBe(
+      "fold-output-right",
+    );
+  });
+
+  it("inner in middle of outer walk falls back to largest-first (no split)", () => {
+    // packOuter.range covers [a, b, c, d, e] (all on primary chain);
+    // packInner.range = [c] is a single node in the MIDDLE of the walk.
+    // Outer-exclusive = {a, b, d, e} is non-convex (c separates them),
+    // so split would create a directed cycle. Attribution must stay
+    // largest-first — inner's claim gets empty-filtered out.
+    const nodes = {
+      root: makeTurn("root", []),
+      a: makeTurn("a", ["root"]),
+      b: makeTurn("b", ["a"]),
+      c: makeTurn("c", ["b"]),
+      d: makeTurn("d", ["c"]),
+      e: makeTurn("e", ["d"]),
+      packInner: makeTurn("packInner", ["c"], {
+        pack_snapshot: {
+          summary: "inner",
+          packed_range: ["c"],
+          use_detailed_index: false,
+          preserve_last_n: 0,
+          preserved_messages: [],
+        },
+      }),
+      packOuter: makeTurn("packOuter", ["e"], {
+        pack_snapshot: {
+          summary: "outer",
+          packed_range: ["a", "b", "c", "d", "e"],
+          use_detailed_index: false,
+          preserve_last_n: 0,
+          preserved_messages: [],
+        },
+      }),
+    };
+    const cf = baseChatFlow(nodes);
+    const folded = new Set<string>(["packOuter", "packInner"]);
+    const { nodes: rn } = buildGraph(cf, null, {}, {}, folded);
+
+    // Only the outer fold rfNode survives — packInner's claim is
+    // absorbed by the outer, leaving it empty, so the orphan filter
+    // drops it.
+    const foldIds = rn
+      .filter((n) => n.type === "chatFold")
+      .map((n) => n.id);
+    expect(foldIds).toEqual([`${CHAT_FOLD_NODE_PREFIX}packOuter`]);
+  });
+
+  it("partial-overlap fold with zero claim is filtered (no orphan fold card)", () => {
+    // Two packs with overlapping but non-nested ranges. The smaller
+    // one's range is fully contained in the larger one; largest-first
+    // attribution leaves the smaller with zero claimed hidden nodes,
+    // and the orphan filter drops its rfNode so it never renders
+    // disconnected.
+    const nodes = {
+      root: makeTurn("root", []),
+      a: makeTurn("a", ["root"]),
+      b: makeTurn("b", ["a"]),
+      c: makeTurn("c", ["b"]),
+      // Large outer pack covers a,b,c as a suffix of its walk but also
+      // extends somewhere else — we construct with only the chain
+      // here, so outer fully covers inner. Inner is positioned in the
+      // MIDDLE of outer's range to prevent split-attribution from
+      // firing (this is the "orphan defense", not the nesting path).
+      packOuter: makeTurn("packOuter", ["c"], {
+        pack_snapshot: {
+          summary: "outer",
+          packed_range: ["a", "b", "c"],
+          use_detailed_index: false,
+          preserve_last_n: 0,
+          preserved_messages: [],
+        },
+      }),
+      packMid: makeTurn("packMid", ["b"], {
+        pack_snapshot: {
+          summary: "mid",
+          packed_range: ["b"],
+          use_detailed_index: false,
+          preserve_last_n: 0,
+          preserved_messages: [],
+        },
+      }),
+    };
+    const cf = baseChatFlow(nodes);
+    const folded = new Set<string>(["packOuter", "packMid"]);
+    const { nodes: rn } = buildGraph(cf, null, {}, {}, folded);
+    // Only outer fold survives (inner is mid-of-walk → no split → inner
+    // empty claim → filtered).
+    const foldIds = rn
+      .filter((n) => n.type === "chatFold")
+      .map((n) => n.id);
+    expect(foldIds).toEqual([`${CHAT_FOLD_NODE_PREFIX}packOuter`]);
+  });
+
   it("brief nodes skip hidden sources but stay for visible ones", () => {
     const nodes = {
       root: makeTurn("root", []),
