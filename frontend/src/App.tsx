@@ -17,7 +17,11 @@ import { WorkFlowCanvas } from "@/canvas/WorkFlowCanvas";
 import { ChatFlowHeader } from "@/components/ChatFlowHeader";
 import { Sidebar } from "@/components/Sidebar";
 import { api } from "@/lib/api";
-import { resolveDrilledWorkflow, useChatFlowStore } from "@/store/chatflowStore";
+import {
+  loadLastChatflowId,
+  resolveDrilledWorkflow,
+  useChatFlowStore,
+} from "@/store/chatflowStore";
 
 export default function App() {
   const chatflow = useChatFlowStore((s) => s.chatflow);
@@ -29,10 +33,15 @@ export default function App() {
   const setSSEFactory = useChatFlowStore((s) => s.setSSEFactory);
   const { t, i18n } = useTranslation();
 
+  // Resolve the boot chatflow: explicit ``?chatflow=`` query wins;
+  // otherwise fall back to the last opened chatflow persisted in
+  // localStorage so a plain refresh lands users back where they were.
   const initialChatflowId = useMemo(() => {
     if (typeof window === "undefined") return null;
     const params = new URLSearchParams(window.location.search);
-    return params.get("chatflow");
+    const fromUrl = params.get("chatflow");
+    if (fromUrl) return fromUrl;
+    return loadLastChatflowId();
   }, []);
 
   useEffect(() => {

@@ -126,6 +126,142 @@ function clearPersistedFoldState(chatflowId: string): void {
   }
 }
 
+// ---- View state persistence (last opened chatflow + per-cf view) ---
+//
+// Two independent slices:
+//   1. The id of the last-opened chatflow — used at boot to restore
+//      where the user was, if the URL didn't specify.
+//   2. Per-chatflow view state — selectedNodeId, drillStack (so
+//      users land back inside a sub-workflow), viewMode, and
+//      workflow-level selection. Keyed by chatflow id so each
+//      chatflow has its own "where I last was" memory.
+//
+// Separate from fold state because fold survives re-folding even if
+// the user navigates away and back, but view-state follows "where
+// were you when you last refreshed on THIS chatflow."
+
+const LAST_CHATFLOW_STORAGE_KEY = "agentloom:ui:last_chatflow";
+const VIEW_STATE_KEY_PREFIX = "agentloom:ui:view:";
+
+function viewStateKey(chatflowId: string): string {
+  return `${VIEW_STATE_KEY_PREFIX}${chatflowId}`;
+}
+
+export function loadLastChatflowId(): string | null {
+  try {
+    return localStorage.getItem(LAST_CHATFLOW_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function saveLastChatflowId(id: string | null): void {
+  try {
+    if (id) localStorage.setItem(LAST_CHATFLOW_STORAGE_KEY, id);
+    else localStorage.removeItem(LAST_CHATFLOW_STORAGE_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+export interface PersistedViewState {
+  selectedNodeId: NodeId | null;
+  viewMode: ViewMode;
+  drillStack: DrillFrame[];
+  drillDownChatNodeId: NodeId | null;
+  workflowSelectedNodeId: NodeId | null;
+}
+
+function loadPersistedViewState(chatflowId: string): PersistedViewState | null {
+  try {
+    const raw = localStorage.getItem(viewStateKey(chatflowId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PersistedViewState>;
+    return {
+      selectedNodeId: parsed.selectedNodeId ?? null,
+      viewMode: parsed.viewMode === "workflow" ? "workflow" : "chatflow",
+      drillStack: Array.isArray(parsed.drillStack) ? parsed.drillStack : [],
+      drillDownChatNodeId: parsed.drillDownChatNodeId ?? null,
+      workflowSelectedNodeId: parsed.workflowSelectedNodeId ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function savePersistedViewState(
+  chatflowId: string,
+  state: PersistedViewState,
+): void {
+  try {
+    localStorage.setItem(viewStateKey(chatflowId), JSON.stringify(state));
+  } catch {
+    // ignore
+  }
+}
+
+function clearPersistedViewState(chatflowId: string): void {
+  try {
+    localStorage.removeItem(viewStateKey(chatflowId));
+  } catch {
+    // ignore
+  }
+}
+
+/** Validate a persisted view state against the current chatflow —
+ * drops any node ids that don't exist and prunes stale drill frames.
+ * Returns the cleaned state (which may have empty drillStack etc.). */
+function reconcileViewState(
+  chatflow: ChatFlow,
+  state: PersistedViewState,
+): PersistedViewState {
+  const validSelected =
+    state.selectedNodeId && chatflow.nodes[state.selectedNodeId]
+      ? state.selectedNodeId
+      : null;
+  // Drill stack is valid only if every frame's referenced id still
+  // resolves. First frame must be a chatnode that exists; subsequent
+  // subworkflow frames' parent WorkNodes must exist inside the
+  // previous frame's workflow. If any frame fails, truncate to the
+  // last-valid prefix (so the user lands somewhere coherent, not
+  // stranded deep in a stale drill).
+  type WorkNodeBag = {
+    [id: string]: { sub_workflow?: { nodes?: WorkNodeBag } | null };
+  };
+  const cleanStack: DrillFrame[] = [];
+  let currentWorkflowNodes: WorkNodeBag | null = null;
+  for (const frame of state.drillStack) {
+    if (frame.kind === "chatnode") {
+      const cn = chatflow.nodes[frame.chatNodeId];
+      if (!cn) break;
+      cleanStack.push(frame);
+      currentWorkflowNodes = cn.workflow.nodes as unknown as WorkNodeBag;
+    } else {
+      if (!currentWorkflowNodes) break;
+      const wn: WorkNodeBag[string] | undefined =
+        currentWorkflowNodes[frame.parentWorkNodeId];
+      if (!wn) break;
+      cleanStack.push(frame);
+      currentWorkflowNodes = wn.sub_workflow?.nodes ?? null;
+    }
+  }
+  const drillDownId =
+    state.drillDownChatNodeId && chatflow.nodes[state.drillDownChatNodeId]
+      ? state.drillDownChatNodeId
+      : null;
+  const workflowSelected =
+    cleanStack.length > 0 && state.workflowSelectedNodeId
+      ? state.workflowSelectedNodeId
+      : null;
+  return {
+    selectedNodeId: validSelected,
+    viewMode: cleanStack.length > 0 ? state.viewMode : "chatflow",
+    drillStack: cleanStack,
+    drillDownChatNodeId: drillDownId,
+    workflowSelectedNodeId: workflowSelected,
+  };
+}
+
 export interface ChatFlowStoreState {
   /** Sidebar: list of chatflow summaries. */
   chatflowList: ChatFlowSummary[];
@@ -654,12 +790,16 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
 
   async deleteChatFlow(id) {
     await api.deleteChatFlow(id);
-    // Garbage-collect the deleted chatflow's fold entry so the
-    // localStorage ledger doesn't accumulate dead keys over time.
+    // Garbage-collect the deleted chatflow's persisted UI entries so
+    // localStorage doesn't accumulate dead keys over time.
     clearPersistedFoldState(id);
+    clearPersistedViewState(id);
     const current = get().chatflow;
     if (current?.id === id) {
+      saveLastChatflowId(null);
       get().reset();
+    } else if (loadLastChatflowId() === id) {
+      saveLastChatflowId(null);
     }
     await get().fetchChatFlowList();
   },
@@ -818,12 +958,28 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
       for (const [hostId, pos] of Object.entries(persisted.positions)) {
         if (hostId in chat.nodes) validFoldPositions[hostId] = pos;
       }
+      // Hydrate view state (selection / drill / viewMode) against the
+      // live chatflow. Invalid refs get stripped; if nothing survives
+      // we fall back to auto-leaf selection below.
+      const persistedView = loadPersistedViewState(id);
+      const reconciled = persistedView
+        ? reconcileViewState(chat, persistedView)
+        : null;
       set({
         chatflow: chat,
         loadState: "ready",
         boardItems: {},
         foldedChatNodeIds: validFoldIds,
         foldPositions: validFoldPositions,
+        ...(reconciled
+          ? {
+              selectedNodeId: reconciled.selectedNodeId,
+              viewMode: reconciled.viewMode,
+              drillStack: reconciled.drillStack,
+              drillDownChatNodeId: reconciled.drillDownChatNodeId,
+              workflowSelectedNodeId: reconciled.workflowSelectedNodeId,
+            }
+          : {}),
       });
       // If anything was filtered out, compress the persisted blob.
       if (
@@ -832,8 +988,13 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
       ) {
         savePersistedFoldState(id, validFoldIds, validFoldPositions);
       }
-      const leaf = autoLeafForChatFlow(chat);
-      if (leaf) get().selectNode(leaf);
+      // Only auto-select the leaf when no view state was restored —
+      // otherwise the user's last position wins.
+      if (!reconciled || reconciled.selectedNodeId === null) {
+        const leaf = autoLeafForChatFlow(chat);
+        if (leaf) get().selectNode(leaf);
+      }
+      saveLastChatflowId(id);
       // Fetch the MemoryBoard cache in the background — canvas bubbles
       // appear as soon as the response returns, but we don't block the
       // main load on it.
@@ -872,33 +1033,39 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
   },
 
   setChatFlow(chat) {
-    // Hydrate persisted fold state when a real chatflow is provided;
-    // a null reset still zeroes everything.
+    // Hydrate persisted fold + view state when a real chatflow is
+    // provided; a null reset zeroes everything.
     let foldedIds = new Set<NodeId>();
     let foldPositions: Record<NodeId, { x: number; y: number }> = {};
+    let reconciled: PersistedViewState | null = null;
     if (chat) {
       const persisted = loadPersistedFoldState(chat.id);
       foldedIds = new Set(persisted.ids.filter((nid) => nid in chat.nodes));
       for (const [hostId, pos] of Object.entries(persisted.positions)) {
         if (hostId in chat.nodes) foldPositions[hostId] = pos;
       }
+      const persistedView = loadPersistedViewState(chat.id);
+      reconciled = persistedView ? reconcileViewState(chat, persistedView) : null;
     }
     set({
       chatflow: chat,
       loadState: chat ? "ready" : "idle",
       errorMessage: null,
-      selectedNodeId: null,
+      selectedNodeId: reconciled?.selectedNodeId ?? null,
       branchMemory: {},
-      drillStack: [],
-      viewMode: "chatflow",
-      drillDownChatNodeId: null,
-      workflowSelectedNodeId: null,
+      drillStack: reconciled?.drillStack ?? [],
+      viewMode: reconciled?.viewMode ?? "chatflow",
+      drillDownChatNodeId: reconciled?.drillDownChatNodeId ?? null,
+      workflowSelectedNodeId: reconciled?.workflowSelectedNodeId ?? null,
       workflowBranchMemory: {},
       foldedChatNodeIds: foldedIds,
       foldPositions,
     });
-    const leaf = autoLeafForChatFlow(chat);
-    if (leaf) get().selectNode(leaf);
+    if (chat) saveLastChatflowId(chat.id);
+    if (!reconciled || reconciled.selectedNodeId === null) {
+      const leaf = autoLeafForChatFlow(chat);
+      if (leaf) get().selectNode(leaf);
+    }
   },
 
   selectNode(nodeId) {
@@ -1491,6 +1658,35 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     set({ ...INITIAL });
   },
 }));
+
+// View-state persistence subscription. Any time a field that matters
+// for "where was the user last" changes on a loaded chatflow, write
+// the slice to localStorage. Skipped when no chatflow is attached
+// (a null → non-null transition is handled separately in
+// loadChatFlow / setChatFlow, which DO the hydration, so the immediate
+// write here is idempotent). SSR-safe: subscribe only fires in the
+// browser.
+if (typeof window !== "undefined") {
+  let lastSignature = "";
+  useChatFlowStore.subscribe((state) => {
+    const cfId = state.chatflow?.id;
+    if (!cfId) {
+      lastSignature = "";
+      return;
+    }
+    const slice: PersistedViewState = {
+      selectedNodeId: state.selectedNodeId,
+      viewMode: state.viewMode,
+      drillStack: state.drillStack,
+      drillDownChatNodeId: state.drillDownChatNodeId,
+      workflowSelectedNodeId: state.workflowSelectedNodeId,
+    };
+    const signature = `${cfId}::${JSON.stringify(slice)}`;
+    if (signature === lastSignature) return;
+    lastSignature = signature;
+    savePersistedViewState(cfId, slice);
+  });
+}
 
 function withStatus(node: ChatFlowNode, status: NodeStatus | null): ChatFlowNode {
   if (!status) return node;
