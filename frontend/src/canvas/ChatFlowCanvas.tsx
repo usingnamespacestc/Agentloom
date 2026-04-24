@@ -725,11 +725,15 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
             : pendingPackStartId === contextMenu.nodeId
               ? "first-pending-self"
               : "first-pending-other";
-        // Fold is offered on pack / compact hosts only — regular turn
-        // nodes have no well-defined range to collapse. The text flips
-        // based on whether THIS host is currently folded.
+        // Fold is offered on pack / compact / merge hosts — regular
+        // turn nodes have no well-defined range to collapse. Merge's
+        // range is the union of both branch primary-parent walks up
+        // to their LCA. The text flips based on whether THIS host is
+        // currently folded.
         const isFoldableHost =
-          node.pack_snapshot != null || node.compact_snapshot != null;
+          node.pack_snapshot != null
+          || node.compact_snapshot != null
+          || node.parent_ids.length >= 2;
         const foldState: "none" | "fold" | "unfold" = !isFoldableHost
           ? "none"
           : foldedChatNodeIds.has(contextMenu.nodeId)
@@ -1095,10 +1099,12 @@ export interface FoldProjection {
   hostByFold: Map<NodeId, NodeId>;
   /** synthetic fold node id → how many ChatNodes it currently hides. */
   countByFold: Map<NodeId, number>;
-  /** synthetic fold node id → the last range member (the one that's
-   * adjacent to the host in the original chain). Used to route
-   * "boundary forks" to fold.right and "interior forks" to fold.top. */
-  lastMemberByFold: Map<NodeId, NodeId>;
+  /** synthetic fold node id → the set of last range members adjacent
+   * to the host in the original graph. Usually a singleton (pack /
+   * compact's primary parent), but merge hosts have TWO last members
+   * (both parent branches). Used to route "boundary forks" to
+   * fold.right and "interior forks" to fold.top. */
+  lastMemberByFold: Map<NodeId, Set<NodeId>>;
   /** outer fold id → set of inner fold ids whose range sits as a
    * convex prefix/suffix of the outer's walk. Each inner fold gets
    * its own rfNode and claims its own range; the chain-continuation
@@ -1141,7 +1147,8 @@ function innerOccupiesEndOfOuter(
  * this mirrors ``packed_range`` REVERSED so position 0 is nearest the
  * host (matching compact's walk[0] = immediate parent). Used by
  * ``innerOccupiesEndOfOuter`` so two fold walks can be compared on
- * the same axis. */
+ * the same axis. Returns ``[]`` for multi-branch hosts (merge) — the
+ * caller should treat an empty walk as "ineligible for nested split". */
 function foldWalkOrder(
   chatflow: ChatFlow,
   hostId: NodeId,
@@ -1149,6 +1156,11 @@ function foldWalkOrder(
 ): NodeId[] {
   const host = chatflow.nodes[hostId];
   if (!host) return [];
+  if (host.parent_ids.length >= 2) {
+    // Merge host: walk is multi-branch, single-chain contiguity isn't
+    // well-defined. Return empty so the nested-split gate never fires.
+    return [];
+  }
   if (host.pack_snapshot) {
     // packed_range is [oldest, …, newest-before-host]; walk[0] wants
     // "nearest host" so reverse.
@@ -1168,6 +1180,31 @@ function foldWalkOrder(
     current = anc.parent_ids[0];
   }
   return out;
+}
+
+/** Lowest-common-ancestor finder over the primary-parent chain. For a
+ * merge node whose ``parent_ids = [left, right]``, the LCA is the
+ * deepest node on both primary-parent chains — equivalently, the first
+ * shared ancestor encountered walking up from one side. Used to bound
+ * a merge fold's range (hide everything from both parents up to but
+ * excluding the LCA, same stop rule as ``_build_chat_context``). */
+function findPrimaryLca(
+  chatflow: ChatFlow,
+  leftId: NodeId,
+  rightId: NodeId,
+): NodeId | null {
+  const leftChain = new Set<NodeId>();
+  let cur: NodeId | undefined = leftId;
+  while (cur !== undefined) {
+    leftChain.add(cur);
+    cur = chatflow.nodes[cur]?.parent_ids[0];
+  }
+  cur = rightId;
+  while (cur !== undefined) {
+    if (leftChain.has(cur)) return cur;
+    cur = chatflow.nodes[cur]?.parent_ids[0];
+  }
+  return null;
 }
 
 /** Compute the fold projection. Pack ranges are contiguous primary-
@@ -1196,6 +1233,7 @@ export function computeFoldProjection(
 ): FoldProjection {
   // Pass 1: raw range per fold.
   const rangesByFold = new Map<NodeId, Set<NodeId>>();
+  const mergeFolds = new Set<NodeId>();
   for (const foldId of foldedChatNodeIds) {
     const node = chatflow.nodes[foldId];
     if (!node) continue;
@@ -1214,6 +1252,32 @@ export function computeFoldProjection(
         current = anc.parent_ids[0];
       }
       rangesByFold.set(foldId, ancestors);
+      continue;
+    }
+    if (node.parent_ids.length >= 2) {
+      // Merge node: range = union of both branch primary-parent walks
+      // from each parent up to (exclusive of) their LCA. Mirrors
+      // ``_build_chat_context`` — merge's agent_response absorbs both
+      // pre-merge branches, so folding it hides that history. Merge
+      // folds deliberately skip the nested-split path (walk is multi-
+      // branch, single-chain contiguity gate doesn't translate); they
+      // always use largest-first attribution.
+      const [leftId, rightId] = node.parent_ids;
+      const lca = findPrimaryLca(chatflow, leftId, rightId);
+      const range = new Set<NodeId>();
+      for (const startId of [leftId, rightId]) {
+        let current: NodeId | undefined = startId;
+        while (current !== undefined && current !== lca) {
+          range.add(current);
+          const anc: ChatFlowNode | undefined = chatflow.nodes[current];
+          if (!anc) break;
+          // Follow primary parent; stop at LCA or at another merge /
+          // dead-end.
+          current = anc.parent_ids[0];
+        }
+      }
+      rangesByFold.set(foldId, range);
+      mergeFolds.add(foldId);
     }
   }
 
@@ -1317,7 +1381,7 @@ export function computeFoldProjection(
   // empty (nothing got attributed to them — would render as orphan).
   const hostByFold = new Map<NodeId, NodeId>();
   const countByFold = new Map<NodeId, number>();
-  const lastMemberByFold = new Map<NodeId, NodeId>();
+  const lastMemberByFold = new Map<NodeId, Set<NodeId>>();
   const nestedInnersByOuter = new Map<NodeId, Set<NodeId>>();
   const claimedByFold = new Map<NodeId, Set<NodeId>>();
   for (const [hiddenId, foldId] of foldByHidden) {
@@ -1331,10 +1395,13 @@ export function computeFoldProjection(
     hostByFold.set(foldId, hostId);
     countByFold.set(foldId, claim.size);
     const hostNode = chatflow.nodes[hostId];
-    const lastMember = hostNode?.parent_ids[0];
-    if (lastMember && claim.has(lastMember)) {
-      lastMemberByFold.set(foldId, lastMember);
+    // Last members = every parent of the host that survives in claim.
+    // Merge hosts have two; pack/compact have one.
+    const members = new Set<NodeId>();
+    for (const pid of hostNode?.parent_ids ?? []) {
+      if (claim.has(pid)) members.add(pid);
     }
+    if (members.size > 0) lastMemberByFold.set(foldId, members);
   }
   // Translate outer→inner map from host ids to fold node ids. Only keep
   // pairs where BOTH folds survived the empty-claim filter.
@@ -1371,7 +1438,102 @@ export function buildGraph(
 ): { nodes: Node<any>[]; edges: Edge[] } {
   if (!chatflow) return { nodes: [], edges: [] };
   const fold = computeFoldProjection(chatflow, foldedChatNodeIds);
-  const laidOut = layoutDag<ChatFlowNode>(chatflow.nodes, chatflow.root_ids);
+  // Build the layout input by replacing every hidden ChatNode with a
+  // synthetic fold phantom and rewriting parent_ids accordingly. This
+  // lets ``layoutDag`` reserve space for fold cards directly — no more
+  // "fold overlaps an upstream fork child" crowding when the manual
+  // ``host.x - FOLD_WIDTH - GAP`` nudge collided with a real neighbor.
+  const renderId = (id: NodeId): NodeId => fold.foldByHidden.get(id) ?? id;
+  const layoutInput: Record<NodeId, ChatFlowNode> = {};
+  const layoutRoots: NodeId[] = [];
+  for (const [id, node] of Object.entries(chatflow.nodes)) {
+    if (fold.hidden.has(id)) continue;
+    // Remap any hidden parent to its fold id; drop self-references and
+    // dedupe so merge nodes with both parents in the same fold don't
+    // end up with a double edge.
+    const remapped: NodeId[] = [];
+    const seen = new Set<NodeId>();
+    for (const p of node.parent_ids) {
+      const rendered = renderId(p);
+      if (rendered === id) continue;
+      if (seen.has(rendered)) continue;
+      seen.add(rendered);
+      remapped.push(rendered);
+    }
+    layoutInput[id] =
+      remapped.length === node.parent_ids.length
+        && remapped.every((p, i) => p === node.parent_ids[i])
+        ? node
+        : { ...node, parent_ids: remapped };
+    if (remapped.length === 0) layoutRoots.push(id);
+  }
+  // Synthesize fold phantoms. Each fold's parent_ids = external
+  // upstream nodes that fed into its range (mapped through renderId so
+  // a fold-of-fold chain is expressible). The phantom carries the
+  // layout-relevant fields of ``NodeBaseFields``; the real rfNode emit
+  // below pulls the ChatFoldNodeCard data from ``fold.hostByFold`` etc.
+  for (const [foldId, hostId] of fold.hostByFold) {
+    const host = chatflow.nodes[hostId];
+    if (!host) continue;
+    const claimedByThisFold = new Set<NodeId>();
+    for (const [hidden, owner] of fold.foldByHidden) {
+      if (owner === foldId) claimedByThisFold.add(hidden);
+    }
+    const externalParents = new Set<NodeId>();
+    for (const memberId of claimedByThisFold) {
+      const member = chatflow.nodes[memberId];
+      if (!member) continue;
+      for (const p of member.parent_ids) {
+        const rendered = renderId(p);
+        if (rendered === foldId) continue; // internal
+        if (claimedByThisFold.has(p)) continue;
+        externalParents.add(rendered);
+      }
+    }
+    // Inherit the earliest range member's creation timestamp so
+    // the stable sort keeps folds in a natural top-to-bottom order.
+    let earliestCreated = host.created_at;
+    for (const mid of claimedByThisFold) {
+      const m = chatflow.nodes[mid];
+      if (m && m.created_at < earliestCreated) earliestCreated = m.created_at;
+    }
+    const phantom: ChatFlowNode = {
+      id: foldId,
+      parent_ids: [...externalParents],
+      description: { text: "", provenance: "unset", updated_at: earliestCreated },
+      inputs: null,
+      expected_outcome: null,
+      status: "succeeded",
+      resolved_model: null,
+      locked: false,
+      error: null,
+      position_x: null,
+      position_y: null,
+      created_at: earliestCreated,
+      updated_at: earliestCreated,
+      started_at: null,
+      finished_at: null,
+      user_message: null,
+      agent_response: { text: "", provenance: "unset", updated_at: earliestCreated },
+      workflow: { id: `_fold_wf_${foldId}`, root_ids: [], nodes: {} },
+      pending_queue: [],
+      compact_snapshot: null,
+      pack_snapshot: null,
+      entry_prompt_tokens: null,
+      output_response_tokens: null,
+    };
+    layoutInput[foldId] = phantom;
+    if (externalParents.size === 0) layoutRoots.push(foldId);
+  }
+  // Preserve the original root order where still present; any new roots
+  // (fold phantoms with no external parents) trail afterward in the
+  // insertion order added above.
+  const preservedRoots = chatflow.root_ids.filter((id) => id in layoutInput);
+  const extraRoots = layoutRoots.filter((id) => !preservedRoots.includes(id));
+  const laidOut = layoutDag<ChatFlowNode>(
+    layoutInput,
+    [...preservedRoots, ...extraRoots],
+  );
   const undeletable = computeUndeletableIds(chatflow.nodes);
   const leaves = computeLeafIds(chatflow.nodes);
   const ctxTokens = computeContextTokens(chatflow.nodes);
@@ -1412,10 +1574,16 @@ export function buildGraph(
     });
   }
   const chatNodePositions = new Map<NodeId, { x: number; y: number }>();
+  const foldLayoutPositions = new Map<NodeId, { x: number; y: number }>();
   const rfNodes: Node<ChatFlowNodeData>[] = [];
   for (const { node, position } of laidOut) {
-    // Hidden nodes disappear from the canvas — their content is
-    // represented by the synthetic fold node injected below.
+    // Fold phantoms share the NodeBaseFields shape for layoutDag's
+    // sake but aren't real ChatNodes — record their layout-computed
+    // position and let the dedicated fold-emit loop below wrap them.
+    if (fold.hostByFold.has(node.id)) {
+      foldLayoutPositions.set(node.id, position);
+      continue;
+    }
     if (fold.hidden.has(node.id)) continue;
     const pos =
       node.position_x != null && node.position_y != null
@@ -1445,30 +1613,33 @@ export function buildGraph(
     });
   }
 
-  // Synthetic fold nodes — one per active fold. Each sits upstream of
-  // its host (compact/pack), occupying the slot the first hidden
-  // ancestor used to take. Host itself stays visible; fold absorbs
-  // the range on both canvas and edge routing.
+  // Synthetic fold rfNodes — wrap the layout-assigned position we
+  // captured above. Persisted user-drag (from the store's
+  // ``foldPositions``) still wins when present. Fold phantoms are
+  // already in ``layoutDag``'s topological pass, so dagre reserves
+  // their column naturally (no more "fold overlaps upstream fork
+  // sibling" crowding).
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const foldNodes: Node<any>[] = [];
-  const FOLD_WIDTH = 160;
-  const FOLD_GAP = 40;
   for (const [foldId, hostId] of fold.hostByFold) {
-    const hostPos = chatNodePositions.get(hostId);
-    if (!hostPos) continue;
+    const layoutPos = foldLayoutPositions.get(foldId);
+    if (!layoutPos) continue;
     const host = chatflow.nodes[hostId];
-    const hostKind: "compact" | "pack" = host?.pack_snapshot
-      ? "pack"
-      : "compact";
-    // Position: persisted user-drag (from the store's foldPositions
-    // map, keyed by host id) wins; else default to directly left of
-    // the host card with a small gap. When the host is a pack (drops
-    // below its parent), we anchor at the host's y so the fold still
-    // reads as "upstream of pack".
-    const foldPos = foldPositions[hostId] ?? {
-      x: hostPos.x - FOLD_WIDTH - FOLD_GAP,
-      y: hostPos.y,
-    };
+    const hostKind: "compact" | "pack" | "merge" =
+      host?.pack_snapshot
+        ? "pack"
+        : host && host.parent_ids.length >= 2
+          ? "merge"
+          : "compact";
+    const foldPos = foldPositions[hostId] ?? layoutPos;
+    // Aggregate tokens across every ChatNode claimed by this fold so
+    // the card can show "how much conversation is hidden behind this."
+    let foldedTokens = 0;
+    for (const [hiddenId, attributedFold] of fold.foldByHidden) {
+      if (attributedFold !== foldId) continue;
+      const hiddenNode = chatflow.nodes[hiddenId];
+      if (hiddenNode) foldedTokens += nodeTokens(hiddenNode);
+    }
     foldNodes.push({
       id: foldId,
       type: "chatFold",
@@ -1477,11 +1648,12 @@ export function buildGraph(
         hostId,
         hostKind,
         foldedCount: fold.countByFold.get(foldId) ?? 0,
+        foldedTokens,
       } satisfies ChatFoldNodeData,
       // Selection stays off (right-click is the only interaction), but
-      // drag is allowed so users can reposition the fold to declutter
-      // crowded upstream layouts. Position is ephemeral — stored in
-      // ``dragPositions.current`` without hitting the backend.
+      // drag is allowed so users can reposition the fold manually when
+      // the layout output isn't ideal. Drag position persists per-
+      // chatflow via the store (see ``foldPositions``).
       selectable: false,
       draggable: true,
     });
@@ -1506,8 +1678,12 @@ export function buildGraph(
   //   - Both hidden but in different folds: route fold_src →
   //     fold_dst with default side handles (rare, only arises when
   //     two non-overlapping folds share an edge crossing them).
+  // Edge reroute runs over the ORIGINAL chatflow, not the layoutInput,
+  // so it sees every parent→child pair — including the chain edges
+  // that pass through hidden range members. Those hidden edges are
+  // what get folded into cross-fold / inner-fold routing below.
   const rerouted = new Map<string, Edge>();
-  for (const { node } of laidOut) {
+  for (const node of Object.values(chatflow.nodes)) {
     for (const parentId of node.parent_ids) {
       if (!(parentId in chatflow.nodes)) continue;
       const parent = chatflow.nodes[parentId];
@@ -1537,7 +1713,7 @@ export function buildGraph(
       let targetHandle: string | undefined;
       if (srcFold && !dstFold) {
         // Hidden → visible: emerging from a fold.
-        const lastMember = fold.lastMemberByFold.get(srcFold);
+        const lastMembers = fold.lastMemberByFold.get(srcFold);
         const hostOfSrcFold = fold.hostByFold.get(srcFold);
         if (dstId === hostOfSrcFold) {
           // Edge into this fold's own host: always the boundary /
@@ -1553,8 +1729,9 @@ export function buildGraph(
           // convention is preserved.
           sourceHandle = "fold-output-bottom";
           targetHandle = "main-target-top";
-        } else if (parentId === lastMember) {
-          // Boundary fork from the last range member — sibling to the host.
+        } else if (lastMembers && lastMembers.has(parentId)) {
+          // Boundary fork from one of the last range members (pack/
+          // compact have one; merge has two).
           sourceHandle = "fold-output-right";
           targetHandle = undefined;
         } else {

@@ -678,6 +678,84 @@ describe("buildGraph fold projection", () => {
     expect(foldIds).toEqual([`${CHAT_FOLD_NODE_PREFIX}packOuter`]);
   });
 
+  it("fold card foldedTokens aggregates entry_prompt + output_response across claimed range members", () => {
+    const nodes = {
+      root: makeTurn("root", []),
+      a: makeTurn("a", ["root"], {
+        entry_prompt_tokens: 1000,
+        output_response_tokens: 500,
+      }),
+      b: makeTurn("b", ["a"], {
+        entry_prompt_tokens: 1500,
+        output_response_tokens: 200,
+      }),
+      c: makeTurn("c", ["b"], {
+        entry_prompt_tokens: 1700,
+        output_response_tokens: 300,
+      }),
+      pack: makeTurn("pack", ["c"], {
+        pack_snapshot: {
+          summary: "summary",
+          packed_range: ["a", "b", "c"],
+          use_detailed_index: false,
+          preserve_last_n: 0,
+          preserved_messages: [],
+        },
+      }),
+    };
+    const cf = baseChatFlow(nodes);
+    const folded = new Set<string>(["pack"]);
+    const { nodes: rn } = buildGraph(cf, null, {}, {}, folded);
+    const foldNode = rn.find((n) => n.id === `${CHAT_FOLD_NODE_PREFIX}pack`);
+    // a: 1500, b: 1700, c: 2000 → total 5200.
+    expect(foldNode?.data.foldedTokens).toBe(5200);
+  });
+
+  it("merge fold: range = both branches up to LCA, hostKind='merge', both parents are boundary members", () => {
+    //        root
+    //         │
+    //         a (LCA)
+    //        ╱ ╲
+    //    left   right
+    //    │       │
+    //    lc      rc
+    //    ╲     ╱
+    //     merge (parent_ids = [lc, rc])
+    // Fold merge → hide {left, lc, right, rc}; root and a remain visible.
+    const nodes = {
+      root: makeTurn("root", []),
+      a: makeTurn("a", ["root"]),
+      left: makeTurn("left", ["a"]),
+      right: makeTurn("right", ["a"]),
+      lc: makeTurn("lc", ["left"]),
+      rc: makeTurn("rc", ["right"]),
+      merge: makeTurn("merge", ["lc", "rc"]),
+    };
+    const cf = baseChatFlow(nodes);
+    const folded = new Set<string>(["merge"]);
+    const { nodes: rn, edges } = buildGraph(cf, null, {}, {}, folded);
+
+    const chatIds = rn
+      .filter((n) => n.type === "chatflow")
+      .map((n) => n.id)
+      .sort();
+    // {left, lc, right, rc} all hidden; a (LCA) and root stay visible.
+    expect(chatIds).toEqual(["a", "merge", "root"].sort());
+
+    const foldId = `${CHAT_FOLD_NODE_PREFIX}merge`;
+    const foldNode = rn.find((n) => n.id === foldId);
+    expect(foldNode?.data.hostKind).toBe("merge");
+    expect(foldNode?.data.foldedCount).toBe(4); // left, lc, right, rc
+
+    const byKey = new Map(edges.map((e) => [`${e.source}->${e.target}`, e]));
+    // Entry: a → fold (input)
+    expect(byKey.get(`a->${foldId}`)?.targetHandle).toBe("fold-input");
+    // Both boundary members (lc and rc) → merge via fold-output-right
+    expect(byKey.get(`${foldId}->merge`)?.sourceHandle).toBe(
+      "fold-output-right",
+    );
+  });
+
   it("brief nodes skip hidden sources but stay for visible ones", () => {
     const nodes = {
       root: makeTurn("root", []),

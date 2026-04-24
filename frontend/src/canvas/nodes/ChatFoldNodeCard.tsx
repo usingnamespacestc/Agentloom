@@ -27,6 +27,8 @@
 import { type NodeProps, Handle, Position } from "@xyflow/react";
 import { useTranslation } from "react-i18next";
 
+import { formatTokensKM } from "@/lib/tokenFormat";
+
 export interface ChatFoldNodeData extends Record<string, unknown> {
   /** Host ChatNode id (compact / pack) whose fold state this card
    * represents — used to invoke ``unfoldChatNode`` from the card's
@@ -35,16 +37,23 @@ export interface ChatFoldNodeData extends Record<string, unknown> {
   /** Number of ChatNodes currently hidden by this fold. */
   foldedCount: number;
   /** Host kind for badge tinting. */
-  hostKind: "compact" | "pack";
+  hostKind: "compact" | "pack" | "merge";
+  /** Sum of ``nodeTokens`` (entry_prompt_tokens + output_response_tokens)
+   * across every ChatNode claimed by this fold. Gives users a quick
+   * read on "how much conversation is tucked away behind this card."
+   * 0 when the nodes predate the token-metering fields. */
+  foldedTokens: number;
 }
 
 export function ChatFoldNodeCard({ data }: NodeProps) {
   const { t } = useTranslation();
-  const { hostId, foldedCount, hostKind } = data as ChatFoldNodeData;
+  const { hostId, foldedCount, hostKind, foldedTokens } = data as ChatFoldNodeData;
   const tint =
     hostKind === "pack"
       ? "border-rose-300 bg-rose-50 text-rose-900"
-      : "border-teal-300 bg-teal-50 text-teal-900";
+      : hostKind === "merge"
+        ? "border-purple-300 bg-purple-50 text-purple-900"
+        : "border-teal-300 bg-teal-50 text-teal-900";
 
   return (
     <div
@@ -76,6 +85,17 @@ export function ChatFoldNodeCard({ data }: NodeProps) {
           {t("chatflow.fold_node_label", { count: foldedCount })}
         </span>
       </div>
+      {foldedTokens > 0 && (
+        <div
+          data-testid={`chat-fold-node-${hostId}-tokens`}
+          className="mt-1 text-[10px] opacity-70"
+          title={t("chatflow.fold_node_tokens_hint", { count: foldedTokens })}
+        >
+          {t("chatflow.fold_node_tokens_label", {
+            tokens: formatTokensKM(foldedTokens),
+          })}
+        </div>
+      )}
     </div>
   );
 }

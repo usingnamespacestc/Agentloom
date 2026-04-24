@@ -83,6 +83,8 @@
     "ctx_unfold_range": "展开此范围",
     "fold_node_label": "折叠了 {{count}} 个节点",
     "fold_node_hint": "该折叠代表 {{count}} 个被隐藏的节点。右键此节点或对应的 compact/pack 节点即可展开。",
+    "fold_node_tokens_label": "{{tokens}} tokens",
+    "fold_node_tokens_hint": "折叠区间所有节点的累计上下文 token 数（entry_prompt + output_response），约 {{count}} tokens",
     "merge_badge": "合并",
     "merge_badge_hint": "此 ChatNode 将两个分支合并为一个。下游轮次看到合并后的摘要；合并前的历史保持不变。",
     "awaiting_user": "需要你",
