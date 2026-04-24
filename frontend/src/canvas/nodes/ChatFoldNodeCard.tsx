@@ -28,6 +28,20 @@ import { type NodeProps, Handle, Position } from "@xyflow/react";
 import { useTranslation } from "react-i18next";
 
 import { formatTokensKM } from "@/lib/tokenFormat";
+import { useChatFlowStore } from "@/store/chatflowStore";
+
+export interface FoldPeekMember {
+  /** ChatNode id — clicking expands the fold AND selects this node. */
+  id: string;
+  /** First line of the ChatNode's user_message (falls back to
+   * agent_response for greeting / assistant-only turns). Truncated;
+   * the card styles it with ``truncate`` to fit the w-40 width. */
+  firstLine: string;
+  /** Source of the first line so the card can annotate role if it
+   * wants to. Today we just show the text, but this is useful
+   * metadata for future styling. */
+  role: "user" | "assistant";
+}
 
 export interface ChatFoldNodeData extends Record<string, unknown> {
   /** Host ChatNode id (compact / pack) whose fold state this card
@@ -43,11 +57,30 @@ export interface ChatFoldNodeData extends Record<string, unknown> {
    * read on "how much conversation is tucked away behind this card."
    * 0 when the nodes predate the token-metering fields. */
   foldedTokens: number;
+  /** First N ChatNodes in the fold ordered NEAREST-HOST-FIRST
+   * (temporally newest — the ones the user just folded, which they're
+   * most likely to want to peek at). Sliced to ``_PEEK_LIMIT`` so the
+   * card doesn't grow unbounded; any surplus shows as an "+ N more"
+   * footer driven by ``extraCount``. Click a row → unfoldChatNode +
+   * selectNode so users can drill in immediately. */
+  peekMembers: FoldPeekMember[];
+  /** Count of claimed members beyond ``peekMembers``. When > 0 the
+   * card renders a "+N more" teaser below the peek list. */
+  extraCount: number;
 }
 
 export function ChatFoldNodeCard({ data }: NodeProps) {
   const { t } = useTranslation();
-  const { hostId, foldedCount, hostKind, foldedTokens } = data as ChatFoldNodeData;
+  const {
+    hostId,
+    foldedCount,
+    hostKind,
+    foldedTokens,
+    peekMembers,
+    extraCount,
+  } = data as ChatFoldNodeData;
+  const unfoldChatNode = useChatFlowStore((s) => s.unfoldChatNode);
+  const selectNode = useChatFlowStore((s) => s.selectNode);
   const tint =
     hostKind === "pack"
       ? "border-rose-300 bg-rose-50 text-rose-900"
@@ -94,6 +127,48 @@ export function ChatFoldNodeCard({ data }: NodeProps) {
           {t("chatflow.fold_node_tokens_label", {
             tokens: formatTokensKM(foldedTokens),
           })}
+        </div>
+      )}
+      {peekMembers.length > 0 && (
+        <div
+          data-testid={`chat-fold-node-${hostId}-peek`}
+          className="mt-1.5 space-y-0.5 border-t border-current/10 pt-1.5"
+        >
+          {peekMembers.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              data-testid={`chat-fold-node-${hostId}-peek-${m.id}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                // Expand the fold AND jump to the member in one click —
+                // matches Claude Code's "Read with offset/limit" drill-in.
+                unfoldChatNode(hostId);
+                selectNode(m.id);
+              }}
+              title={m.firstLine}
+              className="flex w-full items-baseline gap-1 truncate rounded text-left text-[10px] leading-snug opacity-80 hover:bg-current/5 hover:opacity-100"
+            >
+              <span className="shrink-0 font-mono text-[9px] opacity-70">
+                {m.id.slice(0, 8)}
+              </span>
+              <span className="flex-1 truncate">
+                {m.firstLine || (
+                  <span className="italic opacity-50">
+                    {t("chatflow.fold_node_empty_turn")}
+                  </span>
+                )}
+              </span>
+            </button>
+          ))}
+          {extraCount > 0 && (
+            <div
+              data-testid={`chat-fold-node-${hostId}-more`}
+              className="text-[10px] italic opacity-60"
+            >
+              {t("chatflow.fold_node_more_count", { count: extraCount })}
+            </div>
+          )}
         </div>
       )}
     </div>

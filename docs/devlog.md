@@ -2341,6 +2341,59 @@ Backend 364 unit 绿（359 → 364，+5）。
 - Per-tool override（某些工具如 `Read` 的长内容本来就是核心输出，也许应该例外？暂时不需要，Read 的调用者本来就该用 offset/limit 分页）
 - 指标：记录本轮 turn 有多少 tool_result 触发 cap，暴露给 UI。暂时没做。
 
+
+## 2026-04-25 更晚 — Fold 卡片 mini-list (前 3 个被折节点)
+
+之前 fold 卡片只告诉"折叠了 N 个"和"X tokens"，**看不到折进去的是什么**。加一个 peek 列表，前 3 个被折节点的 id 前缀 + user_message 首行，点击 → 展开 + 选中对应节点。Claude Code 风格 —— preview 点击能 drill-in。
+
+### 顺序：nearest-host-first
+
+用户的心智是"刚折进去的先看到"—— 折叠时 host 正前方那个是最有代表性的（它就是 host 的 parent，离当前视角最近）。三种 host 实现略异：
+
+- **pack**：`packed_range` 是 oldest-first，反转后过滤到 claim 集合
+- **compact**：从 `host.parent_ids[0]` 走 primary-parent 向上，walk[0] 天然就是 nearest
+- **merge**：两条分支 BFS 交错（merge 的两个 parent 先出来，再一层一层往上），避免某一支视觉上独占
+
+新 helper `foldPeekOrder(chatflow, hostId, claim)` 统一接口，返回 nearest-first 的 id 列表。buildGraph 取前 3，剩下进 `extraCount`。
+
+### 首行策略
+
+新 helper `foldPeekFirstLine(node, maxChars)`：
+
+- 优先 `user_message`（问题，更有索引价值）
+- 回退 `agent_response`（greeting 根 / 合并节点这种没 user 消息的）
+- 多行的只取第一行，> 40 chars 的截尾加省略号
+
+返回 `{ firstLine, role: "user" | "assistant" }`，role 未来样式可用但目前不区分。
+
+### 卡片渲染
+
+- w-40 不变（~160 px 宽）
+- header "⊞ 折叠了 N 个节点" 不动
+- token 行不动（之前上的）
+- **新**：border-current/10 顶部分隔线 + 3 个 peek 行 + 可选 "+N more" 尾行
+- 每行：8-char id mono（font-mono text-[9px] 更紧）+ 首行 snippet（truncate）
+- 整个 peek 是 `<button>`：`onClick` 同时 `unfoldChatNode(hostId) + selectNode(memberId)`，一键展开+高亮。`stopPropagation` 防冒泡到卡片自身 onContextMenu
+
+卡片总高度大约从 50-60 px 涨到 110-130 px，fold 节点本来就稀疏，能承受。
+
+### i18n
+
+`fold_node_more_count`（"… 还有 N 个" / "… +N more"）+ `fold_node_empty_turn`（空 turn 的回退文案）。
+
+### 测试
+
+2 条新单测：
+- `pack fold card peekMembers are nearest-host-first, with extraCount covering the rest` —— 5 个被折，取 [e, d, c]，`extraCount = 2`，首行从 user_message 来
+- `fold peek falls back to agent_response for greeting / assistant-only turns` —— greeting 无 user_message，peek 取 agent_response
+
+frontend 85 unit（83 → 85，+2）、tsc 清。
+
+### 未做
+
+- peek 多语言 first-line 截断的边界 case（中文逗号、emoji 宽度等）—— 目前 char-count 截断简单粗暴，真踩到再调
+- peek 行悬停时预览更长的内容（tooltip 够用，没加 expand-on-hover）
+
 ### 测试全量
 
 - backend: 354 unit + 4 integration = 358 + 新加 4 pack tests = 362，all green。移除 2 个 dead test 文件后 pytest collection 不再需要 `--ignore`

@@ -63,7 +63,11 @@ import { ModelRibbonLayer } from "./ModelRibbonLayer";
 import { MODEL_KINDS, colorForModel, edgeModel } from "./effectiveModel";
 import { ChatFlowNodeCard, type ChatFlowNodeData } from "./nodes/ChatFlowNodeCard";
 import { ChatBriefNodeCard, type ChatBriefNodeData } from "./nodes/ChatBriefNodeCard";
-import { ChatFoldNodeCard, type ChatFoldNodeData } from "./nodes/ChatFoldNodeCard";
+import {
+  ChatFoldNodeCard,
+  type ChatFoldNodeData,
+  type FoldPeekMember,
+} from "./nodes/ChatFoldNodeCard";
 import { StickyNoteNode, type StickyNoteData } from "./nodes/StickyNoteNode";
 import { NODE_HEIGHT } from "./layout";
 import { api, type ProviderSummary } from "@/lib/api";
@@ -1182,6 +1186,92 @@ function foldWalkOrder(
   return out;
 }
 
+/** Peek-list ordering for a fold card: nearest-to-host first, so
+ * users see the newest (most-recently-folded) members at the top.
+ * Matches the "what did I just fold" intuition — the member right
+ * next to the host is row 1. Merge hosts interleave both branches
+ * so neither feels neglected. Filters to members actually in the
+ * claim set (so cross-fold absorbed inners don't leak through).*/
+function foldPeekOrder(
+  chatflow: ChatFlow,
+  hostId: NodeId,
+  claim: Set<NodeId>,
+): NodeId[] {
+  const host = chatflow.nodes[hostId];
+  if (!host) return [];
+  if (host.pack_snapshot) {
+    // packed_range is oldest-first; reverse for nearest-host-first.
+    return [...host.pack_snapshot.packed_range]
+      .reverse()
+      .filter((nid) => claim.has(nid));
+  }
+  if (host.compact_snapshot) {
+    // compact's walk is natively nearest-first.
+    const out: NodeId[] = [];
+    let current: NodeId | undefined = host.parent_ids[0];
+    while (current !== undefined) {
+      if (!claim.has(current)) break;
+      out.push(current);
+      const anc: ChatFlowNode | undefined = chatflow.nodes[current];
+      if (!anc) break;
+      if (anc.parent_ids.length >= 2) break;
+      current = anc.parent_ids[0];
+    }
+    return out;
+  }
+  if (host.parent_ids.length >= 2) {
+    // Merge host: BFS from both parents, interleaving the two
+    // branches so neither dominates the peek list. Primary-parent
+    // single-chain hops only; walks stop when we leave the claim
+    // set or hit a multi-parent frontier.
+    const out: NodeId[] = [];
+    const seen = new Set<NodeId>();
+    const queue: NodeId[] = [...host.parent_ids];
+    while (queue.length > 0) {
+      const nid = queue.shift();
+      if (!nid || seen.has(nid)) continue;
+      seen.add(nid);
+      if (!claim.has(nid)) continue;
+      out.push(nid);
+      const node = chatflow.nodes[nid];
+      if (node && node.parent_ids.length === 1) {
+        queue.push(node.parent_ids[0]);
+      }
+    }
+    return out;
+  }
+  return [];
+}
+
+/** First-line snippet picked from a ChatNode for its fold peek row.
+ * Prefers ``user_message`` (the question) over ``agent_response``
+ * (the reply) so the row reads like an index of conversation topics.
+ * Greeting roots and auto-merge nodes have no user_message; we fall
+ * back to the assistant text for them. Truncates to
+ * ``_PEEK_SNIPPET_CHARS`` chars to keep the w-40 card width. */
+function foldPeekFirstLine(
+  node: ChatFlowNode,
+  maxChars: number,
+): { firstLine: string; role: "user" | "assistant" } {
+  const userText = node.user_message?.text?.trim();
+  const agentText = node.agent_response?.text?.trim();
+  const pickUser = !!userText;
+  const raw = (pickUser ? userText : agentText) ?? "";
+  const firstLine = raw.split(/\r?\n/, 1)[0] ?? "";
+  const clipped =
+    firstLine.length > maxChars ? `${firstLine.slice(0, maxChars - 1)}…` : firstLine;
+  return { firstLine: clipped, role: pickUser ? "user" : "assistant" };
+}
+
+/** How many members to show in a fold card's mini-list before the
+ * "+N more" teaser. Three keeps card height manageable (~130 px)
+ * while still surfacing the just-folded neighbours. */
+const _FOLD_PEEK_LIMIT = 3;
+/** Per-row snippet truncation. w-40 leaves ~90 px for the snippet
+ * after the id prefix and separator; 40 chars is a reasonable
+ * mixed-width fit. */
+const _FOLD_PEEK_SNIPPET_CHARS = 40;
+
 /** Lowest-common-ancestor finder over the primary-parent chain. For a
  * merge node whose ``parent_ids = [left, right]``, the LCA is the
  * deepest node on both primary-parent chains — equivalently, the first
@@ -1632,14 +1722,28 @@ export function buildGraph(
           ? "merge"
           : "compact";
     const foldPos = foldPositions[hostId] ?? layoutPos;
-    // Aggregate tokens across every ChatNode claimed by this fold so
-    // the card can show "how much conversation is hidden behind this."
+    // Collect every ChatNode claimed by this fold. We need the set
+    // for aggregation (tokens, peek ordering) and we'd rather walk
+    // foldByHidden once than twice.
+    const claim = new Set<NodeId>();
     let foldedTokens = 0;
     for (const [hiddenId, attributedFold] of fold.foldByHidden) {
       if (attributedFold !== foldId) continue;
+      claim.add(hiddenId);
       const hiddenNode = chatflow.nodes[hiddenId];
       if (hiddenNode) foldedTokens += nodeTokens(hiddenNode);
     }
+    // Mini-list: nearest-host-first order, take first N, build peek rows
+    // with user_message / agent_response first-line snippets.
+    const ordered = foldPeekOrder(chatflow, hostId, claim);
+    const peekMembers: FoldPeekMember[] = [];
+    for (const nid of ordered.slice(0, _FOLD_PEEK_LIMIT)) {
+      const n = chatflow.nodes[nid];
+      if (!n) continue;
+      const snippet = foldPeekFirstLine(n, _FOLD_PEEK_SNIPPET_CHARS);
+      peekMembers.push({ id: nid, ...snippet });
+    }
+    const extraCount = Math.max(0, claim.size - peekMembers.length);
     foldNodes.push({
       id: foldId,
       type: "chatFold",
@@ -1649,6 +1753,8 @@ export function buildGraph(
         hostKind,
         foldedCount: fold.countByFold.get(foldId) ?? 0,
         foldedTokens,
+        peekMembers,
+        extraCount,
       } satisfies ChatFoldNodeData,
       // Selection stays off (right-click is the only interaction), but
       // drag is allowed so users can reposition the fold manually when

@@ -711,6 +711,114 @@ describe("buildGraph fold projection", () => {
     expect(foldNode?.data.foldedTokens).toBe(5200);
   });
 
+  it("pack fold card peekMembers are nearest-host-first, with extraCount covering the rest", () => {
+    // root → a → b → c → d → e → pack (range=[a,b,c,d,e])
+    // packed_range stores oldest-first, peekMembers must invert that
+    // so the user sees the ones RIGHT NEXT to pack first.
+    const nodes = {
+      root: makeTurn("root", []),
+      a: makeTurn("a", ["root"], {
+        user_message: {
+          text: "question about a",
+          provenance: "pure_user",
+          updated_at: "2026-04-25T00:00:00Z",
+        },
+      }),
+      b: makeTurn("b", ["a"], {
+        user_message: {
+          text: "follow-up about b",
+          provenance: "pure_user",
+          updated_at: "2026-04-25T00:00:01Z",
+        },
+      }),
+      c: makeTurn("c", ["b"], {
+        user_message: {
+          text: "deeper on c",
+          provenance: "pure_user",
+          updated_at: "2026-04-25T00:00:02Z",
+        },
+      }),
+      d: makeTurn("d", ["c"], {
+        user_message: {
+          text: "finally d",
+          provenance: "pure_user",
+          updated_at: "2026-04-25T00:00:03Z",
+        },
+      }),
+      e: makeTurn("e", ["d"], {
+        user_message: {
+          text: "right before pack",
+          provenance: "pure_user",
+          updated_at: "2026-04-25T00:00:04Z",
+        },
+      }),
+      pack: makeTurn("pack", ["e"], {
+        pack_snapshot: {
+          summary: "summary",
+          packed_range: ["a", "b", "c", "d", "e"],
+          use_detailed_index: false,
+          preserve_last_n: 0,
+          preserved_messages: [],
+        },
+      }),
+    };
+    const cf = baseChatFlow(nodes);
+    const folded = new Set<string>(["pack"]);
+    const { nodes: rn } = buildGraph(cf, null, {}, {}, folded);
+    const foldNode = rn.find((n) => n.id === `${CHAT_FOLD_NODE_PREFIX}pack`);
+    expect(foldNode).toBeDefined();
+    // Peek must be nearest-host-first: e (closest to pack), d, c. a and b trail.
+    expect(foldNode?.data.peekMembers.map((m: { id: string }) => m.id)).toEqual([
+      "e",
+      "d",
+      "c",
+    ]);
+    // Per-row firstLine = user_message's first line.
+    expect(foldNode?.data.peekMembers[0]).toMatchObject({
+      id: "e",
+      firstLine: "right before pack",
+      role: "user",
+    });
+    // 5 total claimed, 3 shown, 2 remain.
+    expect(foldNode?.data.extraCount).toBe(2);
+  });
+
+  it("fold peek falls back to agent_response for greeting / assistant-only turns", () => {
+    // Pack a single greeting root (no user_message) — peek should
+    // use agent_response text so the row isn't blank.
+    const nodes = {
+      greeting: makeTurn("greeting", [], {
+        user_message: null,
+        agent_response: {
+          text: "hello! I am the agent.",
+          provenance: "pure_agent",
+          updated_at: "2026-04-25T00:00:00Z",
+        },
+      }),
+      pack: makeTurn("pack", ["greeting"], {
+        pack_snapshot: {
+          summary: "s",
+          packed_range: ["greeting"],
+          use_detailed_index: false,
+          preserve_last_n: 0,
+          preserved_messages: [],
+        },
+      }),
+    };
+    const cf = baseChatFlow(nodes);
+    const folded = new Set<string>(["pack"]);
+    const { nodes: rn } = buildGraph(cf, null, {}, {}, folded);
+    const foldNode = rn.find((n) => n.id === `${CHAT_FOLD_NODE_PREFIX}pack`);
+    expect(foldNode?.data.peekMembers).toEqual([
+      {
+        id: "greeting",
+        firstLine: "hello! I am the agent.",
+        role: "assistant",
+      },
+    ]);
+    expect(foldNode?.data.extraCount).toBe(0);
+  });
+
   it("merge fold: range = both branches up to LCA, hostKind='merge', both parents are boundary members", () => {
     //        root
     //         │

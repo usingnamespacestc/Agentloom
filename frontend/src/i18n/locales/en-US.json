@@ -85,6 +85,8 @@
     "fold_node_hint": "This fold represents {{count}} hidden node(s). Right-click this node or its compact/pack host to unfold.",
     "fold_node_tokens_label": "{{tokens}} tokens",
     "fold_node_tokens_hint": "Total context tokens across the folded range (entry_prompt + output_response) — approximately {{count}} tokens",
+    "fold_node_more_count": "… +{{count}} more",
+    "fold_node_empty_turn": "(empty turn)",
     "merge_badge": "Merge",
     "merge_badge_hint": "This ChatNode merges two branches into one. Downstream turns see the merged summary; pre-merge history is unchanged.",
     "awaiting_user": "Needs you",
