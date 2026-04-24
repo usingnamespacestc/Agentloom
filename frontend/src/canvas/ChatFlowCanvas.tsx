@@ -125,6 +125,8 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
   const pendingPackStartId = useChatFlowStore((s) => s.pendingPackStartId);
   const beginPendingPack = useChatFlowStore((s) => s.beginPendingPack);
   const cancelPendingPack = useChatFlowStore((s) => s.cancelPendingPack);
+  const foldChatNode = useChatFlowStore((s) => s.foldChatNode);
+  const unfoldChatNode = useChatFlowStore((s) => s.unfoldChatNode);
 
   // Cursor position for the edge-hover tooltip — only tracked while an
   // edge is hovered, so we don't pay for global mousemove the rest of
@@ -293,6 +295,7 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
   // above each ChatNode. Rebuilds the graph whenever a BoardItem is
   // written/updated (SSE refresh, compact/merge follow-ups).
   const boardItems = useChatFlowStore((s) => s.boardItems);
+  const foldedChatNodeIds = useChatFlowStore((s) => s.foldedChatNodeIds);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [nodes, setNodes] = useState<Node<any>[]>([]);
@@ -384,7 +387,13 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
       briefHeights.current = {};
       lastChatflowId.current = chatflow?.id ?? null;
     }
-    const laid = buildGraph(chatflow, selectedNodeId, contextWindowByModel, boardItems);
+    const laid = buildGraph(
+      chatflow,
+      selectedNodeId,
+      contextWindowByModel,
+      boardItems,
+      foldedChatNodeIds,
+    );
     // Two-pass position merge: first resolve each real ChatNode's
     // effective position (drag override wins over laid-out), then snap
     // every brief to ``source.effective + offset`` so briefs behave
@@ -429,7 +438,7 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
     }));
     setNodes([...merged, ...stickyNodes]);
     setEdges(laid.edges);
-  }, [chatflow, selectedNodeId, contextWindowByModel, boardItems, stickyNotes, editingStickyId, selectedStickyId, onNoteTitleChange, onNoteTextChange, onNoteDelete, syncTick]);
+  }, [chatflow, selectedNodeId, contextWindowByModel, boardItems, foldedChatNodeIds, stickyNotes, editingStickyId, selectedStickyId, onNoteTitleChange, onNoteTextChange, onNoteDelete, syncTick]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     const filtered = changes.filter((c) => c.type !== "select");
@@ -632,7 +641,12 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
         <Controls showInteractive={false} />
         <ModelRibbonLayer chatflow={chatflow} />
         <ChatFlowActiveWorkPanel chatflow={chatflow} />
-        <ChatBoardPanel boardItems={boardItems} onJump={selectNode} />
+        <ChatBoardPanel
+          chatflow={chatflow}
+          boardItems={boardItems}
+          foldedChatNodeIds={foldedChatNodeIds}
+          onJump={selectNode}
+        />
       </ReactFlow>
 
       {hoveredEdge && cursorPos && chatflow && (
@@ -671,6 +685,16 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
             : pendingPackStartId === contextMenu.nodeId
               ? "first-pending-self"
               : "first-pending-other";
+        // Fold is offered on pack / compact hosts only — regular turn
+        // nodes have no well-defined range to collapse. The text flips
+        // based on whether THIS host is currently folded.
+        const isFoldableHost =
+          node.pack_snapshot != null || node.compact_snapshot != null;
+        const foldState: "none" | "fold" | "unfold" = !isFoldableHost
+          ? "none"
+          : foldedChatNodeIds.has(contextMenu.nodeId)
+            ? "unfold"
+            : "fold";
 
         return (
           <NodeContextMenu
@@ -709,6 +733,15 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
             }}
             onCancelPendingPack={() => {
               cancelPendingPack();
+              setContextMenu(null);
+            }}
+            foldState={foldState}
+            onFold={() => {
+              foldChatNode(contextMenu.nodeId);
+              setContextMenu(null);
+            }}
+            onUnfold={() => {
+              unfoldChatNode(contextMenu.nodeId);
               setContextMenu(null);
             }}
             onEnterWorkflow={() => {
@@ -959,21 +992,33 @@ function sortByCreatedAsc(a: BoardItem, b: BoardItem): number {
 }
 
 /** ChatFlow-layer MemoryBoard panel — lists scope='chat' briefs and
- * jumps to the source ChatNode on click. */
+ * jumps to the source ChatNode on click. Route-B semantics: mirror
+ * the canvas fold state. Any item whose ``source_node_id`` is hidden
+ * by a currently-active fold is filtered out — fold IS the viewpoint
+ * gesture, panel follows. */
 function ChatBoardPanel({
+  chatflow,
   boardItems,
+  foldedChatNodeIds,
   onJump,
 }: {
+  chatflow: ChatFlow;
   boardItems: Record<NodeId, BoardItem>;
+  foldedChatNodeIds: Set<NodeId>;
   onJump: (nodeId: NodeId) => void;
 }) {
   const { t } = useTranslation();
+  const hiddenSet = useMemo(
+    () => computeFoldProjection(chatflow, foldedChatNodeIds).hidden,
+    [chatflow, foldedChatNodeIds],
+  );
   const items = useMemo(
     () =>
       Object.values(boardItems)
         .filter((item) => item.scope === "chat")
+        .filter((item) => !hiddenSet.has(item.source_node_id))
         .sort(sortByCreatedAsc),
-    [boardItems],
+    [boardItems, hiddenSet],
   );
   return (
     <MemoryBoardPanel
@@ -988,14 +1033,99 @@ function ChatBoardPanel({
 }
 
 /** Pure function so it can be unit-tested without rendering React Flow. */
+/** Fold-state projection. Maps every hidden ChatNode id to the fold
+ * host (a pack / compact ChatNode) that is currently absorbing it.
+ * Used for edge re-route so range-internal nodes disappear and their
+ * external edges flow through the host card instead. */
+export interface FoldProjection {
+  hidden: Set<NodeId>;
+  hostByHidden: Map<NodeId, NodeId>;
+  countByHost: Map<NodeId, number>;
+}
+
+/** Compute the hidden-set + host-map for a ChatFlow given the user's
+ * current fold selection. A fold is only *effective* when the host
+ * itself is visible — if packA (folded) is inside packB's (also folded)
+ * range, packA is hidden by packB and its own range collapses into
+ * packB instead. Attribution prefers the fold with the largest range
+ * so cross-range edges end on a single visible host (avoids spurious
+ * A↔B cycles when ranges partially overlap). Ties break on id. */
+export function computeFoldProjection(
+  chatflow: ChatFlow,
+  foldedChatNodeIds: Set<NodeId>,
+): FoldProjection {
+  // Pass 1: raw range per fold.
+  const rangesByFold = new Map<NodeId, Set<NodeId>>();
+  for (const foldId of foldedChatNodeIds) {
+    const node = chatflow.nodes[foldId];
+    if (!node) continue;
+    if (node.pack_snapshot) {
+      rangesByFold.set(foldId, new Set(node.pack_snapshot.packed_range));
+      continue;
+    }
+    if (node.compact_snapshot) {
+      const ancestors = new Set<NodeId>();
+      let current: NodeId | undefined = node.parent_ids[0];
+      while (current !== undefined) {
+        const anc: ChatFlowNode | undefined = chatflow.nodes[current];
+        if (!anc) break;
+        // Merge hard-stop mirrors _build_chat_context: don't fold past
+        // a merge boundary, since a merge's synthesised reply already
+        // carries both pre-merge branches.
+        if (anc.parent_ids.length >= 2) break;
+        ancestors.add(current);
+        current = anc.parent_ids[0];
+      }
+      rangesByFold.set(foldId, ancestors);
+    }
+    // Non-pack / non-compact fold targets are ignored (UI only exposes
+    // the action on valid hosts).
+  }
+
+  // Pass 2: raw hidden union — used to flag folds that are themselves
+  // covered by a larger fold ("nested fold swallowed").
+  const rawHidden = new Set<NodeId>();
+  for (const range of rangesByFold.values()) {
+    for (const id of range) rawHidden.add(id);
+  }
+
+  // Pass 3: attribution. Sort folds by (-size, id) so the largest
+  // range wins each hidden node — a range-internal node flows through
+  // the outermost visible fold, keeping the projected DAG acyclic.
+  const effectiveFolds = [...rangesByFold.entries()]
+    .filter(([foldId]) => !rawHidden.has(foldId))
+    .sort((a, b) => {
+      const sizeDiff = b[1].size - a[1].size;
+      if (sizeDiff !== 0) return sizeDiff;
+      return a[0].localeCompare(b[0]);
+    });
+
+  const hostByHidden = new Map<NodeId, NodeId>();
+  const countByHost = new Map<NodeId, number>();
+  for (const [foldId, range] of effectiveFolds) {
+    for (const id of range) {
+      if (!hostByHidden.has(id)) hostByHidden.set(id, foldId);
+    }
+    countByHost.set(foldId, range.size);
+  }
+
+  // Pass 4: the hidden set used by canvas / panel matches the attributed
+  // set (intentionally excludes any fold host that ended up hidden —
+  // those contribute zero visible affordance).
+  const hidden = new Set(hostByHidden.keys());
+  return { hidden, hostByHidden, countByHost };
+}
+
 export function buildGraph(
   chatflow: ChatFlow | null,
   selectedNodeId: string | null,
   contextWindowByModel: Record<string, number> = {},
   boardItems: Record<NodeId, BoardItem> = {},
+  foldedChatNodeIds: Set<NodeId> = new Set(),
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): { nodes: Node<any>[]; edges: Edge[] } {
   if (!chatflow) return { nodes: [], edges: [] };
+  const fold = computeFoldProjection(chatflow, foldedChatNodeIds);
   const laidOut = layoutDag<ChatFlowNode>(chatflow.nodes, chatflow.root_ids);
   const undeletable = computeUndeletableIds(chatflow.nodes);
   const leaves = computeLeafIds(chatflow.nodes);
@@ -1037,7 +1167,12 @@ export function buildGraph(
     });
   }
   const chatNodePositions = new Map<NodeId, { x: number; y: number }>();
-  const rfNodes: Node<ChatFlowNodeData>[] = laidOut.map(({ node, position }) => {
+  const rfNodes: Node<ChatFlowNodeData>[] = [];
+  for (const { node, position } of laidOut) {
+    // Hidden nodes are absorbed into their fold host — skip them
+    // entirely; the host keeps its card and styling picks up the
+    // ``isFoldHost`` / ``foldedCount`` signal below.
+    if (fold.hidden.has(node.id)) continue;
     // Prefer server-persisted position over auto-layout. Pack override
     // only applies when the pack has no persisted position.
     const pos =
@@ -1046,7 +1181,8 @@ export function buildGraph(
         : packOverride.get(node.id) ?? position;
     chatNodePositions.set(node.id, pos);
     const isRoot = rootSet.has(node.id);
-    return {
+    const foldedCount = fold.countByHost.get(node.id) ?? 0;
+    rfNodes.push({
       id: node.id,
       type: "chatflow",
       position: pos,
@@ -1063,19 +1199,27 @@ export function buildGraph(
           contextWindowByModel,
         ),
         hasPackChild: parentsOfPack.has(node.id),
+        isFoldHost: foldedCount > 0,
+        foldedCount,
       },
       selectable: false,
-    };
-  });
+    });
+  }
 
-  const rfEdges: Edge[] = [];
+  // Re-route edges through the fold host map. When both endpoints land
+  // on the same visible node (range-internal edge, or collapsing edge
+  // whose source and destination end at the same host), drop it. After
+  // re-route, dedupe edges so parallel rails stacking onto a host
+  // don't render twice.
+  const rerouted = new Map<string, Edge>();
   for (const { node } of laidOut) {
     for (const parentId of node.parent_ids) {
       if (!(parentId in chatflow.nodes)) continue;
       const parent = chatflow.nodes[parentId];
       const isMerge = node.parent_ids.length >= 2;
       const isPack = node.pack_snapshot != null;
-      const isDashed = !parent.status || parent.status === "planned" || node.status === "planned";
+      const isDashed =
+        !parent.status || parent.status === "planned" || node.status === "planned";
       const edgeColor = isPack
         ? "#f43f5e" // rose-500
         : isMerge
@@ -1083,16 +1227,32 @@ export function buildGraph(
           : isDashed
             ? "#9ca3af"
             : "#374151";
-      rfEdges.push({
-        id: `${parentId}->${node.id}`,
-        source: parentId,
-        target: node.id,
-        // Pack children attach to the parent's bottom edge and drop
-        // straight down into the pack card's top edge — makes the
-        // "below-the-range" topology visible at a glance.
-        sourceHandle: isPack ? "main-source-bottom" : "main-source",
-        targetHandle: isPack ? "main-target-top" : "main-target",
-        animated: node.status === "running",
+      const srcId = fold.hostByHidden.get(parentId) ?? parentId;
+      const dstId = fold.hostByHidden.get(node.id) ?? node.id;
+      if (srcId === dstId) continue; // internal or host-self collapse
+      const key = `${srcId}->${dstId}`;
+      if (rerouted.has(key)) continue; // dedupe parallel rails
+      const isReroutedEdge = srcId !== parentId || dstId !== node.id;
+      const srcHiddenToVisible = srcId !== parentId;
+      rerouted.set(key, {
+        id: key,
+        source: srcId,
+        target: dstId,
+        // Keep the pack-drop handle only when both endpoints survived
+        // verbatim; a re-routed edge exiting a fold host leaves its
+        // default side handle to avoid landing on a handle the host
+        // card may not expose.
+        sourceHandle: isReroutedEdge || srcHiddenToVisible
+          ? undefined
+          : isPack
+            ? "main-source-bottom"
+            : "main-source",
+        targetHandle: isReroutedEdge
+          ? undefined
+          : isPack
+            ? "main-target-top"
+            : "main-target",
+        animated: node.status === "running" && !isReroutedEdge,
         markerEnd: {
           // Arrowhead in stroke color so direction is readable at a
           // glance on a DAG with forks, merges, and pack branches —
@@ -1116,9 +1276,11 @@ export function buildGraph(
   // ``scope='chat'`` BoardItem. The brief text lives on the BoardItem,
   // not on a ChatNode — so these are view-only, don't exist in
   // ``chatflow.nodes``, aren't draggable, and aren't selectable.
+  // Skip briefs for hidden sources — their host already represents them.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const briefNodes: Node<any>[] = [];
   for (const id of Object.keys(chatflow.nodes)) {
+    if (fold.hidden.has(id)) continue;
     const bi = boardItems[id];
     if (!bi || bi.scope !== "chat") continue;
     const srcPos = chatNodePositions.get(id);
@@ -1133,7 +1295,7 @@ export function buildGraph(
       draggable: false,
     });
   }
-  return { nodes: [...rfNodes, ...briefNodes], edges: rfEdges };
+  return { nodes: [...rfNodes, ...briefNodes], edges: [...rerouted.values()] };
 }
 
 // ---------------------------------------------------------------- Context menu
@@ -1159,6 +1321,9 @@ function NodeContextMenu({
   onPackStart,
   onPackToHere,
   onCancelPendingPack,
+  foldState,
+  onFold,
+  onUnfold,
 }: {
   x: number;
   y: number;
@@ -1183,6 +1348,12 @@ function NodeContextMenu({
   onPackStart: () => void;
   onPackToHere: () => void;
   onCancelPendingPack: () => void;
+  /** ``"none"`` = this node isn't a pack/compact host (hide fold items);
+   * ``"fold"`` = pack/compact currently NOT folded (show "Fold range");
+   * ``"unfold"`` = currently folded (show "Unfold range"). */
+  foldState: "none" | "fold" | "unfold";
+  onFold: () => void;
+  onUnfold: () => void;
 }) {
   const { t } = useTranslation();
 
@@ -1235,6 +1406,13 @@ function NodeContextMenu({
       label: t("chatflow.ctx_pack_to_here"),
       onClick: onPackToHere,
     });
+  }
+
+  // Fold / Unfold — only on pack or compact ChatNodes.
+  if (foldState === "fold") {
+    items.push({ label: t("chatflow.ctx_fold_range"), onClick: onFold });
+  } else if (foldState === "unfold") {
+    items.push({ label: t("chatflow.ctx_unfold_range"), onClick: onUnfold });
   }
 
   // Delete

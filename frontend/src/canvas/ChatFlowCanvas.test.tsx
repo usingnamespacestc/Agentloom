@@ -12,8 +12,7 @@ import { render, screen } from "@testing-library/react";
 import { describe, it, expect } from "vitest";
 
 import { ChatFlowCanvas, buildGraph, CHAT_BRIEF_NODE_PREFIX } from "./ChatFlowCanvas";
-import { useChatFlowStore } from "@/store/chatflowStore";
-import type { BoardItem, ChatFlow, ChatFlowNode } from "@/types/schema";
+import type { BoardItem, ChatFlow } from "@/types/schema";
 
 function seed(): ChatFlow {
   return {
@@ -210,6 +209,274 @@ describe("buildGraph", () => {
       nodes.some((n) => n.id.startsWith(CHAT_BRIEF_NODE_PREFIX)),
     ).toBe(false);
     expect(edges.some((e) => e.id.startsWith("brief->"))).toBe(false);
+  });
+});
+
+// ---- Fold projection tests ----
+//
+// These exercise ``buildGraph``'s fold-aware projection: hidden-set
+// computation, edge re-route through the fold host, and the
+// ``isFoldHost`` / ``foldedCount`` signals on node data.
+
+function makeTurn(
+  id: string,
+  parentIds: string[],
+  overrides: Partial<ChatFlow["nodes"][string]> = {},
+): ChatFlow["nodes"][string] {
+  return {
+    id,
+    parent_ids: parentIds,
+    description: { text: "", provenance: "unset", updated_at: "2026-04-24T00:00:00Z" },
+    inputs: null,
+    expected_outcome: null,
+    status: "succeeded",
+    resolved_model: null,
+    locked: false,
+    error: null,
+    position_x: null,
+    position_y: null,
+    created_at: "2026-04-24T00:00:00Z",
+    updated_at: "2026-04-24T00:00:00Z",
+    started_at: null,
+    finished_at: null,
+    user_message: { text: id, provenance: "pure_user", updated_at: "2026-04-24T00:00:00Z" },
+    agent_response: { text: id, provenance: "pure_agent", updated_at: "2026-04-24T00:00:00Z" },
+    workflow: { id: `wf-${id}`, root_ids: [], nodes: {} },
+    pending_queue: [],
+    compact_snapshot: null,
+    pack_snapshot: null,
+    entry_prompt_tokens: null,
+    output_response_tokens: null,
+    ...overrides,
+  };
+}
+
+function baseChatFlow(
+  nodes: Record<string, ChatFlow["nodes"][string]>,
+  rootIds: string[] = ["root"],
+): ChatFlow {
+  return {
+    id: "cf-fold",
+    title: null,
+    description: null,
+    tags: [],
+    draft_model: null,
+    default_judge_model: null,
+    default_tool_call_model: null,
+    brief_model: null,
+    default_execution_mode: "native_react",
+    judge_retry_budget: 3,
+    min_ground_ratio: null,
+    ground_ratio_grace_nodes: 20,
+    disabled_tool_names: [],
+    compact_trigger_pct: 0.7,
+    compact_target_pct: 0.3,
+    compact_keep_recent_count: 3,
+    compact_preserve_mode: "by_count",
+    recalled_context_sticky_turns: 3,
+    compact_model: null,
+    compact_require_confirmation: true,
+    chatnode_compact_trigger_pct: 0.6,
+    chatnode_compact_target_pct: 0.4,
+    root_ids: rootIds,
+    nodes,
+    created_at: "2026-04-24T00:00:00Z",
+  };
+}
+
+describe("buildGraph fold projection", () => {
+  it("single pack fold: range hidden, external parent edge re-routes to pack", () => {
+    // root → a → b → c → pack (packed_range=[a,b,c])
+    const nodes = {
+      root: makeTurn("root", []),
+      a: makeTurn("a", ["root"]),
+      b: makeTurn("b", ["a"]),
+      c: makeTurn("c", ["b"]),
+      pack: makeTurn("pack", ["c"], {
+        pack_snapshot: {
+          summary: "summary",
+          packed_range: ["a", "b", "c"],
+          use_detailed_index: false,
+          preserve_last_n: 0,
+          preserved_messages: [],
+        },
+      }),
+    };
+    const cf = baseChatFlow(nodes);
+    const folded = new Set<string>(["pack"]);
+    const { nodes: rn, edges } = buildGraph(cf, null, {}, {}, folded);
+    const visibleIds = rn
+      .filter((n) => n.type === "chatflow")
+      .map((n) => n.id)
+      .sort();
+    expect(visibleIds).toEqual(["pack", "root"]);
+    // Only edge left: root → pack (re-routed from root → a, since a is hidden)
+    expect(edges.map((e) => `${e.source}->${e.target}`).sort()).toEqual([
+      "root->pack",
+    ]);
+    // Pack card carries the isFoldHost + foldedCount signals.
+    const packNode = rn.find((n) => n.id === "pack");
+    expect(packNode?.data.isFoldHost).toBe(true);
+    expect(packNode?.data.foldedCount).toBe(3);
+  });
+
+  it("single compact fold: pre-compact ancestors hidden, root edge re-routes", () => {
+    // root → x → y → compact   (compact_snapshot marks it a compact host)
+    const nodes = {
+      root: makeTurn("root", []),
+      x: makeTurn("x", ["root"]),
+      y: makeTurn("y", ["x"]),
+      compact: makeTurn("compact", ["y"], {
+        compact_snapshot: {
+          summary: "summary",
+          preserved_messages: [],
+          preserved_before_summary: false,
+        },
+      }),
+    };
+    const cf = baseChatFlow(nodes);
+    const folded = new Set<string>(["compact"]);
+    const { nodes: rn, edges } = buildGraph(cf, null, {}, {}, folded);
+    const visibleIds = rn
+      .filter((n) => n.type === "chatflow")
+      .map((n) => n.id)
+      .sort();
+    // root walk stops at root (no merge, reaches parent_ids=[]), so all of
+    // {root, x, y} end up in compact's fold range.
+    expect(visibleIds).toEqual(["compact"]);
+    expect(edges).toHaveLength(0);
+    const cn = rn.find((n) => n.id === "compact");
+    expect(cn?.data.isFoldHost).toBe(true);
+    expect(cn?.data.foldedCount).toBe(3);
+  });
+
+  it("fork child survives and re-routes to fold host when its parent is hidden", () => {
+    //                a → packA (range=[a])
+    // root → a
+    //                ↘ sib (fork child of a, not in pack range)
+    const nodes = {
+      root: makeTurn("root", []),
+      a: makeTurn("a", ["root"]),
+      packA: makeTurn("packA", ["a"], {
+        pack_snapshot: {
+          summary: "summary",
+          packed_range: ["a"],
+          use_detailed_index: false,
+          preserve_last_n: 0,
+          preserved_messages: [],
+        },
+      }),
+      sib: makeTurn("sib", ["a"]),
+    };
+    const cf = baseChatFlow(nodes);
+    const folded = new Set<string>(["packA"]);
+    const { nodes: rn, edges } = buildGraph(cf, null, {}, {}, folded);
+    const visibleIds = rn
+      .filter((n) => n.type === "chatflow")
+      .map((n) => n.id)
+      .sort();
+    expect(visibleIds).toEqual(["packA", "root", "sib"]);
+    const edgeKeys = edges.map((e) => `${e.source}->${e.target}`).sort();
+    // root → a becomes root → packA; a → sib becomes packA → sib.
+    expect(edgeKeys).toEqual(["packA->sib", "root->packA"]);
+  });
+
+  it("nested packs: outer fold absorbs inner range, inner host is hidden", () => {
+    // root → m1 → m2 → packB (range=[m1, m2]) → n3 → packA (range=[m2, packB, n3])
+    const nodes = {
+      root: makeTurn("root", []),
+      m1: makeTurn("m1", ["root"]),
+      m2: makeTurn("m2", ["m1"]),
+      packB: makeTurn("packB", ["m2"], {
+        pack_snapshot: {
+          summary: "innerB",
+          packed_range: ["m1", "m2"],
+          use_detailed_index: false,
+          preserve_last_n: 0,
+          preserved_messages: [],
+        },
+      }),
+      n3: makeTurn("n3", ["packB"]),
+      packA: makeTurn("packA", ["n3"], {
+        pack_snapshot: {
+          summary: "outerA",
+          packed_range: ["m2", "packB", "n3"],
+          use_detailed_index: false,
+          preserve_last_n: 0,
+          preserved_messages: [],
+        },
+      }),
+    };
+    const cf = baseChatFlow(nodes);
+    // Both folded; packA's range is larger so it wins attribution for
+    // any overlap (m2). packB itself is inside packA's range → hidden.
+    const folded = new Set<string>(["packA", "packB"]);
+    const { nodes: rn, edges } = buildGraph(cf, null, {}, {}, folded);
+    const visibleIds = rn
+      .filter((n) => n.type === "chatflow")
+      .map((n) => n.id)
+      .sort();
+    // packB is hidden (it's in packA's range). m1 is only in packB's
+    // range, but packB is swallowed — so m1 falls through to packB as
+    // its host? No: packB is hidden, so it's not an effective fold.
+    // After filtering out hidden folds, only packA remains active, and
+    // m1 is NOT in packA's range — so m1 stays visible.
+    expect(visibleIds).toEqual(["m1", "packA", "root"].sort());
+    // Edges: root → m1 unchanged; m1 → m2 becomes m1 → packA (m2 hidden).
+    const edgeKeys = edges.map((e) => `${e.source}->${e.target}`).sort();
+    expect(edgeKeys).toEqual(["m1->packA", "root->m1"]);
+  });
+
+  it("fold does not affect brief node emission for visible sources", () => {
+    // Verifies we skip briefs for hidden sources but keep them for visible ones.
+    const nodes = {
+      root: makeTurn("root", []),
+      a: makeTurn("a", ["root"]),
+      pack: makeTurn("pack", ["a"], {
+        pack_snapshot: {
+          summary: "summary",
+          packed_range: ["a"],
+          use_detailed_index: false,
+          preserve_last_n: 0,
+          preserved_messages: [],
+        },
+      }),
+    };
+    const cf = baseChatFlow(nodes);
+    const now = "2026-04-24T00:00:00Z";
+    const boardItems: Record<string, BoardItem> = {
+      a: {
+        id: "bi-a",
+        source_node_id: "a",
+        scope: "chat",
+        source_kind: "chat_turn",
+        description: "a brief",
+        chatflow_id: cf.id,
+        workflow_id: null,
+        created_at: now,
+        fallback: false,
+      },
+      pack: {
+        id: "bi-pack",
+        source_node_id: "pack",
+        scope: "chat",
+        source_kind: "chat_pack",
+        description: "pack brief",
+        chatflow_id: cf.id,
+        workflow_id: null,
+        created_at: now,
+        fallback: false,
+        pack_inner_ids: ["a"],
+      },
+    };
+    const folded = new Set<string>(["pack"]);
+    const { nodes: rn } = buildGraph(cf, null, {}, boardItems, folded);
+    const briefIds = rn
+      .filter((n) => n.id.startsWith(CHAT_BRIEF_NODE_PREFIX))
+      .map((n) => n.id.slice(CHAT_BRIEF_NODE_PREFIX.length))
+      .sort();
+    // Only pack's brief remains — a's brief is suppressed because a is hidden.
+    expect(briefIds).toEqual(["pack"]);
   });
 });
 

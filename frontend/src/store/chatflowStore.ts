@@ -292,6 +292,20 @@ export interface ChatFlowStoreState {
    * descendant along the primary-parent chain, derives the range, and
    * hits the pack API. Null when no pack is in progress. */
   pendingPackStartId: NodeId | null;
+
+  /** IDs of compact / pack ChatNodes whose covered range is currently
+   * visually folded on the canvas. Ephemeral — cleared on chatflow
+   * switch and never persisted. Edge semantics: range members are
+   * hidden from rfNodes, in/out edges are re-routed through the fold
+   * host (see ``buildGraph``). MemoryBoardPanel mirrors the hidden set
+   * as its filter — this is Route B: "fold IS the viewpoint gesture". */
+  foldedChatNodeIds: Set<NodeId>;
+  /** Mark ``chatNodeId`` as folded. Caller ensures it's a pack or
+   * compact ChatNode (UI only exposes the action there). No-op if
+   * already folded. */
+  foldChatNode: (chatNodeId: NodeId) => void;
+  /** Unfold ``chatNodeId``. No-op if not currently folded. */
+  unfoldChatNode: (chatNodeId: NodeId) => void;
   /** Stash ``nodeId`` as the pack start. Toggle-off when called with
    * the same id twice. */
   beginPendingPack: (nodeId: NodeId) => void;
@@ -367,6 +381,8 @@ const INITIAL: Omit<
   | "beginPendingPack"
   | "cancelPendingPack"
   | "commitPackTo"
+  | "foldChatNode"
+  | "unfoldChatNode"
   | "applyEvent"
   | "setSSEFactory"
   | "refreshBoardItems"
@@ -384,6 +400,7 @@ const INITIAL: Omit<
   branchMemory: {},
   pendingMergeFirstId: null,
   pendingPackStartId: null,
+  foldedChatNodeIds: new Set<NodeId>(),
   drillStack: [],
   workflowSelectedNodeId: null,
   workflowBranchMemory: {},
@@ -705,6 +722,7 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
       drillDownChatNodeId: null,
       workflowSelectedNodeId: null,
       workflowBranchMemory: {},
+      foldedChatNodeIds: new Set<NodeId>(),
       sseSubscription: null,
     });
 
@@ -762,6 +780,7 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
       drillDownChatNodeId: null,
       workflowSelectedNodeId: null,
       workflowBranchMemory: {},
+      foldedChatNodeIds: new Set<NodeId>(),
     });
     const leaf = autoLeafForChatFlow(chat);
     if (leaf) get().selectNode(leaf);
@@ -1144,6 +1163,22 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     });
     await get().refreshChatFlow();
     get().selectNode(res.node_id);
+  },
+
+  foldChatNode(chatNodeId) {
+    const { foldedChatNodeIds } = get();
+    if (foldedChatNodeIds.has(chatNodeId)) return;
+    const next = new Set(foldedChatNodeIds);
+    next.add(chatNodeId);
+    set({ foldedChatNodeIds: next });
+  },
+
+  unfoldChatNode(chatNodeId) {
+    const { foldedChatNodeIds } = get();
+    if (!foldedChatNodeIds.has(chatNodeId)) return;
+    const next = new Set(foldedChatNodeIds);
+    next.delete(chatNodeId);
+    set({ foldedChatNodeIds: next });
   },
 
   async refreshChatFlow() {

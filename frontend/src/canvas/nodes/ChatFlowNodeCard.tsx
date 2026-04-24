@@ -50,6 +50,15 @@ export interface ChatFlowNodeData extends Record<string, unknown> {
    * off when there's no pack child hides a stray connection dot on
    * nodes that never spawned a pack. */
   hasPackChild: boolean;
+  /** True when this pack / compact ChatNode is the fold host for a
+   * currently-folded range — the card renders an absorbed variant with
+   * an "内含 N" badge and a thicker outline so the user sees it as one
+   * visual aggregate. Not persistent — toggled purely via
+   * ``foldChatNode`` / ``unfoldChatNode`` in the store. */
+  isFoldHost: boolean;
+  /** Number of ChatNodes currently folded into this host (size of the
+   * range when ``isFoldHost`` is true, else 0). */
+  foldedCount: number;
 }
 
 const TRUNCATE = 90;
@@ -85,6 +94,8 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
     contextTokens,
     maxContextTokens,
     hasPackChild,
+    isFoldHost,
+    foldedCount,
   } = data as ChatFlowNodeData;
   const isMerge = node.parent_ids.length >= 2;
   const isMergeSettled = isMerge && node.status === "succeeded";
@@ -157,8 +168,13 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
       data-pack={isPack ? "1" : undefined}
       data-pack-member={isPackMemberHighlighted ? "true" : undefined}
       {...packHandlers}
+      data-fold-host={isFoldHost ? "1" : undefined}
       className={[
-        "group/card relative rounded-lg border shadow-sm w-52 p-2.5 text-xs",
+        "group/card relative rounded-lg border shadow-sm p-2.5 text-xs",
+        // Fold host bumps up to w-56 + stronger shadow so the absorbed
+        // variant reads as "one visual aggregate" rather than a regular
+        // pack/compact card sitting alone.
+        isFoldHost ? "w-56 shadow-md ring-1 ring-offset-0" : "w-52",
         isPack
           ? "bg-rose-50 border-l-[3px] border-l-rose-500"
           : isCompact
@@ -170,6 +186,15 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
                 : isLeaf
                   ? "bg-green-50"
                   : "bg-white",
+        // Thicker left border + subtle ring to signal "absorbed",
+        // colored to match the host's native rose (pack) / teal
+        // (compact). Applied on top of the base border-l class above
+        // so the stripe widens rather than fades.
+        isFoldHost && isPack
+          ? "border-l-[6px] ring-rose-400"
+          : isFoldHost && isCompact
+            ? "border-l-[6px] ring-teal-400"
+            : "",
         isSelected
           ? "border-blue-500 ring-2 ring-blue-200"
           : isPack
@@ -285,6 +310,21 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
             {t("chatflow.pack_badge", {
               count: node.pack_snapshot?.packed_range.length ?? 0,
             })}
+          </span>
+        )}
+        {isFoldHost && (
+          <span
+            data-testid={`chatflow-node-${node.id}-fold-badge`}
+            title={t("chatflow.fold_host_hint", { count: foldedCount })}
+            className={[
+              "inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-semibold",
+              isPack
+                ? "bg-rose-300 text-rose-950"
+                : "bg-teal-300 text-teal-950",
+            ].join(" ")}
+          >
+            <span aria-hidden>⊞</span>
+            {t("chatflow.fold_host_badge", { count: foldedCount })}
           </span>
         )}
         {isAwaitingUser && (
