@@ -589,6 +589,18 @@ class ChatFlowEngine:
     def get_runtime(self, chatflow_id: str) -> ChatFlowRuntime | None:
         return self._runtimes.get(chatflow_id)
 
+    def active_chatflow_ids(self) -> set[str]:
+        """Return chatflow ids whose runtime currently has at least one
+        non-done scheduler task. Used by the orphan watchdog to skip
+        legitimately-in-flight chatflows when periodically sweeping
+        stale RUNNING/RETRYING state — otherwise a running turn could
+        get flipped to FAILED mid-execution."""
+        return {
+            cf_id
+            for cf_id, rt in self._runtimes.items()
+            if any(not t.done() for t in rt.active_tasks)
+        }
+
     async def detach(self, chatflow_id: str, *, cancel: bool = False) -> None:
         async with self._registry_lock:
             runtime = self._runtimes.pop(chatflow_id, None)

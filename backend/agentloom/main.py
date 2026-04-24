@@ -35,6 +35,60 @@ from agentloom.db.repositories.workspace_settings import WorkspaceSettingsReposi
 from agentloom.mcp import runtime as mcp_runtime
 
 
+#: How often the orphan-sweep watchdog re-runs during the lifespan of
+#: a live process. Start-up sweep catches orphans from the PREVIOUS
+#: run's crash; the watchdog catches coroutine leaks that happen while
+#: the current process is still alive (e.g. a scheduler task raising
+#: an unhandled exception and silently exiting without transitioning
+#: the RUNNING node to FAILED).
+#:
+#: Default 15 minutes — long enough to keep DB chatter low, short
+#: enough that a user returning from coffee doesn't stare at a ghost
+#: "running" indicator.
+ORPHAN_WATCHDOG_INTERVAL_SECONDS = 15 * 60
+
+
+async def _orphan_watchdog(
+    app: FastAPI,
+    interval_seconds: int = ORPHAN_WATCHDOG_INTERVAL_SECONDS,
+) -> None:
+    """Periodically clean orphan RUNNING nodes that the in-memory engine
+    no longer tracks. Skips chatflows that currently HAVE active
+    scheduler tasks so a live turn can't be flipped mid-execution.
+
+    Cancelled cleanly on shutdown from the lifespan hook. Individual
+    iteration failures are logged and swallowed — a transient DB
+    error shouldn't kill the watchdog and leave the process without
+    the safety net.
+    """
+    log = logging.getLogger(__name__)
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            raise
+        try:
+            engine = getattr(app.state, "chatflow_engine", None)
+            active_ids: set[str] = (
+                engine.active_chatflow_ids() if engine is not None else set()
+            )
+            cleaned = await sweep_orphaned_running_nodes(
+                get_session_maker(),
+                skip_chatflow_ids=active_ids,
+            )
+            if cleaned:
+                log.info(
+                    "orphan_watchdog: cleaned %d stale node(s) "
+                    "(skipped %d active chatflow(s))",
+                    cleaned,
+                    len(active_ids),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — watchdog must survive one-off errors
+            log.exception("orphan_watchdog: iteration failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup and shutdown hooks.
@@ -79,6 +133,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
     except Exception:  # noqa: BLE001 — sweep is best-effort, never fail startup
         logging.getLogger(__name__).exception("orphan_sweep: failed")
+    # Spawn the periodic orphan watchdog. Unlike the startup sweep this
+    # one runs throughout the process lifetime and skips chatflows that
+    # currently have live scheduler tasks (so it never clobbers a
+    # legitimate in-flight turn).
+    watchdog_task: asyncio.Task[None] | None = None
+    try:
+        watchdog_task = asyncio.create_task(
+            _orphan_watchdog(app), name="orphan-watchdog"
+        )
+    except Exception:  # noqa: BLE001 — watchdog is best-effort, never fail startup
+        logging.getLogger(__name__).exception("orphan_watchdog: failed to start")
     try:
         yield
     finally:
@@ -86,6 +151,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             mcp_task.cancel()
             try:
                 await mcp_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        if watchdog_task is not None and not watchdog_task.done():
+            watchdog_task.cancel()
+            try:
+                await watchdog_task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         await mcp_runtime.close_all()

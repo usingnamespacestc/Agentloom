@@ -370,8 +370,10 @@ _ORPHAN_ERROR_MSG = "orphaned: engine restarted mid-run"
 
 async def sweep_orphaned_running_nodes(
     session_maker: async_sessionmaker[Any],
+    *,
+    skip_chatflow_ids: set[str] | None = None,
 ) -> int:
-    """Transition orphaned in-flight nodes to FAILED at startup.
+    """Transition orphaned in-flight nodes to FAILED.
 
     The engine keeps its scheduler state (active tasks, rate-limit waits,
     retry timers) in memory. When the process dies or is hard-killed,
@@ -381,19 +383,30 @@ async def sweep_orphaned_running_nodes(
     downstream edits (frozen guard won't fire, but the engine also
     won't resume it).
 
-    This sweep runs on app startup, after the engine's in-memory state
-    is guaranteed empty and before any new traffic arrives, so every
-    persisted in-flight status is stale by definition. Mutates the
-    JSONB payload directly (no frozen guard needed — these statuses
-    are non-frozen) and returns the total number of nodes cleaned.
+    Two callers:
+    - **Startup**: runs once when the lifespan hook opens, before any
+      traffic. No chatflows are attached yet so every persisted
+      in-flight status is stale by definition — pass
+      ``skip_chatflow_ids=None`` (or omit) and sweep everything.
+    - **Watchdog**: runs periodically in a background task, catches
+      coroutine leaks that happen without a process restart. Must pass
+      ``skip_chatflow_ids={cf_id for cf in engine.active_chatflow_ids()}``
+      so legitimate in-flight turns don't get flipped to FAILED.
 
-    ``waiting_for_user`` is intentionally left alone — that's a
-    persistent halt-awaiting-resume state, not an orphan.
+    ``waiting_for_user`` is intentionally left alone regardless of
+    caller — that's a persistent halt-awaiting-resume state, not an
+    orphan.
+
+    Mutates the JSONB payload directly (no frozen guard needed — these
+    statuses are non-frozen) and returns the total number of nodes
+    cleaned.
     """
     async with session_maker() as session:
         rows = (await session.execute(select(ChatFlowRow))).scalars().all()
         total = 0
         for row in rows:
+            if skip_chatflow_ids is not None and row.id in skip_chatflow_ids:
+                continue
             try:
                 chatflow = ChatFlow.model_validate(_clamp_legacy_compact(row.payload))
             except Exception:  # noqa: BLE001 — one bad row mustn't block the rest
