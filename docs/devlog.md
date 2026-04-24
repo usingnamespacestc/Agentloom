@@ -2287,6 +2287,60 @@ startup sweep 只在进程启动时跑，能清前一轮崩溃留下的幽灵，
 
 359 backend unit（358 → 359，+1 signature test 钉 `skip_chatflow_ids` 参数存在）+ 前端不动。Live backend reload 干净，watchdog 在后台静默运行（只有清到东西才 log，空轮次不刷屏）。
 
+
+## 2026-04-25 晚 — Tier 0 tool-result cap (Claude Code 模式)
+
+### 来由
+
+`project_agentloom_compaction_shipped.md` 里一直挂着 "Tier 0 (per-tool-result size cap) is deliberately deferred"。没真实踩过 —— 只是理论 TODO。如果某个 `tavily_research` 返 300KB 文本、某个 `Read` 打开大文件，单条 tool_result 就会直接塞进下一个 llm_call 的 input_messages，Tier 1 / Tier 2 压缩都管不着（它们只看**祖先**历史，同轮当下落下的 tool_result 超不了它们那层保险丝）。
+
+### 用户提议参考 Claude Code
+
+确实是正解。Claude Code 的模式：
+
+```
+Output too large (1.4MB). Full output saved to: /tmp/.../tool-results/xxx.txt
+Preview (first 2KB):
+<head 2K 字符>
+```
+
+**关键洞察**：不调 LLM 生成 brief —— 头部截断 + 指向原文的指针就够。Agent 需要细节时主动 `Read(file_path=...)` 拉回。无损、不烧额外 LLM 调用、不需要 brief 生成器。
+
+### 映射到 Agentloom
+
+| Claude Code | Agentloom |
+|---|---|
+| tool-results/xxx.txt | WorkNode.tool_result（原文早就完整保存在 DB） |
+| Read(file_path=...) | 已有 `get_node_context(node_id=<wn_id>)` |
+| 30KB 阈值 / 2KB preview | `_TOOL_RESULT_INLINE_CAP = 30_000` / `_TOOL_RESULT_PREVIEW_HEAD = 2_000` |
+
+### 实装（~50 行）
+
+- `_maybe_truncate_tool_result(content, wn_id, tool_name)` in `workflow_engine.py`：len ≤ cap passthrough；超过 cap 返回 `[preview lead-in with node_id hint]\n\n<head>\n\n[tail footer with truncation count + node_id]`
+- 唯一应用点：`_build_tagged_context_from_ancestors` 里 tool_result → `ToolMessage(content=...)` 那一行，换成 helper
+- 原 `WorkNode.tool_result.content` 不动，只有**喂 LLM 的 ToolMessage content** 被截断
+- 前后两处 footer/lead-in 都带 node_id，不管 agent 从哪头扫都能看到 get_node_context 出口
+
+### 为什么不加 per-ChatFlow settings
+
+MVP 硬编码常数。加 settings 要动 schema + UI + 迁移，当前没实际 live 触发、值也没需要调校。如果将来用户反馈默认值不合适，再提升为 workspace / ChatFlow setting。
+
+### 测试
+
+5 条新单测 `test_tool_result_cap.py`：passthrough（短内容、边界值），截断（lead-in/tail/node_id 双重引用、remaining 字符计数精确、preview 长度等于配置值），缺少 tool_name 降级（不打印 "None"）。
+
+Backend 364 unit 绿（359 → 364，+5）。
+
+### Compact / brief 受影响吗
+
+顺便想了下：compact 和 brief worker 也走 `_build_tagged_context_from_ancestors` 读上下文。cap 生效后它们看到的是 preview，但这反而是**对的** —— compact 的任务是给下游压缩，preview + 指针正好能写出 "agent 调 X 工具返 Y 字符，详情见 WorkNode Z" 这种简明总结。而不会被单条大 tool_result 挤爆 compact 自己的 prompt。brief 同理。
+
+### 未做
+
+- Settings 化阈值（见上）
+- Per-tool override（某些工具如 `Read` 的长内容本来就是核心输出，也许应该例外？暂时不需要，Read 的调用者本来就该用 offset/limit 分页）
+- 指标：记录本轮 turn 有多少 tool_result 触发 cap，暴露给 UI。暂时没做。
+
 ### 测试全量
 
 - backend: 354 unit + 4 integration = 358 + 新加 4 pack tests = 362，all green。移除 2 个 dead test 文件后 pytest collection 不再需要 `--ignore`

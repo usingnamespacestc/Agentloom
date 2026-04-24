@@ -483,6 +483,47 @@ def _render_messages_to_compact(
 _BRIEF_FALLBACK_MAX_CHARS = 400
 
 
+#: Tier 0 tool-result cap (Claude Code style). When a single
+#: ``tool_result.content`` exceeds ``_TOOL_RESULT_INLINE_CAP`` characters
+#: at context-assembly time, the LLM sees the first
+#: ``_TOOL_RESULT_PREVIEW_HEAD`` characters plus a footer pointing to
+#: the source WorkNode id. Full content stays intact on
+#: ``WorkNode.tool_result`` — downstream workers that actually need
+#: detail call ``get_node_context(node_id=...)`` to retrieve it. This
+#: stops a single 500 KB ``Read`` or ``tavily_research`` response from
+#: blowing the next llm_call's prompt budget before any compaction
+#: tier can kick in (tiers 1 / 2 only cover *ancestor* history, not a
+#: single oversized message written in the current turn).
+_TOOL_RESULT_INLINE_CAP = 30_000
+_TOOL_RESULT_PREVIEW_HEAD = 2_000
+
+
+def _maybe_truncate_tool_result(
+    content: str,
+    wn_id: str,
+    tool_name: str | None,
+) -> str:
+    """Head-truncate ``content`` if it exceeds the Tier 0 inline cap,
+    else return it verbatim. The truncated form is LLM-facing only —
+    the caller must preserve the original string on ``WorkNode.
+    tool_result`` so ``get_node_context`` can still return the full
+    body. See ``_TOOL_RESULT_INLINE_CAP`` for the trigger and the
+    rationale."""
+    if len(content) <= _TOOL_RESULT_INLINE_CAP:
+        return content
+    head = content[:_TOOL_RESULT_PREVIEW_HEAD]
+    tool_label = tool_name or "?"
+    remaining = len(content) - _TOOL_RESULT_PREVIEW_HEAD
+    return (
+        f"[tool_result preview — {tool_label} returned {len(content):,} "
+        f"characters; call get_node_context(node_id={wn_id!r}) for the "
+        f"full content.]\n\n"
+        f"{head}\n\n"
+        f"[… {remaining:,} more characters truncated. Full tool_result "
+        f"persists on WorkNode {wn_id}; use get_node_context to read it.]"
+    )
+
+
 def _rewrite_tagged_as_briefs(
     tagged: list[tuple[str | None, Message]],
     briefs_by_node: dict[str, str],
@@ -2511,7 +2552,9 @@ def _build_tagged_context_from_ancestors(
                         a.id,
                         ToolMessage(
                             tool_use_id=a.source_tool_use_id,
-                            content=a.tool_result.content,
+                            content=_maybe_truncate_tool_result(
+                                a.tool_result.content, a.id, a.tool_name
+                            ),
                         ),
                     )
                 )
