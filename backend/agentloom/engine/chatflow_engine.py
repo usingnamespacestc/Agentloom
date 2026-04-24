@@ -6243,9 +6243,66 @@ def build_inbound_context_segments(
                 segments.append(preserved_segment)
         start_idx = compact_cutoff_idx + 1
 
-    for nid in chain[start_idx:]:
+    # Pack substitutions mirror ``_build_chat_context``: for each
+    # post-cutoff pack ChatNode, emit one ``pack_summary`` segment at
+    # the first position of its packed range, mark every range member
+    # + the pack node itself as hidden so they don't also contribute
+    # ``ancestor`` segments. Pack only affects its own range; pre-pack
+    # ancestors in the same chain continue to emit normally (unlike
+    # compact which implicitly covers everything above).
+    pack_subs_at: dict[int, tuple[str, PackSnapshot]] = {}
+    hidden_chain_indices: set[int] = set()
+    for i in range(start_idx, len(chain)):
+        node_i = chatflow.nodes[chain[i]]
+        pack_snap = node_i.pack_snapshot
+        if pack_snap is not None and pack_snap.summary:
+            range_set = set(pack_snap.packed_range)
+            range_indices = [
+                j for j in range(start_idx, len(chain)) if chain[j] in range_set
+            ]
+            if range_indices:
+                pack_subs_at[min(range_indices)] = (chain[i], pack_snap)
+                hidden_chain_indices.update(range_indices)
+            # The pack node's own user/assistant is never emitted as an
+            # ancestor — the pack summary stands in for the whole range.
+            hidden_chain_indices.add(i)
+
+    for i in range(start_idx, len(chain)):
+        nid = chain[i]
         node = chatflow.nodes[nid]
         if not node.is_frozen:
+            continue
+        # Emit a pack_summary segment at the first index of each pack's
+        # range. Preserved messages (if any) follow as their own
+        # ``preserved`` segment so the UI can style them independently.
+        if i in pack_subs_at:
+            pack_nid, psnap = pack_subs_at[i]
+            segments.append(
+                InboundContextSegment(
+                    kind="pack_summary",
+                    messages=[
+                        WireMessage(
+                            role="user",
+                            content=(
+                                "[Packed range — summarized to save context]"
+                                f"\n\n{psnap.summary}"
+                            ),
+                        )
+                    ],
+                    source_node_id=pack_nid,
+                    synthetic=True,
+                )
+            )
+            if psnap.preserved_messages:
+                segments.append(
+                    InboundContextSegment(
+                        kind="preserved",
+                        messages=list(psnap.preserved_messages),
+                        source_node_id=pack_nid,
+                        synthetic=False,
+                    )
+                )
+        if i in hidden_chain_indices:
             continue
         # Post-cutoff compact ChatNode — same skip as the context
         # builder so its summary text doesn't leak twice.

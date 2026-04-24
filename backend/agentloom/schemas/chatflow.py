@@ -70,6 +70,11 @@ CompactPreserveMode = Literal["by_count", "by_budget"]
 #:   ancestors between the compact cutoff and the node being previewed
 #:   (exclusive on both ends). Empty list when the chain has no compact
 #:   cutoff — in that case every pre-node ancestor turns up here.
+#: - ``pack_summary``: synthetic summary for a pack ChatNode's packed
+#:   range. Emitted once at the range's earliest chain position; range
+#:   members and the pack ChatNode itself contribute no ``ancestor``
+#:   segment (the summary stands in for them). ``source_node_id``
+#:   points at the pack ChatNode.
 #: - ``sticky_restored``: synthetic user/assistant pairs re-materialised
 #:   from ``sticky_restored`` map of the primary parent. Marked
 #:   ``synthetic=True`` so the UI can render them distinctly (no id/
@@ -81,6 +86,7 @@ InboundContextSegmentKind = Literal[
     "summary_preamble",
     "preserved",
     "ancestor",
+    "pack_summary",
     "sticky_restored",
     "current_turn",
 ]

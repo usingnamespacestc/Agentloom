@@ -300,6 +300,7 @@ export type InboundContextSegmentKind =
   | "summary_preamble"
   | "preserved"
   | "ancestor"
+  | "pack_summary"
   | "sticky_restored"
   | "current_turn";
 
