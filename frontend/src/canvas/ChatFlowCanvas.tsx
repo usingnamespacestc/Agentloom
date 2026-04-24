@@ -129,6 +129,8 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
   const cancelPendingPack = useChatFlowStore((s) => s.cancelPendingPack);
   const foldChatNode = useChatFlowStore((s) => s.foldChatNode);
   const unfoldChatNode = useChatFlowStore((s) => s.unfoldChatNode);
+  const setFoldPosition = useChatFlowStore((s) => s.setFoldPosition);
+  const foldPositions = useChatFlowStore((s) => s.foldPositions);
 
   // Cursor position for the edge-hover tooltip — only tracked while an
   // edge is hovered, so we don't pay for global mousemove the rest of
@@ -395,6 +397,7 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
       contextWindowByModel,
       boardItems,
       foldedChatNodeIds,
+      foldPositions,
     );
     // Two-pass position merge: first resolve each real ChatNode's
     // effective position (drag override wins over laid-out), then snap
@@ -440,7 +443,7 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
     }));
     setNodes([...merged, ...stickyNodes]);
     setEdges(laid.edges);
-  }, [chatflow, selectedNodeId, contextWindowByModel, boardItems, foldedChatNodeIds, stickyNotes, editingStickyId, selectedStickyId, onNoteTitleChange, onNoteTextChange, onNoteDelete, syncTick]);
+  }, [chatflow, selectedNodeId, contextWindowByModel, boardItems, foldedChatNodeIds, foldPositions, stickyNotes, editingStickyId, selectedStickyId, onNoteTitleChange, onNoteTextChange, onNoteDelete, syncTick]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     const filtered = changes.filter((c) => c.type !== "select");
@@ -539,15 +542,23 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
     }
     if (isSticky(nid)) {
       updateStickyNote(node.id, { x: node.position.x, y: node.position.y });
-    } else if (!isBrief && !isFold) {
-      // Only real ChatNode positions hit the backend; folds stay
-      // ephemeral and briefs don't have a persisted shape.
+    } else if (isFold) {
+      // Fold nodes: persist to the store (→ localStorage) so the
+      // placement survives refresh. Host id = fold id stripped of
+      // the synthetic prefix.
+      const hostId = nid.slice(CHAT_FOLD_NODE_PREFIX.length);
+      setFoldPosition(hostId, {
+        x: node.position.x,
+        y: node.position.y,
+      });
+    } else if (!isBrief) {
+      // Real ChatNode: PATCH back to the server through dirty queue.
       dirtyPositions.current.add(node.id);
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(flushPositions, 500);
     }
     setSyncTick((t) => t + 1);
-  }, [flushPositions, updateStickyNote, isSticky]);
+  }, [flushPositions, updateStickyNote, isSticky, setFoldPosition]);
 
   const handleNodeClick: NodeMouseHandler = (_event, node) => {
     // Synthetic chat-brief / chat-fold nodes are view-only; clicking
@@ -1189,6 +1200,7 @@ export function buildGraph(
   contextWindowByModel: Record<string, number> = {},
   boardItems: Record<NodeId, BoardItem> = {},
   foldedChatNodeIds: Set<NodeId> = new Set(),
+  foldPositions: Record<NodeId, { x: number; y: number }> = {},
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): { nodes: Node<any>[]; edges: Edge[] } {
   if (!chatflow) return { nodes: [], edges: [] };
@@ -1273,7 +1285,6 @@ export function buildGraph(
   // the range on both canvas and edge routing.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const foldNodes: Node<any>[] = [];
-  const foldPositions = new Map<NodeId, { x: number; y: number }>();
   const FOLD_WIDTH = 160;
   const FOLD_GAP = 40;
   for (const [foldId, hostId] of fold.hostByFold) {
@@ -1283,14 +1294,15 @@ export function buildGraph(
     const hostKind: "compact" | "pack" = host?.pack_snapshot
       ? "pack"
       : "compact";
-    // Position: directly to the left of the host card, leaving a small
-    // gap. When the host is a pack (drops below its parent), we anchor
-    // slightly above so the fold still reads as "upstream of pack".
-    const foldPos = {
+    // Position: persisted user-drag (from the store's foldPositions
+    // map, keyed by host id) wins; else default to directly left of
+    // the host card with a small gap. When the host is a pack (drops
+    // below its parent), we anchor at the host's y so the fold still
+    // reads as "upstream of pack".
+    const foldPos = foldPositions[hostId] ?? {
       x: hostPos.x - FOLD_WIDTH - FOLD_GAP,
       y: hostPos.y,
     };
-    foldPositions.set(foldId, foldPos);
     foldNodes.push({
       id: foldId,
       type: "chatFold",

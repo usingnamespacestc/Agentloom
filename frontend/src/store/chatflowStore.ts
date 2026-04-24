@@ -64,6 +64,68 @@ export const RIGHT_PANEL_MIN = 320;
 export const RIGHT_PANEL_MAX = 900;
 const RIGHT_PANEL_DEFAULT = 440;
 
+// ---- Fold persistence (per-chatflow localStorage) --------------------
+//
+// Fold state (which compact/pack hosts are folded + where their
+// synthetic fold nodes have been user-dragged) survives refresh via
+// localStorage keyed by chatflow id. Keeping this separate from any
+// backend storage because (a) fold is a view-layer concern, not a
+// semantic one, and (b) it's per-user / per-device — two people on the
+// same chatflow shouldn't see each other's folds.
+
+const FOLD_STORAGE_KEY_PREFIX = "agentloom:fold:";
+
+function foldStorageKey(chatflowId: string): string {
+  return `${FOLD_STORAGE_KEY_PREFIX}${chatflowId}`;
+}
+
+export interface PersistedFoldState {
+  ids: NodeId[];
+  positions: Record<NodeId, { x: number; y: number }>;
+}
+
+function loadPersistedFoldState(chatflowId: string): PersistedFoldState {
+  try {
+    const raw = localStorage.getItem(foldStorageKey(chatflowId));
+    if (!raw) return { ids: [], positions: {} };
+    const parsed = JSON.parse(raw) as Partial<PersistedFoldState>;
+    return {
+      ids: Array.isArray(parsed.ids) ? parsed.ids : [],
+      positions: parsed.positions ?? {},
+    };
+  } catch {
+    return { ids: [], positions: {} };
+  }
+}
+
+function savePersistedFoldState(
+  chatflowId: string,
+  ids: Set<NodeId>,
+  positions: Record<NodeId, { x: number; y: number }>,
+): void {
+  try {
+    if (ids.size === 0 && Object.keys(positions).length === 0) {
+      localStorage.removeItem(foldStorageKey(chatflowId));
+      return;
+    }
+    localStorage.setItem(
+      foldStorageKey(chatflowId),
+      JSON.stringify({ ids: [...ids], positions } satisfies PersistedFoldState),
+    );
+  } catch {
+    // localStorage disabled / quota hit — silently degrade; fold state
+    // will revert to ephemeral for this session.
+  }
+}
+
+function clearPersistedFoldState(chatflowId: string): void {
+  try {
+    localStorage.removeItem(foldStorageKey(chatflowId));
+  } catch {
+    // ignore
+  }
+}
+
 export interface ChatFlowStoreState {
   /** Sidebar: list of chatflow summaries. */
   chatflowList: ChatFlowSummary[];
@@ -294,18 +356,29 @@ export interface ChatFlowStoreState {
   pendingPackStartId: NodeId | null;
 
   /** IDs of compact / pack ChatNodes whose covered range is currently
-   * visually folded on the canvas. Ephemeral — cleared on chatflow
-   * switch and never persisted. Edge semantics: range members are
-   * hidden from rfNodes, in/out edges are re-routed through the fold
-   * host (see ``buildGraph``). MemoryBoardPanel mirrors the hidden set
-   * as its filter — this is Route B: "fold IS the viewpoint gesture". */
+   * visually folded on the canvas. Persisted per-chatflow to
+   * ``localStorage`` under ``agentloom:fold:${chatflowId}`` so fold
+   * state survives a refresh. Edge semantics: range members are
+   * hidden from rfNodes, in/out edges are re-routed through a
+   * synthetic fold node positioned upstream of the host (see
+   * ``buildGraph``). MemoryBoardPanel mirrors the hidden set as its
+   * filter — Route B: "fold IS the viewpoint gesture". */
   foldedChatNodeIds: Set<NodeId>;
+  /** Persisted drag positions for synthetic fold nodes, keyed by the
+   * host ChatNode id (not the synthetic fold id). Stored alongside
+   * ``foldedChatNodeIds`` in localStorage so user-placed folds hold
+   * across refresh. Cleared on unfold / chatflow switch. */
+  foldPositions: Record<NodeId, { x: number; y: number }>;
   /** Mark ``chatNodeId`` as folded. Caller ensures it's a pack or
    * compact ChatNode (UI only exposes the action there). No-op if
-   * already folded. */
+   * already folded. Persists to localStorage. */
   foldChatNode: (chatNodeId: NodeId) => void;
-  /** Unfold ``chatNodeId``. No-op if not currently folded. */
+  /** Unfold ``chatNodeId``. No-op if not currently folded. Also drops
+   * any persisted fold position for that host. Persists. */
   unfoldChatNode: (chatNodeId: NodeId) => void;
+  /** Record a new drag position for the fold node representing
+   * ``hostId`` so refreshes restore the user's layout. Persists. */
+  setFoldPosition: (hostId: NodeId, pos: { x: number; y: number }) => void;
   /** Stash ``nodeId`` as the pack start. Toggle-off when called with
    * the same id twice. */
   beginPendingPack: (nodeId: NodeId) => void;
@@ -383,6 +456,7 @@ const INITIAL: Omit<
   | "commitPackTo"
   | "foldChatNode"
   | "unfoldChatNode"
+  | "setFoldPosition"
   | "applyEvent"
   | "setSSEFactory"
   | "refreshBoardItems"
@@ -401,6 +475,7 @@ const INITIAL: Omit<
   pendingMergeFirstId: null,
   pendingPackStartId: null,
   foldedChatNodeIds: new Set<NodeId>(),
+  foldPositions: {},
   drillStack: [],
   workflowSelectedNodeId: null,
   workflowBranchMemory: {},
@@ -579,6 +654,9 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
 
   async deleteChatFlow(id) {
     await api.deleteChatFlow(id);
+    // Garbage-collect the deleted chatflow's fold entry so the
+    // localStorage ledger doesn't accumulate dead keys over time.
+    clearPersistedFoldState(id);
     const current = get().chatflow;
     if (current?.id === id) {
       get().reset();
@@ -723,12 +801,37 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
       workflowSelectedNodeId: null,
       workflowBranchMemory: {},
       foldedChatNodeIds: new Set<NodeId>(),
+      foldPositions: {},
       sseSubscription: null,
     });
 
     try {
       const chat = await api.getChatFlow(id);
-      set({ chatflow: chat, loadState: "ready", boardItems: {} });
+      // Hydrate fold state from localStorage. Filter persisted ids
+      // against the current chatflow so a fold entry for a deleted
+      // ChatNode doesn't linger forever.
+      const persisted = loadPersistedFoldState(id);
+      const validFoldIds = new Set<NodeId>(
+        persisted.ids.filter((nid) => nid in chat.nodes),
+      );
+      const validFoldPositions: Record<NodeId, { x: number; y: number }> = {};
+      for (const [hostId, pos] of Object.entries(persisted.positions)) {
+        if (hostId in chat.nodes) validFoldPositions[hostId] = pos;
+      }
+      set({
+        chatflow: chat,
+        loadState: "ready",
+        boardItems: {},
+        foldedChatNodeIds: validFoldIds,
+        foldPositions: validFoldPositions,
+      });
+      // If anything was filtered out, compress the persisted blob.
+      if (
+        validFoldIds.size !== persisted.ids.length
+        || Object.keys(validFoldPositions).length !== Object.keys(persisted.positions).length
+      ) {
+        savePersistedFoldState(id, validFoldIds, validFoldPositions);
+      }
       const leaf = autoLeafForChatFlow(chat);
       if (leaf) get().selectNode(leaf);
       // Fetch the MemoryBoard cache in the background — canvas bubbles
@@ -769,6 +872,17 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
   },
 
   setChatFlow(chat) {
+    // Hydrate persisted fold state when a real chatflow is provided;
+    // a null reset still zeroes everything.
+    let foldedIds = new Set<NodeId>();
+    let foldPositions: Record<NodeId, { x: number; y: number }> = {};
+    if (chat) {
+      const persisted = loadPersistedFoldState(chat.id);
+      foldedIds = new Set(persisted.ids.filter((nid) => nid in chat.nodes));
+      for (const [hostId, pos] of Object.entries(persisted.positions)) {
+        if (hostId in chat.nodes) foldPositions[hostId] = pos;
+      }
+    }
     set({
       chatflow: chat,
       loadState: chat ? "ready" : "idle",
@@ -780,7 +894,8 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
       drillDownChatNodeId: null,
       workflowSelectedNodeId: null,
       workflowBranchMemory: {},
-      foldedChatNodeIds: new Set<NodeId>(),
+      foldedChatNodeIds: foldedIds,
+      foldPositions,
     });
     const leaf = autoLeafForChatFlow(chat);
     if (leaf) get().selectNode(leaf);
@@ -1166,19 +1281,37 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
   },
 
   foldChatNode(chatNodeId) {
-    const { foldedChatNodeIds } = get();
+    const { foldedChatNodeIds, foldPositions, chatflow } = get();
     if (foldedChatNodeIds.has(chatNodeId)) return;
     const next = new Set(foldedChatNodeIds);
     next.add(chatNodeId);
     set({ foldedChatNodeIds: next });
+    if (chatflow) savePersistedFoldState(chatflow.id, next, foldPositions);
   },
 
   unfoldChatNode(chatNodeId) {
-    const { foldedChatNodeIds } = get();
+    const { foldedChatNodeIds, foldPositions, chatflow } = get();
     if (!foldedChatNodeIds.has(chatNodeId)) return;
     const next = new Set(foldedChatNodeIds);
     next.delete(chatNodeId);
-    set({ foldedChatNodeIds: next });
+    // Drop the fold's persisted drag position too — an unfold wipes
+    // the visual state, and if the user re-folds later they'd rather
+    // see the computed default than a stale old position.
+    const nextPositions = { ...foldPositions };
+    delete nextPositions[chatNodeId];
+    set({ foldedChatNodeIds: next, foldPositions: nextPositions });
+    if (chatflow) savePersistedFoldState(chatflow.id, next, nextPositions);
+  },
+
+  setFoldPosition(hostId, pos) {
+    const { foldedChatNodeIds, foldPositions, chatflow } = get();
+    const existing = foldPositions[hostId];
+    if (existing && existing.x === pos.x && existing.y === pos.y) return;
+    const nextPositions = { ...foldPositions, [hostId]: pos };
+    set({ foldPositions: nextPositions });
+    if (chatflow) {
+      savePersistedFoldState(chatflow.id, foldedChatNodeIds, nextPositions);
+    }
   },
 
   async refreshChatFlow() {
