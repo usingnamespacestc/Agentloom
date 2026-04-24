@@ -446,19 +446,23 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
     const filtered = changes.filter((c) => c.type !== "select");
     if (filtered.length === 0) return;
     for (const c of filtered) {
-      // Synthetic chat-brief / chat-fold nodes are view-only; skip
-      // drag-position bookkeeping so we never try to PATCH a non-
-      // ChatNode id.
-      const isSyntheticId =
-        c.type === "position"
-        && (String(c.id).startsWith(CHAT_BRIEF_NODE_PREFIX)
-          || String(c.id).startsWith(CHAT_FOLD_NODE_PREFIX));
-      if (c.type === "position" && c.position && !isSyntheticId) {
-        dragPositions.current[c.id] = c.position;
-        if (isSticky(String(c.id))) {
-          updateStickyNote(c.id, { x: c.position.x, y: c.position.y });
-        } else {
-          dirtyPositions.current.add(c.id);
+      // Synthetic chat-brief nodes are computed from their source
+      // position each tick — skip drag bookkeeping entirely.
+      // Synthetic chat-fold nodes are user-draggable but ephemeral:
+      // record into ``dragPositions.current`` so the new position
+      // sticks across rebuilds, but skip ``dirtyPositions`` so we
+      // never try to PATCH a non-ChatNode id.
+      if (c.type === "position" && c.position) {
+        const cid = String(c.id);
+        const isBriefId = cid.startsWith(CHAT_BRIEF_NODE_PREFIX);
+        const isFoldId = cid.startsWith(CHAT_FOLD_NODE_PREFIX);
+        if (!isBriefId) {
+          dragPositions.current[c.id] = c.position;
+          if (isSticky(cid)) {
+            updateStickyNote(c.id, { x: c.position.x, y: c.position.y });
+          } else if (!isFoldId) {
+            dirtyPositions.current.add(c.id);
+          }
         }
       }
       if (c.type === "dimensions" && c.dimensions) {
@@ -525,15 +529,19 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
   const handleNodeDragStop: OnNodeDrag = useCallback((_event, node) => {
     isDragging.current = false;
     const nid = String(node.id);
-    const isSynthetic =
-      nid.startsWith(CHAT_BRIEF_NODE_PREFIX)
-      || nid.startsWith(CHAT_FOLD_NODE_PREFIX);
-    if (!isSynthetic) {
+    const isBrief = nid.startsWith(CHAT_BRIEF_NODE_PREFIX);
+    const isFold = nid.startsWith(CHAT_FOLD_NODE_PREFIX);
+    // Record the final drop for every draggable node except briefs
+    // (briefs recompute from source each tick — storing their
+    // position would clobber the follow-the-source behaviour).
+    if (!isBrief) {
       dragPositions.current[node.id] = { x: node.position.x, y: node.position.y };
     }
     if (isSticky(nid)) {
       updateStickyNote(node.id, { x: node.position.x, y: node.position.y });
-    } else if (!isSynthetic) {
+    } else if (!isBrief && !isFold) {
+      // Only real ChatNode positions hit the backend; folds stay
+      // ephemeral and briefs don't have a persisted shape.
       dirtyPositions.current.add(node.id);
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(flushPositions, 500);
@@ -1292,8 +1300,12 @@ export function buildGraph(
         hostKind,
         foldedCount: fold.countByFold.get(foldId) ?? 0,
       } satisfies ChatFoldNodeData,
+      // Selection stays off (right-click is the only interaction), but
+      // drag is allowed so users can reposition the fold to declutter
+      // crowded upstream layouts. Position is ephemeral — stored in
+      // ``dragPositions.current`` without hitting the backend.
       selectable: false,
-      draggable: false,
+      draggable: true,
     });
   }
 
