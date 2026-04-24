@@ -508,12 +508,29 @@ def _maybe_truncate_tool_result(
     the caller must preserve the original string on ``WorkNode.
     tool_result`` so ``get_node_context`` can still return the full
     body. See ``_TOOL_RESULT_INLINE_CAP`` for the trigger and the
-    rationale."""
+    rationale.
+
+    Emits an info-level log line on every trigger so operators can see
+    hit rate (grep ``tool_result_cap_triggered`` in ``backend.log``).
+    Used to decide whether the 30 KB default cap is too tight / loose
+    once real traffic lands."""
     if len(content) <= _TOOL_RESULT_INLINE_CAP:
         return content
     head = content[:_TOOL_RESULT_PREVIEW_HEAD]
     tool_label = tool_name or "?"
     remaining = len(content) - _TOOL_RESULT_PREVIEW_HEAD
+    reduction_pct = (
+        100.0 * (len(content) - _TOOL_RESULT_PREVIEW_HEAD) / len(content)
+    )
+    logging.getLogger(__name__).info(
+        "tool_result_cap_triggered: tool=%s wn_id=%s original=%d "
+        "preview=%d reduction=%.1f%%",
+        tool_label,
+        wn_id,
+        len(content),
+        _TOOL_RESULT_PREVIEW_HEAD,
+        reduction_pct,
+    )
     return (
         f"[tool_result preview — {tool_label} returned {len(content):,} "
         f"characters; call get_node_context(node_id={wn_id!r}) for the "
