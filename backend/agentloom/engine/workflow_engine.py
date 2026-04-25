@@ -2454,6 +2454,15 @@ def _maybe_prepend_runtime_note(
       access don't need the anti-hallucination framing — saves tokens
       and keeps cache prefix stable for those code paths).
     - Note is empty after strip (caller explicitly disabled).
+    - First message already IS the same runtime note (dedup): the
+      previous LLM call's saved ``input_messages`` already carry it,
+      and ``_build_tagged_context_from_ancestors`` reuses the most
+      recent DRAFT ancestor's ``input_messages`` as the seed for
+      tool-loop follow-ups, so prepending again would stack a new
+      copy each iteration. Observed 2026-04-25 on the v7 qwen36 run:
+      a worker draft 4 tool-loop iterations deep had 4 copies of
+      the runtime note as system messages [0..3]. Dedup keeps it at
+      exactly one copy per node's saved context.
 
     The note is fully pre-rendered by the caller (ChatFlowEngine
     combines static user text + dynamic OS / shell / cwd hints into
@@ -2468,6 +2477,15 @@ def _maybe_prepend_runtime_note(
         return messages
     text = (note or "").strip()
     if not text:
+        return messages
+    if (
+        messages
+        and isinstance(messages[0], SystemMessage)
+        and messages[0].content == text
+    ):
+        # Already-prepended (carried in via a saved ancestor's
+        # ``input_messages``); leave the seed alone instead of
+        # cascading into a stack of identical system messages.
         return messages
     return [SystemMessage(content=text), *messages]
 
