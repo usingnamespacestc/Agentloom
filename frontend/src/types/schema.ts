@@ -505,9 +505,14 @@ export interface BoardItem {
   description: string;
   fallback: boolean;
   created_at: string | null;
-  /** For ``source_kind === "chat_pack"`` rows: the ChatNode ids this
-   * pack covers. Empty on every non-pack row. Clients can use this to
-   * hide range-member rows when rendering the board panel from the
-   * pack's downstream view. */
-  pack_inner_ids?: NodeId[];
+  /** Drill-down ChatNode ids this item folds over. Populated for pack
+   * (``packed_range``), merge (parent ids), and compact (single-hop
+   * upstream parent — drill recurses through the next layer's own
+   * ``inner_chat_ids``). Empty on plain turn rows. */
+  inner_chat_ids?: NodeId[];
+  /** Drill-down WorkNode ids inside this ChatNode's WorkFlow that
+   * carry their own WorkBoardItem. Lets a downstream agent (including
+   * one in a different ChatNode's WorkFlow) pull a specific WorkNode's
+   * content via ``get_node_context`` without re-reading the full chain. */
+  work_node_ids?: NodeId[];
 }

@@ -314,6 +314,8 @@ def _make_board_writer(
         scope: str,
         description: str,
         fallback: bool,
+        inner_chat_ids: list[str] | None = None,
+        work_node_ids: list[str] | None = None,
     ) -> None:
         if chatflow_id is None:
             # Without a chatflow id we can't satisfy the board_items
@@ -331,6 +333,8 @@ def _make_board_writer(
                     scope=scope,
                     description=description,
                     fallback=fallback,
+                    inner_chat_ids=inner_chat_ids,
+                    work_node_ids=work_node_ids,
                 )
                 await session.commit()
         except Exception:  # noqa: BLE001 — board is best-effort
@@ -483,6 +487,98 @@ def _chat_board_description(node: ChatFlowNode) -> str:
     if not agent_snippet:
         return f"user asked: {user_snippet}"
     return f"user asked: {user_snippet}; agent: {agent_snippet}"
+
+
+def _collect_inner_chat_ids(node: ChatFlowNode) -> list[str] | None:
+    """Drill-down ChatNode ids this ChatNode aggregates over.
+
+    - ``chat_pack`` → full ``packed_range``.
+    - ``chat_merge`` → parent ids (the heads of the merged branches).
+    - ``chat_compact`` → single-hop primary parent. Compact implicitly
+      covers the whole root→here prefix; we deliberately store only one
+      hop so drill-down recurses (next layer is whatever that parent
+      was — turn/pack/compact/merge — and its own BoardItem advertises
+      *its* drill-down). Storing the full prefix would balloon the
+      column on long chains and make pack/merge inconsistent.
+    - plain turn → ``None`` (no aggregation).
+    """
+    if node.pack_snapshot is not None:
+        return list(node.pack_snapshot.packed_range) or None
+    if len(node.parent_ids) >= 2:
+        return list(node.parent_ids)
+    if node.compact_snapshot is not None:
+        return list(node.parent_ids[:1]) or None
+    return None
+
+
+def _collect_work_node_ids(node: ChatFlowNode) -> list[str] | None:
+    """WorkNode ids inside *node*'s WorkFlow that have a node-scope brief.
+
+    Filter rule: pick the parent of every successful ``BRIEF`` WorkNode
+    whose ``scope`` is ``NODE``. That's exactly the set of WorkNodes
+    a WorkBoardItem was written for — using "is the brief there?" as
+    the gate avoids chasing a separate "noteworthy node" criterion
+    and keeps the drill-down map in sync with what the MemoryBoard
+    actually indexes.
+    """
+    ids: list[str] = []
+    seen: set[str] = set()
+    for wn in node.workflow.nodes.values():
+        if wn.step_kind != StepKind.BRIEF:
+            continue
+        if wn.scope != NodeScope.NODE:
+            continue
+        if wn.status != NodeStatus.SUCCEEDED:
+            continue
+        if not wn.parent_ids:
+            continue
+        src_id = wn.parent_ids[0]
+        if src_id in seen:
+            continue
+        seen.add(src_id)
+        ids.append(src_id)
+    return ids or None
+
+
+def _drill_down_footer(
+    language: str,
+    inner_chat_ids: list[str] | None,
+    work_node_ids: list[str] | None,
+) -> str:
+    """Render the drill-down footer text appended to a ChatBoardItem
+    description so the LLM reading the board sees the ids it can pass
+    to ``get_node_context`` for the next layer.
+
+    Returns ``""`` (no separator, no header) when there's nothing to
+    drill into — caller can append unconditionally.
+    """
+    has_inner = bool(inner_chat_ids)
+    has_work = bool(work_node_ids)
+    if not has_inner and not has_work:
+        return ""
+    is_zh = (language or "").lower().startswith("zh")
+    lines: list[str] = []
+    if is_zh:
+        lines.append(
+            f"[drill-down: 内含 {len(inner_chat_ids) if has_inner else 0} 个 "
+            f"ChatNode / {len(work_node_ids) if has_work else 0} 个 WorkNode；"
+        )
+        if has_inner:
+            lines.append(f" ChatNode: {', '.join(inner_chat_ids)}")
+        if has_work:
+            lines.append(f" WorkNode: {', '.join(work_node_ids)}")
+        lines.append(" 详情请调 get_node_context(node_id='<id>')]")
+    else:
+        lines.append(
+            f"[drill-down: {len(inner_chat_ids) if has_inner else 0} inner "
+            f"ChatNode(s) / {len(work_node_ids) if has_work else 0} WorkNode(s);"
+        )
+        if has_inner:
+            lines.append(f" ChatNode: {', '.join(inner_chat_ids)}")
+        if has_work:
+            lines.append(f" WorkNode: {', '.join(work_node_ids)}")
+        lines.append(" Call get_node_context(node_id='<id>') for details.]")
+    return "\n".join(lines)
 
 
 class ChatFlowEngine:
@@ -1356,6 +1452,14 @@ class ChatFlowEngine:
             pack_node.status == NodeStatus.SUCCEEDED
             and self._inner._board_writer is not None
         ):
+            inner_chat_ids = _collect_inner_chat_ids(pack_node)
+            work_node_ids = _collect_work_node_ids(pack_node)
+            footer = _drill_down_footer(
+                self._current_fixture_language,
+                inner_chat_ids,
+                work_node_ids,
+            )
+            description = f"{summary}\n\n{footer}" if footer else summary
             try:
                 await self._inner._board_writer(
                     chatflow_id=chatflow.id,
@@ -1363,8 +1467,10 @@ class ChatFlowEngine:
                     source_node_id=pack_id,
                     source_kind="chat_pack",
                     scope="chat",
-                    description=summary,
+                    description=description,
                     fallback=False,
+                    inner_chat_ids=inner_chat_ids,
+                    work_node_ids=work_node_ids,
                 )
             except Exception:  # noqa: BLE001 — board is best-effort
                 log.exception(
@@ -4587,6 +4693,18 @@ class ChatFlowEngine:
         description, fallback = await self._render_chat_board_description(
             chatflow, node, source_kind
         )
+        # Drill-down pointers — collected fresh each upsert because pack
+        # range / merged parents / WorkBoard membership can shift
+        # between retries, and the writer is the source of truth.
+        inner_chat_ids = _collect_inner_chat_ids(node)
+        work_node_ids = _collect_work_node_ids(node)
+        footer = _drill_down_footer(
+            self._current_fixture_language,
+            inner_chat_ids,
+            work_node_ids,
+        )
+        if footer:
+            description = f"{description}\n\n{footer}" if description else footer
         try:
             await writer(
                 chatflow_id=chatflow.id,
@@ -4596,6 +4714,8 @@ class ChatFlowEngine:
                 scope="chat",
                 description=description,
                 fallback=fallback,
+                inner_chat_ids=inner_chat_ids,
+                work_node_ids=work_node_ids,
             )
         except Exception:  # noqa: BLE001 — board is best-effort
             log.exception(

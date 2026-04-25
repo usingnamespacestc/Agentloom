@@ -902,7 +902,7 @@ describe("buildGraph fold projection", () => {
         workflow_id: null,
         created_at: now,
         fallback: false,
-        pack_inner_ids: ["a"],
+        inner_chat_ids: ["a"],
       },
     };
     const folded = new Set<string>(["pack"]);

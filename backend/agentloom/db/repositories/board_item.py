@@ -31,6 +31,8 @@ class BoardItemRepository(WorkspaceScopedRepository):
         scope: NodeScope | str,
         description: str,
         fallback: bool = False,
+        inner_chat_ids: list[str] | None = None,
+        work_node_ids: list[str] | None = None,
     ) -> BoardItemRow:
         """Insert or update the BoardItem row keyed by ``source_node_id``.
 
@@ -38,6 +40,13 @@ class BoardItemRepository(WorkspaceScopedRepository):
         (e.g. a retry round) overwrites the description in place
         instead of cluttering the board with duplicate rows. Returns
         the resulting row — fresh id on insert, stable id on update.
+
+        ``inner_chat_ids`` and ``work_node_ids`` carry drill-down
+        pointers (see :class:`BoardItemRow` field docs); ``None`` keeps
+        the existing column ``NULL``. On update both fields are
+        overwritten from the call — the writer is the source of truth
+        each round, since drill-down membership can change between
+        retries (e.g. a pack range edit).
         """
         scope_value = scope.value if isinstance(scope, NodeScope) else scope
         stmt = (
@@ -56,6 +65,8 @@ class BoardItemRepository(WorkspaceScopedRepository):
                 scope=scope_value,
                 description=description,
                 fallback=fallback,
+                inner_chat_ids=inner_chat_ids,
+                work_node_ids=work_node_ids,
             )
             self.session.add(row)
         else:
@@ -65,6 +76,8 @@ class BoardItemRepository(WorkspaceScopedRepository):
             row.scope = scope_value
             row.description = description
             row.fallback = fallback
+            row.inner_chat_ids = inner_chat_ids
+            row.work_node_ids = work_node_ids
         await self.session.flush()
         return row
 

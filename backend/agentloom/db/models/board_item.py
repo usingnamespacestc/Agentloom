@@ -73,6 +73,21 @@ class BoardItemRow(Base):
     #: template (tool_call source or LLM failure fallback) rather than
     #: a live LLM call. Lets downstream consumers weigh reliability.
     fallback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    #: ChatNode ids this item folds over — set on rows that aggregate
+    #: a range of ChatNodes (pack: full ``packed_range``; merge: parent
+    #: ids; compact: single-hop upstream parent so drill unfolds via
+    #: recursion). ``NULL`` on plain turn rows and on WorkBoard rows.
+    inner_chat_ids: Mapped[list[Any] | None] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"), nullable=True, default=None
+    )
+    #: WorkNode ids inside this ChatNode's WorkFlow that have their own
+    #: WorkBoardItem — drill-down pointers from ChatBoard into specific
+    #: WorkNodes (e.g. so an external ChatNode's WorkNode can pull a
+    #: sibling ChatNode's tool_call result via ``get_node_context``).
+    #: ``NULL`` when no node-scope briefs were written for this turn.
+    work_node_ids: Mapped[list[Any] | None] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"), nullable=True, default=None
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow
     )

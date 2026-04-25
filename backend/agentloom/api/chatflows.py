@@ -389,32 +389,15 @@ async def list_chatflow_board_items(
     ``{"items": [...]}`` to leave room for pagination metadata later
     without a breaking rev of the response envelope.
 
-    For pack rows (``source_kind == "chat_pack"``) the response is
-    enriched with ``pack_inner_ids`` — the ``packed_range`` pulled off
-    the pack ChatNode's ``pack_snapshot`` so the client can implement
-    "from pack and its downstream, hide board rows whose source_node_id
-    is in pack_inner_ids" without re-walking the chatflow payload.
-    Empty list on every non-pack row.
+    Each row carries the drill-down id pointers it was written with:
+    ``inner_chat_ids`` for pack/merge/compact rows (the ChatNodes the
+    item folds over) and ``work_node_ids`` for any chat row whose
+    ChatNode's WorkFlow produced node-scope briefs. Both default to
+    empty list when ``NULL`` on the row so frontend code can rely on
+    iteration without null-guards.
     """
     repo = BoardItemRepository(session, workspace_id=DEFAULT_WORKSPACE_ID)
     rows = await repo.list_by_chatflow(chatflow_id)
-
-    pack_inner: dict[str, list[str]] = {}
-    if any(r.source_kind == "chat_pack" for r in rows):
-        cf_repo = _repo(session)
-        try:
-            chat = await cf_repo.get(chatflow_id)
-        except ChatFlowNotFoundError:
-            chat = None
-        if chat is not None:
-            for row in rows:
-                if row.source_kind != "chat_pack":
-                    continue
-                cn = chat.nodes.get(row.source_node_id)
-                if cn is not None and cn.pack_snapshot is not None:
-                    pack_inner[row.source_node_id] = list(
-                        cn.pack_snapshot.packed_range
-                    )
 
     items = [
         {
@@ -427,7 +410,8 @@ async def list_chatflow_board_items(
             "description": row.description,
             "fallback": row.fallback,
             "created_at": row.created_at.isoformat() if row.created_at else None,
-            "pack_inner_ids": pack_inner.get(row.source_node_id, []),
+            "inner_chat_ids": list(row.inner_chat_ids or []),
+            "work_node_ids": list(row.work_node_ids or []),
         }
         for row in rows
     ]
