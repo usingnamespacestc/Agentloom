@@ -154,6 +154,82 @@ def _extract_json_object(text: str) -> str:
     return stripped[first : last + 1]
 
 
+def planner_grammar_schema() -> dict[str, Any]:
+    """JSON Schema for ``response_format`` enforcement at decoder level.
+
+    Distinct from ``RecursivePlannerOutput.model_json_schema()``: the
+    Pydantic-derived schema only marks ``mode`` required and treats
+    ``atomic`` / ``subtasks`` / ``reason`` as independently optional —
+    the cross-field constraint ("if mode=atomic, atomic body must be
+    populated") lives in the Pydantic ``@model_validator(mode="after")``
+    hook, which is Python runtime code, not JSON Schema. Provider-side
+    grammar engines (llama.cpp ``response_format=json_schema``,
+    OpenAI structured outputs) honor only the static JSON Schema, so
+    feeding them the Pydantic-derived shape lets weak models output
+    ``{"mode": "atomic"}`` with no ``atomic`` body and pass the
+    decoder check.
+
+    Discriminated ``oneOf`` keyed on ``mode`` makes the cross-field
+    constraint statically expressible: each branch fixes ``mode`` to
+    a constant and lists the body field as required. llama.cpp's
+    grammar engine compiles this into a token-level constraint that
+    physically prevents the missing-body class of error.
+
+    Used by ``WorkflowEngine._run_llm_call`` for planner WorkNodes.
+    Other callers (parsing, tests, debugging) keep using
+    ``RecursivePlannerOutput.model_json_schema()`` — the runtime
+    Pydantic validator catches anything that slips through.
+    """
+    pyd_schema = RecursivePlannerOutput.model_json_schema()
+    defs = pyd_schema.get("$defs", {})
+    return {
+        "title": "RecursivePlannerOutput",
+        "$defs": defs,
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "reasoning": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                    },
+                    "mode": {"const": "atomic"},
+                    "atomic": {"$ref": "#/$defs/AtomicBrief"},
+                },
+                "required": ["mode", "atomic"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "reasoning": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                    },
+                    "mode": {"const": "decompose"},
+                    "subtasks": {
+                        "type": "array",
+                        "items": {"$ref": "#/$defs/SubTask"},
+                        "minItems": 1,
+                    },
+                },
+                "required": ["mode", "subtasks"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "reasoning": {
+                        "anyOf": [{"type": "string"}, {"type": "null"}],
+                    },
+                    "mode": {"const": "infeasible"},
+                    "reason": {"type": "string", "minLength": 1},
+                },
+                "required": ["mode", "reason"],
+                "additionalProperties": False,
+            },
+        ],
+    }
+
+
 def parse_recursive_planner_output(raw: str) -> RecursivePlannerOutput:
     """Parse *raw* assistant output into a :class:`RecursivePlannerOutput`.
 

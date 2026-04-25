@@ -69,19 +69,28 @@ async def _orphan_watchdog(
             raise
         try:
             engine = getattr(app.state, "chatflow_engine", None)
-            active_ids: set[str] = (
-                engine.active_chatflow_ids() if engine is not None else set()
+            # Use ``attached_chatflow_ids`` rather than
+            # ``active_chatflow_ids``: a long-running turn (qwen36
+            # auto_plan can take minutes) has transient windows where
+            # ``active_tasks`` is momentarily empty between scheduler
+            # task transitions. Watchdog using the narrower set in
+            # those windows would write ``status=failed`` rows and
+            # the eventual succeeded save would trip frozen-guard.
+            # Attach lifecycle is the right granularity — once a
+            # chatflow has a runtime, it's engine-owned end-to-end.
+            attached_ids: set[str] = (
+                engine.attached_chatflow_ids() if engine is not None else set()
             )
             cleaned = await sweep_orphaned_running_nodes(
                 get_session_maker(),
-                skip_chatflow_ids=active_ids,
+                skip_chatflow_ids=attached_ids,
             )
             if cleaned:
                 log.info(
                     "orphan_watchdog: cleaned %d stale node(s) "
-                    "(skipped %d active chatflow(s))",
+                    "(skipped %d attached chatflow(s))",
                     cleaned,
-                    len(active_ids),
+                    len(attached_ids),
                 )
         except asyncio.CancelledError:
             raise

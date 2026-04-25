@@ -789,15 +789,34 @@ class ChatFlowEngine:
 
     def active_chatflow_ids(self) -> set[str]:
         """Return chatflow ids whose runtime currently has at least one
-        non-done scheduler task. Used by the orphan watchdog to skip
-        legitimately-in-flight chatflows when periodically sweeping
-        stale RUNNING/RETRYING state — otherwise a running turn could
-        get flipped to FAILED mid-execution."""
+        non-done scheduler task. Narrower than :meth:`attached_chatflow_ids`
+        — kept for callers that explicitly want "is there work in
+        flight right now". Most callers want
+        :meth:`attached_chatflow_ids` instead."""
         return {
             cf_id
             for cf_id, rt in self._runtimes.items()
             if any(not t.done() for t in rt.active_tasks)
         }
+
+    def attached_chatflow_ids(self) -> set[str]:
+        """Return chatflow ids that currently have an attached runtime.
+
+        Used by the orphan watchdog as the skip-set: once a chatflow is
+        in the runtime registry, the engine owns its in-flight nodes
+        across the full lifecycle — including the transient gaps
+        between asyncio tasks (e.g. while a turn is mid-LLM-call but
+        the immediate scheduler task has briefly returned to wait on
+        a child). :meth:`active_chatflow_ids` is too narrow for that
+        skip-set: it misses those gaps, the watchdog then writes
+        ``status=failed`` rows to DB, and when the turn eventually
+        completes the engine's later ``save`` trips frozen-guard
+        because the in-memory ``status=succeeded`` doesn't match the
+        DB-snapshotted ``status=failed`` — observed 2026-04-25 on the
+        v6 qwen36 run, where multi-minute auto_plan turns hit the gap
+        repeatedly. Detach is the formal lifecycle exit; everything
+        before that is engine-owned."""
+        return set(self._runtimes.keys())
 
     async def detach(self, chatflow_id: str, *, cancel: bool = False) -> None:
         async with self._registry_lock:
@@ -3531,6 +3550,27 @@ class ChatFlowEngine:
         try:
             plan = parse_recursive_planner_output(planner_node.output_message.content)
         except PlannerParseError as exc:
+            # Ops-facing hint: parse failures usually mean the model
+            # picked ``mode: atomic`` (or decompose) but skipped the
+            # required body. ``response_format=json_schema`` enforced at
+            # provider level prevents this physically — the gate in
+            # openai_compat.py only emits it when the per-model
+            # ``json_mode`` is set to ``"schema"``. Surface the tip in
+            # the log so anyone debugging a parse_error halt sees the
+            # config knob without needing to read the source.
+            log.warning(
+                "planner_parse_error: workflow=%s planner=%s — %s. "
+                "Tip: configure the model's ``json_mode`` to ``schema`` "
+                "in its ProviderConfig to enforce the planner schema at "
+                "decoding time and prevent this class of error. Eligible "
+                "providers (no-tools paths): all openai_compat sub_kinds "
+                "(openai_chat / volcengine / ollama / llamacpp); "
+                "tools+schema coexistence currently allow-listed for "
+                "openai_chat and volcengine only.",
+                workflow.id,
+                planner_node.id,
+                exc,
+            )
             planner_count = sum(
                 1 for n in workflow.nodes.values()
                 if n.role == WorkNodeRole.PLAN
@@ -3541,10 +3581,8 @@ class ChatFlowEngine:
                     planner_judge_node,
                     resolved_model=resolved_model,
                     prior_plan=planner_node.output_message.content,
-                    critique=(
-                        f"Your previous plan output failed JSON parse: {exc}. "
-                        "Reply with ONLY valid JSON matching the required "
-                        "schema — all string values must be properly quoted."
+                    critique=_compose_planner_retry_critique(
+                        exc, planner_judge_node
                     ),
                 )
                 return
@@ -5127,6 +5165,49 @@ def _render_critiques(verdict: JudgeVerdict) -> str:
         ensure_ascii=False,
         indent=2,
     )
+
+
+def _compose_planner_retry_critique(
+    parse_exc: "PlannerParseError",
+    planner_judge_node: "WorkFlowNode | None",
+) -> str:
+    """Build the retry critique for a planner whose output failed schema
+    validation.
+
+    Originally there were two parallel feedback channels: when plan_judge
+    voted ``revise`` we passed its ``critiques`` / ``user_message`` to the
+    next planner; but when the parser raised ``PlannerParseError`` first
+    we used a generic "your JSON failed to parse" string and silently
+    dropped plan_judge's qualitative review. For weak models that
+    sometimes select ``mode=atomic`` but forget to fill the ``atomic``
+    body, having both signals (the precise schema error AND any
+    qualitative note the judge already wrote) maximizes the chance the
+    retry succeeds. Both are appended when available; the schema error
+    always leads.
+    """
+    parts: list[str] = [
+        f"Your previous plan output failed JSON parse: {parse_exc}.",
+        (
+            "Reply with ONLY valid JSON matching the required schema — "
+            "every required field for the chosen mode must be populated. "
+            "If you pick ``mode: atomic`` you MUST also fill the "
+            "``atomic`` object (step_kind/description/expected_outcome); "
+            "if you pick ``mode: decompose`` you MUST also fill the "
+            "``subtasks`` array."
+        ),
+    ]
+    if planner_judge_node is not None:
+        verdict = planner_judge_node.judge_verdict
+        if verdict is not None:
+            rendered = _render_critiques(verdict)
+            if rendered:
+                parts.append(
+                    f"Reviewer's structured critiques (JSON list):\n{rendered}"
+                )
+            msg = (verdict.user_message or "").strip()
+            if msg:
+                parts.append(f"Reviewer's qualitative note: {msg}")
+    return "\n\n".join(parts)
 
 
 def _collect_debate_concerns(

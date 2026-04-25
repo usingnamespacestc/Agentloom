@@ -38,7 +38,10 @@ from agentloom.engine.judge_parser import (
     parse_judge_verdict,
 )
 from agentloom.engine.model_resolution import effective_model_for
-from agentloom.engine.recursive_planner_parser import RecursivePlannerOutput
+from agentloom.engine.recursive_planner_parser import (
+    RecursivePlannerOutput,
+    planner_grammar_schema,
+)
 from agentloom.providers.types import (
     AssistantMessage,
     ChatResponse,
@@ -1368,8 +1371,14 @@ class WorkflowEngine:
         # decompose" nodes — they never actually call a tool — so tools
         # can safely be suppressed on this path.
         is_planner = node.role == WorkNodeRole.PLAN
+        # Use the discriminated-oneOf schema (mode→body cross-field
+        # constraint statically encoded) for the wire — the
+        # Pydantic-derived schema only marks ``mode`` required and is
+        # too permissive for grammar-constrained decoders. Pydantic's
+        # runtime validator still catches any output that slips
+        # through. See ``planner_grammar_schema``.
         planner_schema: dict[str, Any] | None = (
-            RecursivePlannerOutput.model_json_schema() if is_planner else None
+            planner_grammar_schema() if is_planner else None
         )
         await self._invoke_and_freeze(
             workflow, node, expose_tools=not is_planner, json_schema=planner_schema
