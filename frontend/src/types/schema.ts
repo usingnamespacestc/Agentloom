@@ -404,6 +404,13 @@ export interface ChatFlow {
    * ``draft_model``'s. */
   brief_model: ProviderModelRef | null;
   default_execution_mode: ExecutionMode;
+  /** User-editable anti-hallucination guidance prepended to every
+   * tool-bearing LLM call. ``null`` = use the workspace-language
+   * default (zh/en); ``""`` = explicit opt-out of static framing.
+   * Engine still appends a dynamic OS / shell / cwd hint either way.
+   * Optional in TS so legacy chatflow fixtures pre-2026-04-25 can omit
+   * the field; production payloads always include it. */
+  runtime_environment_note?: string | null;
   /** Hard cap on judge_post retry rounds. ``-1`` means unlimited. */
   judge_retry_budget: number;
   /**

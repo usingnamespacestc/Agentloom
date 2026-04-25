@@ -540,6 +540,85 @@ def _collect_work_node_ids(node: ChatFlowNode) -> list[str] | None:
     return ids or None
 
 
+#: Built-in default for ``ChatFlow.runtime_environment_note`` — prepended
+#: to every tool-bearing LLM call to push back on the "I don't have access
+#: to your filesystem" hallucination some general-purpose models fall into
+#: under long prompts. ChatFlowEngine selects the zh-CN vs en-US variant
+#: based on the workspace fixture language. Users override per-chatflow
+#: via the field on :class:`ChatFlow`.
+_DEFAULT_RUNTIME_NOTE_ZH = (
+    "[运行环境]\n"
+    "你运行在 Agentloom 工作流引擎里，是真实工具调用 agent，不是云端对话助手。\n"
+    "\n"
+    "- 你的可用工具列表已在系统消息的 tools 字段里声明，这些工具**真实可调**——"
+    "发起工具调用后引擎会真的执行（读文件 / 写文件 / 查询 / ...）并把结果以 "
+    "tool message 返回。\n"
+    "- 不论你的角色是 worker / judge / monitor / brief，需要外部信息或副作用时"
+    "**直接发起工具调用**，不要回复\"我无访问权限\"、\"请粘贴文件内容\"、"
+    "\"作为 AI 我无法...\"。这些回复在本环境里是错误行为。\n"
+    "- 工具调用失败时，错误信息会通过 tool_result 返回；按错误调整后续步骤，"
+    "不要因单次失败放弃任务。"
+)
+
+_DEFAULT_RUNTIME_NOTE_EN = (
+    "[Runtime Environment]\n"
+    "You are running inside the Agentloom workflow engine — a real "
+    "tool-calling agent, not a cloud chat assistant.\n"
+    "\n"
+    "- The tools declared in the system `tools` field are **real and "
+    "callable**. When you emit a tool call, the engine will actually "
+    "execute it (read, write, search, ...) and return the result as a "
+    "tool message.\n"
+    "- Regardless of your role (worker / judge / monitor / brief), "
+    "when the task needs external information or side effects, **issue "
+    "a tool call**. Do NOT reply \"I don't have access\", \"please "
+    "paste the file contents\", or \"as an AI I cannot ...\". Those "
+    "responses are errors in this environment.\n"
+    "- Tool failures arrive as tool_result with an error message. "
+    "Adapt to the error; don't abandon the task on a single failure."
+)
+
+
+def _render_runtime_system_info(
+    language: str,
+    disabled_tool_names: list[str] | frozenset[str],
+) -> str:
+    """Dynamic OS / shell / cwd hint appended to the runtime note.
+
+    Cache-friendly by design: nothing here changes per LLM call —
+    OS / shell strings are stable across the backend process; the
+    Bash-disabled flag only flips when the user edits chatflow tool
+    settings (rare). No timestamp is included, deliberately, so the
+    KV-cache prefix stays warm across calls within a session.
+    """
+    import os
+    import platform
+
+    os_name = platform.platform(terse=True)
+    shell = (
+        os.environ.get("SHELL")
+        or os.environ.get("ComSpec")
+        or "/bin/sh"
+    )
+    bash_disabled = "Bash" in (disabled_tool_names or [])
+    is_zh = (language or "").lower().startswith("zh")
+    if is_zh:
+        bash_note = "（Bash 工具当前禁用，路径用 POSIX 风格）" if bash_disabled else ""
+        return (
+            "[系统信息]\n"
+            f"- OS: {os_name}\n"
+            f"- Shell: {shell}{bash_note}\n"
+            "- ChatFlow 没有绑定特定 cwd——文件路径请使用绝对路径"
+        )
+    bash_note = " (Bash tool currently disabled; use POSIX-style paths)" if bash_disabled else ""
+    return (
+        "[System Info]\n"
+        f"- OS: {os_name}\n"
+        f"- Shell: {shell}{bash_note}\n"
+        "- ChatFlow has no bound cwd — use absolute paths for files"
+    )
+
+
 def _drill_down_footer(
     language: str,
     inner_chat_ids: list[str] | None,
@@ -664,6 +743,29 @@ class ChatFlowEngine:
     def _fixture_includes(self) -> dict[str, str]:
         """Active-language include-fragment texts keyed by fragment name."""
         return self._fixture_includes_by_lang[self._current_fixture_language]
+
+    def _resolve_runtime_note(self, chatflow: ChatFlow) -> str:
+        """Build the final runtime-environment note prepended to every
+        tool-bearing LLM call inside this chatflow's WorkFlow runs.
+
+        Combines the user-editable static text (or the workspace-language
+        default if the chatflow's field is ``None``) with a dynamic
+        OS/shell/cwd hint. Both halves are cache-friendly: the static
+        text is stable until the user edits it; the dynamic block has
+        no per-call variability (no timestamps, no per-turn ids).
+        Returns an empty string when the user explicitly cleared their
+        note **and** no system info is available — the engine treats
+        empty as "skip the prepend".
+        """
+        lang = self._current_fixture_language
+        is_zh = (lang or "").lower().startswith("zh")
+        static = chatflow.runtime_environment_note
+        if static is None:
+            static = _DEFAULT_RUNTIME_NOTE_ZH if is_zh else _DEFAULT_RUNTIME_NOTE_EN
+        static = (static or "").strip()
+        sysinfo = _render_runtime_system_info(lang, chatflow.disabled_tool_names)
+        parts = [p for p in (static, sysinfo) if p]
+        return "\n\n".join(parts)
 
     # ------------------------------------------------------------------ registry
 
@@ -1381,6 +1483,7 @@ class ChatFlowEngine:
                 # Pack is single-shot; auto-compacting its own input
                 # would recurse uselessly.
                 chatflow_compact_trigger_pct=None,
+                chatflow_runtime_environment_note=self._resolve_runtime_note(chatflow),
                 chatflow_id=chatflow.id,
                 disabled_tool_names=effective_disabled,
             )
@@ -1602,6 +1705,7 @@ class ChatFlowEngine:
                 # ChatFlow turns re-read the chatflow settings on their
                 # own execute() and re-enable Tier 1 normally.
                 chatflow_compact_trigger_pct=None,
+                chatflow_runtime_environment_note=self._resolve_runtime_note(chatflow),
                 chatflow_id=chatflow.id,
                 disabled_tool_names=effective_disabled,
             )
@@ -2187,6 +2291,7 @@ class ChatFlowEngine:
                 # would fire on a prompt that isn't shaped like a
                 # conversation (it's templated as two big text blobs).
                 chatflow_compact_trigger_pct=None,
+                chatflow_runtime_environment_note=self._resolve_runtime_note(chatflow),
                 chatflow_id=chatflow.id,
                 disabled_tool_names=effective_disabled,
             )
@@ -4370,6 +4475,7 @@ class ChatFlowEngine:
                 chatflow_compact_keep_recent_count=chatflow.compact_keep_recent_count,
                 chatflow_compact_preserve_mode=chatflow.compact_preserve_mode,
                 chatflow_compact_model=chatflow.compact_model,
+                chatflow_runtime_environment_note=self._resolve_runtime_note(chatflow),
                 chatflow_id=chatflow.id,
                 post_node_hook=(
                     None
@@ -4418,6 +4524,7 @@ class ChatFlowEngine:
                 try:
                     await self._inner.execute(
                         chat_node.workflow,
+                        chatflow_runtime_environment_note=self._resolve_runtime_note(chatflow),
                         chatflow_id=chatflow.id,
                         disabled_tool_names=effective_disabled,
                     )

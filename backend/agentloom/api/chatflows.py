@@ -464,6 +464,7 @@ class PatchChatFlowRequest(BaseModel):
     tool_loop_budget: int | None = None
     auto_mode_revise_budget: int | None = None
     judge_retry_budget: int | None = None
+    runtime_environment_note: str | None = None
     min_ground_ratio: float | None = None
     ground_ratio_grace_nodes: int | None = None
     disabled_tool_names: list[str] | None = None
@@ -510,6 +511,8 @@ async def patch_chatflow(
         kwargs["auto_mode_revise_budget"] = body.auto_mode_revise_budget
     if "judge_retry_budget" in provided:
         kwargs["judge_retry_budget"] = body.judge_retry_budget
+    if "runtime_environment_note" in provided:
+        kwargs["runtime_environment_note"] = body.runtime_environment_note
     if "min_ground_ratio" in provided:
         kwargs["min_ground_ratio"] = body.min_ground_ratio
     if "ground_ratio_grace_nodes" in provided:
@@ -567,6 +570,10 @@ async def patch_chatflow(
             rt_chat.auto_mode_revise_budget = body.auto_mode_revise_budget
         if "judge_retry_budget" in provided and body.judge_retry_budget is not None:
             rt_chat.judge_retry_budget = body.judge_retry_budget
+        if "runtime_environment_note" in provided:
+            # None and "" are both legal: None → fall back to default,
+            # "" → user opted out of the static framing. Mirror verbatim.
+            rt_chat.runtime_environment_note = body.runtime_environment_note
         if "min_ground_ratio" in provided:
             # None is a legal value here (= disable the fuse), so we
             # mirror it through verbatim rather than checking not None.

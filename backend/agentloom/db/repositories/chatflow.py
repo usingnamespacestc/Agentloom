@@ -130,6 +130,7 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         tool_loop_budget: int | None = ...,  # type: ignore[assignment]
         auto_mode_revise_budget: int | None = ...,  # type: ignore[assignment]
         judge_retry_budget: int | None = ...,  # type: ignore[assignment]
+        runtime_environment_note: str | None = ...,  # type: ignore[assignment]
         min_ground_ratio: float | None = ...,  # type: ignore[assignment]
         ground_ratio_grace_nodes: int | None = ...,  # type: ignore[assignment]
         disabled_tool_names: list[str] | None = ...,  # type: ignore[assignment]
@@ -202,6 +203,11 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         if judge_retry_budget is not ...:
             if judge_retry_budget is not None:
                 payload["judge_retry_budget"] = judge_retry_budget
+        if runtime_environment_note is not ...:
+            # None and "" are both legal:
+            #   None → fall back to backend default at injection time
+            #   ""   → user opted out of static framing (sysinfo only)
+            payload["runtime_environment_note"] = runtime_environment_note
         if min_ground_ratio is not ...:
             payload["min_ground_ratio"] = min_ground_ratio
         if ground_ratio_grace_nodes is not ...:

@@ -55,6 +55,14 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
   // draft_cw) is enforced on the backend at save time, so users see
   // any violation as a 400 from the PATCH call.
   const [briefModelKey, setBriefModelKey] = useState("");
+  // Runtime environment note prepended to every tool-bearing LLM call.
+  // ``null`` field on the chatflow → use backend default; ``""`` →
+  // user explicitly cleared the static framing (system info still
+  // injected). The textarea can't represent ``null`` directly, so we
+  // track an extra flag to distinguish "not yet edited (use default)"
+  // from "edited to empty string".
+  const [runtimeNoteText, setRuntimeNoteText] = useState("");
+  const [runtimeNoteCustomized, setRuntimeNoteCustomized] = useState(false);
   const [retryBudgetStr, setRetryBudgetStr] = useState("");
   const [minGroundRatioPctStr, setMinGroundRatioPctStr] = useState("");
   const [groundGraceStr, setGroundGraceStr] = useState("");
@@ -127,6 +135,12 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
       setToolCallModelKey(refKey(chatflow?.default_tool_call_model ?? null));
       setBriefModelKey(refKey(chatflow?.brief_model ?? null));
       setRetryBudgetStr(String(chatflow?.judge_retry_budget ?? 3));
+      // Runtime environment note hydrate. ``null`` → unedited / use
+      // backend default (textarea blank, "use default" hint shown);
+      // any string (including "") → user-edited.
+      const note = chatflow?.runtime_environment_note;
+      setRuntimeNoteText(note ?? "");
+      setRuntimeNoteCustomized(note != null);
       // min_ground_ratio is stored as a 0-1 fraction but surfaced to
       // the user as a 0-100 percentage. ``null`` means "fuse disabled"
       // and shows as an empty input.
@@ -330,11 +344,18 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
         Number.isFinite(chatnodeTgtParsed) && chatnodeTgtParsed >= 1 && chatnodeTgtParsed <= 95
           ? chatnodeTgtParsed / 100
           : (chatflow?.chatnode_compact_target_pct ?? 0.4);
+      // runtime_environment_note: send null when the user hasn't edited
+      // (keep backend default lookup); send the typed string otherwise
+      // (including empty string for explicit opt-out of the static framing).
+      const noteForPatch: string | null = runtimeNoteCustomized
+        ? runtimeNoteText
+        : null;
       await patchChatFlow({
         draft_model: parseRefKey(modelKey),
         default_judge_model: parseRefKey(judgeModelKey),
         default_tool_call_model: parseRefKey(toolCallModelKey),
         brief_model: parseRefKey(briefModelKey),
+        runtime_environment_note: noteForPatch,
         judge_retry_budget: budget,
         min_ground_ratio: minGroundRatio,
         ground_ratio_grace_nodes: groundGrace,
@@ -497,6 +518,47 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
                   <p className="mt-1 text-[10px] text-gray-400">
                     {t("chatflow_settings.ground_ratio_grace_nodes_hint")}
                   </p>
+                </label>
+
+                <label className="block">
+                  <span className="flex items-center justify-between text-[11px] font-medium text-gray-500">
+                    {t("chatflow_settings.runtime_environment_note")}
+                    {!runtimeNoteCustomized && (
+                      <span className="ml-2 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-normal text-gray-500">
+                        {t("chatflow_settings.runtime_environment_note_default")}
+                      </span>
+                    )}
+                  </span>
+                  <textarea
+                    rows={6}
+                    value={runtimeNoteText}
+                    onChange={(e) => {
+                      setRuntimeNoteText(e.target.value);
+                      setRuntimeNoteCustomized(true);
+                    }}
+                    placeholder={t(
+                      "chatflow_settings.runtime_environment_note_placeholder",
+                    )}
+                    data-testid="runtime-environment-note-input"
+                    className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-gray-700 focus:border-blue-400 focus:outline-none"
+                  />
+                  <div className="mt-1 flex items-center justify-between">
+                    <p className="text-[10px] text-gray-400">
+                      {t("chatflow_settings.runtime_environment_note_hint")}
+                    </p>
+                    {runtimeNoteCustomized && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRuntimeNoteText("");
+                          setRuntimeNoteCustomized(false);
+                        }}
+                        className="text-[10px] text-blue-500 hover:underline"
+                      >
+                        {t("chatflow_settings.runtime_environment_note_reset")}
+                      </button>
+                    )}
+                  </div>
                 </label>
               </div>
             )}

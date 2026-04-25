@@ -847,6 +847,14 @@ class WorkflowEngine:
         self._effective_compact_keep_recent_count: int = compact_keep_recent_count
         self._effective_compact_preserve_mode: CompactPreserveMode = compact_preserve_mode
         self._effective_compact_model: ProviderModelRef | None = compact_model
+        #: Pre-resolved system-prompt prefix injected before every
+        #: tool-bearing LLM call — ChatFlowEngine builds it (static user
+        #: text + dynamic OS / shell / Bash-disabled hint) and hands it
+        #: in via ``execute(chatflow_runtime_environment_note=...)``.
+        #: Empty string disables the prepend; default unset (= empty)
+        #: keeps bare-engine tests that don't pipe a chatflow through
+        #: behaving exactly as before.
+        self._effective_runtime_note: str = ""
 
     async def execute(
         self,
@@ -861,6 +869,7 @@ class WorkflowEngine:
         chatflow_compact_keep_recent_count: int | object = _UNSET,
         chatflow_compact_preserve_mode: CompactPreserveMode | object = _UNSET,
         chatflow_compact_model: ProviderModelRef | None | object = _UNSET,
+        chatflow_runtime_environment_note: str | object = _UNSET,
         chatflow_id: str | None = None,
         post_node_hook: PostNodeHook | None = None,
         disabled_tool_names: frozenset[str] | None = None,
@@ -920,6 +929,11 @@ class WorkflowEngine:
             self._effective_compact_model = chatflow_compact_model  # type: ignore[assignment]
         else:
             self._effective_compact_model = self._compact_model
+        self._effective_runtime_note = (
+            ""
+            if chatflow_runtime_environment_note is _UNSET
+            else str(chatflow_runtime_environment_note or "")
+        )
         self._revise_count = 0
         self._post_node_hook = post_node_hook
         self._disabled_tool_names = disabled_tool_names or frozenset()
@@ -1293,6 +1307,17 @@ class WorkflowEngine:
                 for d in self._tools.definitions_for_constraints(node.tool_constraints)
                 if d["name"] not in self._disabled_tool_names
             ]
+
+        # Runtime environment note — prepended as an extra system message
+        # only when this call exposes tools. Pure judge / brief calls
+        # (tools=[]) skip the inject so we don't waste tokens on calls
+        # that can't tool-call anyway. Empty effective note also skips.
+        # Note text is ChatFlowEngine-resolved (static user text +
+        # dynamic OS / shell / Bash-disabled hint), passed in via
+        # ``execute(chatflow_runtime_environment_note=...)``.
+        messages = _maybe_prepend_runtime_note(
+            messages, tool_defs, self._effective_runtime_note
+        )
 
         response = await self._provider_call(
             messages,
@@ -2405,6 +2430,37 @@ def _spawn_tool_loop_children(workflow: WorkFlow, parent_llm: WorkFlowNode) -> N
         model_override=workflow.tool_call_model_override or parent_llm.model_override,
     )
     workflow.add_node(follow_up)
+
+
+def _maybe_prepend_runtime_note(
+    messages: list[Message],
+    tool_defs: list[ToolDefinition],
+    note: str,
+) -> list[Message]:
+    """Prepend the runtime-environment note as an extra system message
+    when the call exposes tools.
+
+    Skips silently when:
+    - No tool definitions in this call (judges/briefs without tool
+      access don't need the anti-hallucination framing — saves tokens
+      and keeps cache prefix stable for those code paths).
+    - Note is empty after strip (caller explicitly disabled).
+
+    The note is fully pre-rendered by the caller (ChatFlowEngine
+    combines static user text + dynamic OS / shell / cwd hints into
+    one string). The engine's only job here is the tool-gated
+    prepend.
+
+    Cache-friendly: the note carries no per-call dynamic content (no
+    timestamps, no per-turn ids), so identical notes across calls
+    share the same prefix and KV cache stays warm.
+    """
+    if not tool_defs:
+        return messages
+    text = (note or "").strip()
+    if not text:
+        return messages
+    return [SystemMessage(content=text), *messages]
 
 
 def _wire_to_provider(wires: list[WireMessage]) -> list[Message]:

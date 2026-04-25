@@ -12,10 +12,14 @@ from agentloom.tools.base import Tool, ToolContext, ToolError
 class BashTool(Tool):
     name = "Bash"
     description = (
-        "Execute a single shell command via /bin/sh. Captures stdout, "
-        "stderr, and exit code. Use for one-off commands; do not pipe "
-        "interactive programs. The working directory is fixed for the "
-        "session and cannot be changed with cd (use absolute paths)."
+        "Execute a single shell command. On Linux/macOS the host shell "
+        "is /bin/sh (POSIX commands: ls, cat, grep, ...); on Windows "
+        "native it falls back to cmd.exe (dir, type, findstr, ...). "
+        "Adapt your command to the OS reported in the runtime "
+        "environment system message. Captures stdout, stderr, and exit "
+        "code. Use for one-off commands; do not pipe interactive "
+        "programs. The working directory is fixed for the session and "
+        "cannot be changed with cd (use absolute paths)."
     )
     parameters = {
         "type": "object",

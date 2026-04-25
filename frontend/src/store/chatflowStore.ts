@@ -364,6 +364,7 @@ export interface ChatFlowStoreState {
     default_tool_call_model?: ProviderModelRef | null;
     brief_model?: ProviderModelRef | null;
     default_execution_mode?: ExecutionMode;
+    runtime_environment_note?: string | null;
     judge_retry_budget?: number;
     min_ground_ratio?: number | null;
     ground_ratio_grace_nodes?: number;
@@ -866,6 +867,9 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
     }
     if ("judge_retry_budget" in patch && patch.judge_retry_budget !== undefined) {
       updated.judge_retry_budget = patch.judge_retry_budget;
+    }
+    if ("runtime_environment_note" in patch) {
+      updated.runtime_environment_note = patch.runtime_environment_note ?? null;
     }
     if ("min_ground_ratio" in patch) {
       updated.min_ground_ratio = patch.min_ground_ratio ?? null;

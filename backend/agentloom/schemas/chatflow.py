@@ -367,6 +367,14 @@ class ChatFlow(BaseModel):
     #: ``judge_pre_enabled``, ``judge_during_enabled``, ``judge_post_enabled``)
     #: from this per §3.4.1 — see :func:`derive_switches_from_mode`.
     default_execution_mode: ExecutionMode = ExecutionMode.NATIVE_REACT
+    #: User-editable anti-hallucination guidance prepended to every LLM
+    #: call that has a non-empty tool list. Combined at injection time
+    #: with a dynamically-rendered system-info block (OS / shell / cwd
+    #: hint). ``None`` means "use the built-in default" — the engine
+    #: falls back to a workspace-language-appropriate template. Set this
+    #: to override (e.g. for models that need a different framing). See
+    #: ``_maybe_prepend_runtime_note`` in the engine for the wire-up.
+    runtime_environment_note: str | None = None
     #: Tier 1 pre-llm_call auto-compact threshold. When the estimated
     #: ancestor-context footprint of a pending llm_call crosses
     #: ``compact_trigger_pct`` of the target model's context window,
