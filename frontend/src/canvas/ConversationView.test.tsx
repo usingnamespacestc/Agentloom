@@ -254,6 +254,67 @@ describe("ConversationView", () => {
     }
   });
 
+  it("original view toggle shows pre-compact ancestors and hides compact node", () => {
+    // a → b (compact) → c. Effective view shows b + c; original view
+    // should show a + c (compact node b filtered out as an aggregator op).
+    const cf: ChatFlow = {
+      id: "cf-orig",
+      title: null,
+      description: null,
+      tags: [],
+      draft_model: null,
+      default_judge_model: null,
+      default_tool_call_model: null,
+      brief_model: null,
+      default_execution_mode: "native_react",
+      judge_retry_budget: 3,
+      min_ground_ratio: null,
+      ground_ratio_grace_nodes: 20,
+      disabled_tool_names: [],
+      compact_trigger_pct: 0.7,
+      compact_target_pct: 0.5,
+      compact_keep_recent_count: 3,
+      compact_preserve_mode: "by_count",
+      recalled_context_sticky_turns: 3,
+      compact_model: null,
+      compact_require_confirmation: true,
+      chatnode_compact_trigger_pct: 0.6,
+      chatnode_compact_target_pct: 0.4,
+      max_produced_tags: 10,
+      max_consumed_tags: 8,
+      root_ids: ["a"],
+      nodes: {
+        a: node("a", [], "old user", "old agent", 0),
+        b: {
+          ...node("b", ["a"], "", "SUMMARY_BODY", 1),
+          compact_snapshot: {
+            summary: "SUMMARY_BODY",
+            preserved_messages: [],
+            preserved_before_summary: false,
+          },
+        },
+        c: node("c", ["b"], "new user", "new agent", 2),
+      },
+      created_at: "2026-04-10T00:00:00Z",
+    };
+    useChatFlowStore.getState().setChatFlow(cf);
+    render(<ConversationView />);
+
+    // Default = effective: a hidden, b shown.
+    expect(screen.queryByTestId("conversation-node-a")).not.toBeInTheDocument();
+    expect(screen.getByTestId("conversation-node-b")).toBeInTheDocument();
+
+    // Click "Original" toggle.
+    fireEvent.click(screen.getByTestId("cv-view-original"));
+
+    // Original view: a now visible, b (compact op) hidden, c still visible.
+    expect(screen.getByTestId("conversation-node-a")).toBeInTheDocument();
+    expect(screen.queryByTestId("conversation-node-b")).not.toBeInTheDocument();
+    expect(screen.getByTestId("conversation-node-c")).toBeInTheDocument();
+    // Truncation notice belongs to effective mode only.
+    expect(screen.queryByTestId("compact-truncation-notice")).not.toBeInTheDocument();
+  });
+
   it("truncates at a compact node and renders a distinct compact bubble", () => {
     // a → b (compact) → c — the panel should hide a and render b with
     // a compact marker. Matches _build_chat_context's upward-walk stop.

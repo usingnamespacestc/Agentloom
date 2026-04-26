@@ -156,6 +156,47 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
   const [compactRunning, setCompactRunning] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
 
+  // View mode: "effective" (default) shows what the engine actually
+  // feeds into the next LLM call — compact summaries replace the
+  // pre-compact prefix, pack summaries replace the packed range,
+  // merge nodes show their merged response. "original" shows the
+  // raw chat history with compact/pack/merge ops filtered out, so
+  // the panel reads like a typical chat agent UI. Persisted per
+  // chatflow under ``agentloom:ui:cv-mode:<cfid>``.
+  const cvModeKey = chatflow ? `agentloom:ui:cv-mode:${chatflow.id}` : null;
+  const [viewMode, setViewMode] = useState<"effective" | "original">(() => {
+    if (!cvModeKey) return "effective";
+    try {
+      const raw = localStorage.getItem(cvModeKey);
+      return raw === "original" ? "original" : "effective";
+    } catch {
+      return "effective";
+    }
+  });
+  // Re-hydrate when chatflow id flips (Sidebar swaps active chatflow).
+  useEffect(() => {
+    if (!cvModeKey) return;
+    try {
+      const raw = localStorage.getItem(cvModeKey);
+      setViewMode(raw === "original" ? "original" : "effective");
+    } catch {
+      // ignore
+    }
+  }, [cvModeKey]);
+  const setAndPersistViewMode = useCallback(
+    (next: "effective" | "original") => {
+      setViewMode(next);
+      if (cvModeKey) {
+        try {
+          localStorage.setItem(cvModeKey, next);
+        } catch {
+          // ignore quota / private-mode failures — runtime state still flips
+        }
+      }
+    },
+    [cvModeKey],
+  );
+
   const { path, forks } = useMemo(() => {
     if (!chatflow) return { path: [], forks: [] };
     return resolvePath(
@@ -183,6 +224,27 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
   }, [chatflow, path]);
   const hiddenBeforeCompact =
     path.length - visiblePath.length;
+
+  // "Original" view path: the full root-to-leaf chain with compact
+  // (summary stand-in), pack (range stand-in), and merge (two-branch
+  // fold) operation nodes filtered out. What remains is the underlying
+  // chat_turn sequence — same content a typical chat agent UI would
+  // show. Per user 2026-04-26: merge keeps existing branch-switching
+  // behavior — we walk ``path`` (which already follows the user's
+  // selected primary parent through merges) and just drop the merge
+  // ChatNode itself; the LEFT-side ancestors above it are still in
+  // ``path`` from the upstream walk.
+  const originalPath = useMemo(() => {
+    if (!chatflow || path.length === 0) return path;
+    return path.filter((nid) => {
+      const n = chatflow.nodes[nid];
+      if (!n) return false;
+      if (n.compact_snapshot != null) return false;
+      if (n.pack_snapshot != null) return false;
+      if ((n.parent_ids?.length ?? 0) >= 2) return false; // merge node
+      return true;
+    });
+  }, [chatflow, path]);
 
   // Fetch the backend's full segmented inbound-context preview. Used
   // as the authoritative render source when populated — drives every
@@ -341,6 +403,41 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
       <header className="flex items-center justify-between border-b border-gray-100 px-4 py-2">
         <div className="text-sm font-semibold text-gray-800">{t("conversation.panel_title")}</div>
         <div className="flex items-center gap-2">
+          {/* Effective vs Original view toggle. Effective shows what
+              the engine actually sends to the next LLM call (compact /
+              pack / merge summaries in place); Original shows the raw
+              chat_turn chain like a typical chat agent. */}
+          <div
+            data-testid="cv-view-toggle"
+            className="inline-flex overflow-hidden rounded border border-gray-300 text-[10px]"
+          >
+            <button
+              type="button"
+              data-testid="cv-view-effective"
+              onClick={() => setAndPersistViewMode("effective")}
+              className={`px-2 py-0.5 ${
+                viewMode === "effective"
+                  ? "bg-blue-500 text-white"
+                  : "bg-white text-gray-600 hover:bg-gray-50"
+              }`}
+              title={t("conversation.view_effective_hint")}
+            >
+              {t("conversation.view_effective")}
+            </button>
+            <button
+              type="button"
+              data-testid="cv-view-original"
+              onClick={() => setAndPersistViewMode("original")}
+              className={`border-l border-gray-300 px-2 py-0.5 ${
+                viewMode === "original"
+                  ? "bg-blue-500 text-white"
+                  : "bg-white text-gray-600 hover:bg-gray-50"
+              }`}
+              title={t("conversation.view_original_hint")}
+            >
+              {t("conversation.view_original")}
+            </button>
+          </div>
           {canCompact && (
             <button
               type="button"
@@ -353,7 +450,9 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
               {compactRunning ? "..." : t("compact_dialog.button_label")}
             </button>
           )}
-          <div className="text-[10px] text-gray-400">{visiblePath.length}</div>
+          <div className="text-[10px] text-gray-400">
+            {viewMode === "original" ? originalPath.length : visiblePath.length}
+          </div>
         </div>
       </header>
       {leafNode && (
@@ -371,7 +470,39 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
         data-testid="conversation-body"
         className="flex-1 space-y-5 overflow-auto px-4 py-4"
       >
-        {inboundSegments.length > 0 ? (
+        {viewMode === "original" ? (
+          // Original view: full chat history with compact/pack/merge
+          // operation nodes filtered out. Reads like a normal chat
+          // agent UI — no engine-level substitutions visible.
+          originalPath.length === 0 ? (
+            <div className="text-[11px] italic text-gray-400">
+              {t("conversation.empty_chat")}
+            </div>
+          ) : (
+            originalPath.map((nid) => {
+              const node = chatflow.nodes[nid];
+              if (!node) return null;
+              const fork = forkAt.get(nid);
+              return (
+                <div key={nid}>
+                  <ChatMessageBubble
+                    node={node}
+                    isSelected={nid === selectedNodeId}
+                    onSelect={() => selectNode(nid)}
+                    cbiBullets={undefined}
+                  />
+                  {fork && (
+                    <BranchSelector
+                      chatflowNodes={chatflow.nodes}
+                      fork={fork}
+                      onPick={(childId) => pickBranch(fork.nodeId, childId)}
+                    />
+                  )}
+                </div>
+              );
+            })
+          )
+        ) : inboundSegments.length > 0 ? (
           <SegmentRenderer
             segments={inboundSegments}
             chatflow={chatflow}
