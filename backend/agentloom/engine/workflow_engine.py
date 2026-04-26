@@ -797,6 +797,31 @@ _COGNITIVE_SIDE_EFFECTS: frozenset[SideEffect] = frozenset(
 )
 
 
+def _resolve_caller_effective_tools(
+    workflow: WorkFlow, tool_call_node: WorkFlowNode
+) -> frozenset[str]:
+    """Find the worker draft that spawned *tool_call_node* and return
+    its ``effective_tools`` as a frozenset.
+
+    Tool_call nodes are spawned by ``_spawn_tool_loop_children`` with
+    ``parent_ids=[worker_draft.id]``, so the parent's allocation is
+    the authoritative caller context for capability gating
+    (``get_node_context.cross_chatflow`` etc).
+
+    Returns ``frozenset()`` when the parent isn't a draft (rare —
+    direct-mode legacy paths) or when its ``effective_tools`` is None
+    (legacy chatflow that pre-dates the capability model). Tools that
+    consult this set fall open on empty, matching the bare-test
+    behavior — locking out legacy chatflows would break them.
+    """
+    if not tool_call_node.parent_ids:
+        return frozenset()
+    parent = workflow.nodes.get(tool_call_node.parent_ids[0])
+    if parent is None or parent.effective_tools is None:
+        return frozenset()
+    return frozenset(parent.effective_tools)
+
+
 def _side_effect_filter_for(node: WorkFlowNode) -> set[SideEffect] | None:
     """Return the side-effect filter that should apply to *node*'s tool
     visibility, or ``None`` to skip the filter.
@@ -2186,12 +2211,31 @@ class WorkflowEngine:
                 is_error=True,
             )
             return
-        result = await self._tools.execute(
-            node.tool_name,
-            dict(node.tool_args or {}),
-            self._tool_ctx,
-            constraints=node.tool_constraints,
-        )
+        # M7.5 PR 8 — populate caller context so tools that need finer
+        # authorization than the registry whitelist (e.g.
+        # ``get_node_context`` cross-chatflow scope) can read the
+        # calling WorkNode's effective_tools. Sourced from the parent
+        # draft (the worker that emitted this tool_use) — its
+        # effective_tools is the authoritative allocation. ``None`` on
+        # parent_ids or missing effective_tools means we fall through
+        # to "no caller context"; gates fall open for legacy callers
+        # / bare tests rather than locking the tool out entirely.
+        prior_caller_chatflow_id = self._tool_ctx.caller_chatflow_id
+        prior_caller_effective_tools = self._tool_ctx.caller_effective_tools
+        try:
+            self._tool_ctx.caller_chatflow_id = self._chatflow_id
+            self._tool_ctx.caller_effective_tools = (
+                _resolve_caller_effective_tools(workflow, node)
+            )
+            result = await self._tools.execute(
+                node.tool_name,
+                dict(node.tool_args or {}),
+                self._tool_ctx,
+                constraints=node.tool_constraints,
+            )
+        finally:
+            self._tool_ctx.caller_chatflow_id = prior_caller_chatflow_id
+            self._tool_ctx.caller_effective_tools = prior_caller_effective_tools
         node.tool_result = result
 
     async def _run_judge_call(self, workflow: WorkFlow, node: WorkFlowNode) -> None:

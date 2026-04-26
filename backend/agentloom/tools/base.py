@@ -136,6 +136,22 @@ class ToolContext:
     #: isolated even though the inner WorkFlowEngine's tool_ctx is
     #: shared; this field is the fallback path for bare-test usage.
     accessed_node_ids: set[str] = field(default_factory=set)
+    #: M7.5 PR 8 — ChatFlow id the calling WorkNode belongs to. Used
+    #: by ``get_node_context`` to enforce the
+    #: ``self_chatflow / cross_chatflow`` boundary: a request for a
+    #: target inside the same chatflow is allowed by default; targets
+    #: in other chatflows require the virtual capability bit
+    #: ``get_node_context.cross_chatflow`` in
+    #: ``caller_effective_tools``. ``None`` means "no caller context"
+    #: — bare tests / ad-hoc tool runs that don't go through the
+    #: engine; the gate falls open in that case.
+    caller_chatflow_id: str | None = None
+    #: M7.5 PR 8 — frozenset of registry tool names + virtual
+    #: capability bits (``Name.subcapability``) the calling WorkNode
+    #: holds. Tools that need a finer-than-name authorization (e.g.
+    #: cross-chatflow lookups) check the relevant virtual bit here.
+    #: Empty frozenset = no caller context (bare-test path).
+    caller_effective_tools: frozenset[str] = field(default_factory=frozenset)
 
 
 class Tool(ABC):
@@ -295,8 +311,18 @@ class ToolRegistry:
         Returns surviving :class:`Tool` objects in registration order so
         the engine can render their ``.definition()`` for the provider.
         """
+        # M7.5 PR 8 — virtual permission bits live alongside real tool
+        # names in ``effective_tools`` (e.g. ``get_node_context.cross_chatflow``
+        # gates the cross-chatflow scope of a real tool). They are NOT
+        # registry entries; resolve_for_node never matches them, but
+        # they must not falsify a non-empty whitelist into "this node
+        # has zero real tools" either. Filter them out before the
+        # whitelist check so a whitelist of ["X", "Y.virtual"] still
+        # admits the real tool ``X``.
         whitelist: set[str] | None = (
-            set(node_effective) if node_effective is not None else None
+            {n for n in node_effective if "." not in n}
+            if node_effective is not None
+            else None
         )
         out: list[Tool] = []
         for tool in self._tools.values():

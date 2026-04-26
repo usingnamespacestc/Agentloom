@@ -45,6 +45,19 @@ _DEFAULT_MAX_BYTES = 50_000
 _MIN_MAX_BYTES = 1_000
 _MAX_MAX_BYTES = 500_000
 
+#: Virtual capability bit gating the cross-chatflow scope. Lives on a
+#: WorkNode's ``effective_tools`` alongside real registry names (e.g.
+#: ``["get_node_context", "get_node_context.cross_chatflow"]``); the
+#: tool registry's ``resolve_for_node`` skips entries containing ``.``
+#: so this bit doesn't pollute the LLM-facing tool definitions. The
+#: tool itself reads it from ``ctx.caller_effective_tools`` at execute
+#: time to authorize cross-chatflow lookups.
+CROSS_CHATFLOW_CAPABILITY = "get_node_context.cross_chatflow"
+
+_SCOPE_SELF = "self_chatflow"
+_SCOPE_CROSS = "cross_chatflow"
+_VALID_SCOPES = (_SCOPE_SELF, _SCOPE_CROSS)
+
 
 class GetNodeContextTool(Tool):
     name = "get_node_context"
@@ -56,9 +69,11 @@ class GetNodeContextTool(Tool):
         "and output_message, plus its enclosing WorkFlow's trio "
         "(description / inputs / expected_outcome) and any tool_call "
         "fields. Both kinds also return parent_ids so you can walk "
-        "upstream one hop at a time. Search scope is the current "
-        "workspace — any ChatFlow in it is reachable. Oversized "
-        "responses are truncated at max_bytes (default ~50 KiB)."
+        "upstream one hop at a time. Search scope defaults to the "
+        "current ChatFlow; pass scope='cross_chatflow' (and hold the "
+        "matching virtual capability) to look up nodes in sibling "
+        "ChatFlows. Oversized responses are truncated at max_bytes "
+        "(default ~50 KiB)."
     )
     parameters = {
         "type": "object",
@@ -66,6 +81,19 @@ class GetNodeContextTool(Tool):
             "node_id": {
                 "type": "string",
                 "description": "Id of the ChatNode or WorkNode to fetch.",
+            },
+            "scope": {
+                "type": "string",
+                "enum": list(_VALID_SCOPES),
+                "description": (
+                    "Where to search. 'self_chatflow' (default) restricts "
+                    "the lookup to nodes in the caller's own ChatFlow — "
+                    "always allowed. 'cross_chatflow' allows targets in "
+                    "any ChatFlow under the same workspace, but requires "
+                    "the calling WorkNode to hold the virtual capability "
+                    f"`{CROSS_CHATFLOW_CAPABILITY}` in its effective_tools."
+                ),
+                "default": _SCOPE_SELF,
             },
             "max_bytes": {
                 "type": "integer",
@@ -85,6 +113,30 @@ class GetNodeContextTool(Tool):
         node_id = args.get("node_id")
         if not isinstance(node_id, str) or not node_id:
             raise ToolError("get_node_context: 'node_id' must be a non-empty string")
+        raw_scope = args.get("scope", _SCOPE_SELF)
+        if raw_scope not in _VALID_SCOPES:
+            raise ToolError(
+                f"get_node_context: 'scope' must be one of {_VALID_SCOPES}, "
+                f"got {raw_scope!r}"
+            )
+        scope: str = raw_scope
+        # M7.5 PR 8 capability gate. Cross-chatflow lookups are gated
+        # on the virtual ``get_node_context.cross_chatflow`` bit in the
+        # caller's effective_tools. The bit is set by the planner's
+        # capability allocation (or inherited via ``inheritable_tools``)
+        # — by default an aggregator only sees its own chatflow, which
+        # matches the pre-M7.5 behavior for the common in-chatflow
+        # sibling-pull case. Bare-test path (no caller context) leaves
+        # ``caller_effective_tools`` empty and falls open: tests would
+        # otherwise need to thread the bit through every fixture.
+        if scope == _SCOPE_CROSS and ctx.caller_chatflow_id is not None:
+            if CROSS_CHATFLOW_CAPABILITY not in ctx.caller_effective_tools:
+                raise ToolError(
+                    f"get_node_context: scope='cross_chatflow' requires the "
+                    f"virtual capability {CROSS_CHATFLOW_CAPABILITY!r} on "
+                    f"the calling WorkNode's effective_tools (currently "
+                    f"holds {sorted(ctx.caller_effective_tools)})"
+                )
         raw_cap = args.get("max_bytes", _DEFAULT_MAX_BYTES)
         try:
             max_bytes = int(raw_cap)
@@ -104,6 +156,23 @@ class GetNodeContextTool(Tool):
                 raise ToolError(
                     f"get_node_context: no node with id {node_id!r} in workspace "
                     f"{ctx.workspace_id!r}"
+                )
+
+            # Default scope keeps the caller in its own chatflow. We
+            # only enforce this when the caller context is populated —
+            # bare tests / ad-hoc tool runs without a chatflow id fall
+            # open, same as the cross-chatflow capability check above.
+            if (
+                scope == _SCOPE_SELF
+                and ctx.caller_chatflow_id is not None
+                and row.chatflow_id != ctx.caller_chatflow_id
+            ):
+                raise ToolError(
+                    f"get_node_context: node {node_id!r} lives in chatflow "
+                    f"{row.chatflow_id!r}, not the caller's "
+                    f"{ctx.caller_chatflow_id!r}. Pass "
+                    f"scope='cross_chatflow' (with the matching "
+                    f"capability) to read across chatflows."
                 )
 
             repo = ChatFlowRepository(session, workspace_id=ctx.workspace_id)
