@@ -40,12 +40,19 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["agentloom*"]
+# ``vendor/`` houses tau_bench (MIT, see backend/vendor/tau_bench/LICENSE +
+# PATCHES.md) — a benchmark dependency we vendor rather than git+ install
+# so backend stays zero-litellm. setuptools picks both trees up: the main
+# ``agentloom`` source plus the vendored ``tau_bench`` package, so backend
+# code can ``from tau_bench.envs.retail.tools.get_order_details import ...``
+# without any extra install step.
+where = [".", "vendor"]
+include = ["agentloom*", "tau_bench*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["../tests/backend"]
-pythonpath = ["."]
+pythonpath = [".", "vendor"]
 
 [tool.ruff]
 line-length = 100

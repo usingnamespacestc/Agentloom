@@ -1,0 +1,40 @@
+[project]
+name = "agentloom-bench"
+version = "0.1.0"
+description = "Benchmark harness for Agentloom — drives external benchmarks (tau-bench, etc.) against a running Agentloom backend over HTTP"
+requires-python = ">=3.12"
+authors = [{ name = "usingnamespacestc" }]
+
+# Runtime deps. ``tau_bench`` is installed from upstream git+ — runner
+# uses the full upstream package (including ``UserStrategy`` which needs
+# litellm), in contrast to the Agentloom backend which ships a vendored
+# subset under ``backend/vendor/tau_bench/`` to keep its env zero-litellm.
+# See backend/vendor/tau_bench/PATCHES.md and docs/design-tau-bench-integration.md.
+dependencies = [
+    "tau_bench @ git+https://github.com/sierra-research/tau-bench.git@59a200c6d575d595120f1cb70fea53cef0632f6b",
+    "httpx>=0.27.0",
+    "typer>=0.13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[project.scripts]
+# CLI entry — runner not implemented in PR 1, this stays as a placeholder
+# that prints "not yet implemented" until PR 4.
+agentloom-bench = "agentloom_bench.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
