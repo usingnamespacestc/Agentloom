@@ -59,6 +59,7 @@ _LIST_FIELDS = (
     "critiques",
     "issues",
     "redo_targets",
+    "capability_escalation",
 )
 
 
@@ -222,6 +223,17 @@ _VARIANT_SCHEMAS: dict[JudgeVariant, dict[str, Any]] = {
                     "required": ["issue"],
                 },
             },
+            "capability_escalation": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "M7.5 capability_request bubble-up: registry tool "
+                    "names the worker draft asked for via "
+                    "<capability_request> markers but couldn't access. "
+                    "Surfaces the gap to the orchestrator without "
+                    "halting the WorkFlow."
+                ),
+            },
         },
         "required": ["during_verdict"],
     },
@@ -256,6 +268,17 @@ _VARIANT_SCHEMAS: dict[JudgeVariant, dict[str, Any]] = {
                     },
                     "required": ["node_id", "critique"],
                 },
+            },
+            "capability_escalation": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "M7.5 capability_request bubble-up: registry tool "
+                    "names worker drafts asked for and judge_post is "
+                    "surfacing to the orchestrator. Same field as the "
+                    "DURING variant — populated by whichever judge "
+                    "first sees the worker marker."
+                ),
             },
         },
         "required": ["post_verdict"],

@@ -58,6 +58,14 @@ plan:
               deliverable.
             - On revision rounds, address every critique. Quote the
               specific change you made if it is non-obvious.
+            - **Capability request**: if you discover the task needs a
+              tool that isn't in your available set (e.g. you can read
+              files but the task requires writing one), end your draft
+              with a single line of the form
+              ``<capability_request>tool_name_1, tool_name_2</capability_request>``.
+              Use the exact registry names. The orchestrator records
+              this and a future re-plan round may grant the access.
+              Don't fabricate the missing tool's output yourself.
         - role: user
           content: |
             Description: {{ description }}

@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -1467,6 +1468,26 @@ class WorkflowEngine:
         )
         assert node.output_message is not None
 
+        # ------------------------------------------------------------- capability_request
+        # M7.5 PR 5: scan worker drafts for ``<capability_request>...``
+        # markers (or a ``{"capability_request": [...]}`` JSON segment)
+        # and lift the requested tool names onto the node. Worker is
+        # the only role that can legitimately discover a missing
+        # capability mid-task — judges + planner consume the marker,
+        # they don't emit it. The planner's re-plan path (deferred PR)
+        # consumes ``node.capability_request`` to widen
+        # ``inheritable_tools`` for the next round; today we just
+        # record the signal so it survives in the persisted workflow.
+        if node.role == WorkNodeRole.WORKER and node.output_message.content:
+            requests = _extract_capability_request(node.output_message.content)
+            if requests:
+                # De-dup against anything already on the node (clones
+                # carry the field forward via Pydantic copy).
+                existing = set(node.capability_request)
+                node.capability_request.extend(
+                    name for name in requests if name not in existing
+                )
+
         # ------------------------------------------------------------- tool loop
         # If the model requested tool calls AND we have a registry
         # configured, auto-spawn child tool_call nodes + a follow-up
@@ -2557,6 +2578,66 @@ def _spawn_tool_loop_children(workflow: WorkFlow, parent_llm: WorkFlowNode) -> N
         model_override=workflow.tool_call_model_override or parent_llm.model_override,
     )
     workflow.add_node(follow_up)
+
+
+#: M7.5 PR 5 — recognized forms for a worker-emitted
+#: capability_request marker. The first match wins per scan; the
+#: helper below supports both shapes so prompt-tuning across model
+#: families has flexibility:
+#:
+#:  - ``<capability_request>Bash, Write</capability_request>`` — XML-tag
+#:    style, easiest for instruction-tuned chat models to follow when
+#:    the worker prompt cites it as the canonical form.
+#:  - ``{"capability_request": ["Bash", "Write"]}`` — JSON segment
+#:    embedded anywhere in the draft, useful when the worker is in
+#:    JSON-output mode (planner-style fixtures, structured response
+#:    formats).
+#:
+#: Both shapes carry the same payload (a list of registry tool
+#: names). Names are *not* validated against the registry here — the
+#: orchestrator decides what to do with unknown names; treating it as
+#: a parse error would silently drop a legitimate capability gap.
+_CAPABILITY_REQUEST_TAG_RE = re.compile(
+    r"<capability_request>\s*(?P<body>.*?)\s*</capability_request>",
+    re.DOTALL | re.IGNORECASE,
+)
+_CAPABILITY_REQUEST_JSON_RE = re.compile(
+    r'\{\s*"capability_request"\s*:\s*\[(?P<body>[^\]]*)\]\s*\}',
+    re.DOTALL,
+)
+
+
+def _extract_capability_request(text: str) -> list[str]:
+    """Pull tool-name strings out of a worker draft's content.
+
+    Returns the ordered, de-duplicated list of names found across
+    every recognized marker form (tag and JSON segment). Empty list
+    on no match. Whitespace-only tokens drop out; quoted JSON
+    strings get their surrounding quotes stripped.
+
+    Defensive against multiple markers in one draft (a worker that
+    discovers two missing capabilities in different sections of its
+    output) — every match contributes; ordering follows the source
+    text so the persisted ``capability_request`` reads top-to-bottom.
+    """
+    if not text:
+        return []
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _emit(token: str) -> None:
+        cleaned = token.strip().strip('"').strip("'").strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            found.append(cleaned)
+
+    for m in _CAPABILITY_REQUEST_TAG_RE.finditer(text):
+        for token in m.group("body").split(","):
+            _emit(token)
+    for m in _CAPABILITY_REQUEST_JSON_RE.finditer(text):
+        for token in m.group("body").split(","):
+            _emit(token)
+    return found
 
 
 def _compose_system_envelope(

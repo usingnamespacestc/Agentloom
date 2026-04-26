@@ -54,6 +54,13 @@ plan:
               返回真正的交付物。
             - 修订轮次中，逐条处理批评。若改动不明显，请引用你做了什
               么具体修改。
+            - **Capability request**：若你发现任务需要某个不在你工具
+              集里的工具（例如你能读文件但任务要求写文件），请在草稿
+              末尾用一行
+              ``<capability_request>tool_name_1, tool_name_2</capability_request>``
+              点名。请使用 registry 中的精确名字。orchestrator 会记
+              录这个信号，下一轮 re-plan 可能会授予该权限。不要自己
+              伪造缺失工具的输出。
         - role: user
           content: |
             Description: {{ description }}

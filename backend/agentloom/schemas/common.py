@@ -384,6 +384,16 @@ class JudgeVerdict(BaseModel):
     # --- judge_during ---
     critiques: list[Critique] = Field(default_factory=list)
     during_verdict: Literal["continue", "revise", "halt"] | None = None
+    #: M7.5 capability_request bubble-up — when judge_during sees a
+    #: worker draft emitted ``capability_request`` markers, it lifts
+    #: the requested tool names here so the orchestrator (or a future
+    #: re-plan path) can decide whether to grant them. Empty by
+    #: default. Also populated by judge_post if the worker only got
+    #: to surface the request on its terminal draft (no during pass).
+    #: PR 5 (engine signal slot) only plumbs the field through schema
+    #: + parser; consumers (re-plan / planner reset) land in a
+    #: follow-up PR.
+    capability_escalation: list[str] = Field(default_factory=list)
 
     # --- judge_post ---
     post_verdict: Literal["accept", "retry", "fail"] | None = None
