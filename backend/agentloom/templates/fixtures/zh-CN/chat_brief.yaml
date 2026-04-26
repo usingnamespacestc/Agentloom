@@ -131,6 +131,25 @@ plan:
                 方案不合适"——你的 produced_tags 应该带
                 ``plan_x_rejected``，consumed_tags 应该带 ``plan_x``。
 
+            ### 聚合节点（chat_compact / chat_merge / chat_pack）特别约定
+              聚合类节点本身**不引入新概念**，它们只是把上游/双侧已有概念
+              重新汇总呈现。所以默认规则反过来：
+                - **祖先活跃概念里出现的 tag，全部进 consumed_tags**（无
+                  论 description 里有没有显式提到，只要这个 tag 表达的概
+                  念在汇总文本中被涉及就要填）。
+                - **produced_tags 几乎总是空 ``[]``**。仅当聚合本身**显式
+                  作出新决策**（比如 chat_merge 把双侧裁判出胜者：
+                  ``plan_x_finalized``；chat_compact 收尾时盖棺定论了某
+                  议题：``api_design_finalized``）才填带状态后缀的 tag。
+                - 反例（必须避免）：把 ``plan_x``、``resnet_50``、
+                  ``mobilenetv3_small`` 这种祖先早就引入的概念塞进
+                  produced_tags —— 这是把 consumer 误标为 producer，会
+                  破坏 lint/检索语义。
+              对于 chat_merge：双侧 ancestor 的 anchor tag 都要进
+              consumed_tags（不只是 LEFT 那条链）。如果"祖先活跃概念"列
+              表里漏了 RIGHT 的概念，从 source_inputs 文本里能识别出的
+              核心概念也要补进 consumed_tags。
+
             ### 数量约束
               - produced_tags 最多 N 个（见下方 user 消息）。
               - consumed_tags 最多 M 个。

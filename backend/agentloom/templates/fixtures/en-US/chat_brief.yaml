@@ -141,6 +141,30 @@ plan:
                 produced_tags should include ``plan_x_rejected``;
                 your consumed_tags should include ``plan_x``.
 
+            ### Aggregator nodes (chat_compact / chat_merge / chat_pack) — SPECIAL
+              Aggregator nodes don't INTRODUCE new concepts — they
+              re-present concepts already established upstream/by both
+              sides. So the rule flips:
+                - **Every tag in "Active ancestor concepts" goes in
+                  consumed_tags** (regardless of whether description
+                  surfaces it explicitly — if the tag's concept is in
+                  the summarized content, include it).
+                - **produced_tags is almost always empty ``[]``**. Only
+                  fill when the aggregation itself makes a NEW
+                  decision (e.g. chat_merge picks a winner →
+                  ``plan_x_finalized``; chat_compact closes a topic →
+                  ``api_design_finalized``) — always with status suffix.
+                - WRONG (must avoid): putting ``plan_x``, ``resnet_50``,
+                  ``mobilenetv3_small`` and other long-established
+                  ancestor concepts into produced_tags. That mislabels
+                  consumer as producer and breaks lint / retrieval
+                  semantics.
+              For chat_merge specifically: BOTH parents' anchor tags
+              go into consumed_tags (not just the LEFT chain). If the
+              "Active ancestor concepts" list misses RIGHT-side tags,
+              extract the core concepts you see in source_inputs text
+              and add them to consumed_tags.
+
             ### Quantity limits
               - produced_tags up to N (see user message below).
               - consumed_tags up to M.

@@ -751,30 +751,37 @@ async def submit_turn(
     """
     engine = _get_engine(request)
 
-    # Phase 1: load + attach (short session)
-    async with session_maker() as session:
-        repo = _repo(session)
-        chat = await _attached_chatflow(engine, repo, chatflow_id)
+    # Serialize concurrent submissions on the same chatflow to avoid
+    # the shared-runtime FrozenNodeError race (see engine
+    # ``_submit_locks`` doc). Throughput tradeoff is acceptable:
+    # the bottleneck is the engine's LLM call, and same-chatflow
+    # parallelism is rare in practice (UI is single-user-per-tab).
+    submit_lock = await engine.submit_lock(chatflow_id)
+    async with submit_lock:
+        # Phase 1: load + attach (short session)
+        async with session_maker() as session:
+            repo = _repo(session)
+            chat = await _attached_chatflow(engine, repo, chatflow_id)
 
-    # Phase 2: run the turn — no DB connection held
-    try:
-        chat_node = await engine.submit_user_turn(
-            chat,
-            body.text,
-            parent_id=body.parent_id,
-            spawn_model=body.spawn_model,
-            judge_spawn_model=body.judge_spawn_model,
-            tool_call_spawn_model=body.tool_call_spawn_model,
-        )
-    except KeyError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    except DiscardedUpstreamFailure as exc:
-        raise HTTPException(409, str(exc)) from exc
+        # Phase 2: run the turn — no DB connection held
+        try:
+            chat_node = await engine.submit_user_turn(
+                chat,
+                body.text,
+                parent_id=body.parent_id,
+                spawn_model=body.spawn_model,
+                judge_spawn_model=body.judge_spawn_model,
+                tool_call_spawn_model=body.tool_call_spawn_model,
+            )
+        except KeyError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except DiscardedUpstreamFailure as exc:
+            raise HTTPException(409, str(exc)) from exc
 
-    # Phase 3: persist the final state (fresh short session)
-    async with session_maker() as session:
-        await _repo(session).save(chat)
-        await session.commit()
+        # Phase 3: persist the final state (fresh short session)
+        async with session_maker() as session:
+            await _repo(session).save(chat)
+            await session.commit()
 
     return SubmitTurnResponse(
         node_id=chat_node.id,
@@ -795,21 +802,23 @@ async def enqueue_queue_item(
     session: AsyncSession = Depends(get_session),
 ) -> PendingTurnPayload:
     engine = _get_engine(request)
-    repo = _repo(session)
-    chat = await _attached_chatflow(engine, repo, chatflow_id)
-    if node_id not in chat.nodes:
-        raise HTTPException(404, f"node {node_id} not in chatflow {chatflow_id}")
-    pending = await engine.enqueue(
-        chat.id,
-        node_id,
-        body.text,
-        source=body.source,
-        spawn_model=body.spawn_model,
-        judge_spawn_model=body.judge_spawn_model,
-        tool_call_spawn_model=body.tool_call_spawn_model,
-    )
-    await repo.save(chat)
-    await session.commit()
+    submit_lock = await engine.submit_lock(chatflow_id)
+    async with submit_lock:
+        repo = _repo(session)
+        chat = await _attached_chatflow(engine, repo, chatflow_id)
+        if node_id not in chat.nodes:
+            raise HTTPException(404, f"node {node_id} not in chatflow {chatflow_id}")
+        pending = await engine.enqueue(
+            chat.id,
+            node_id,
+            body.text,
+            source=body.source,
+            spawn_model=body.spawn_model,
+            judge_spawn_model=body.judge_spawn_model,
+            tool_call_spawn_model=body.tool_call_spawn_model,
+        )
+        await repo.save(chat)
+        await session.commit()
     return PendingTurnPayload.from_model(pending)
 
 
@@ -974,33 +983,35 @@ async def compact_chain(
     """
     engine = _get_engine(request)
 
-    async with session_maker() as session:
-        repo = _repo(session)
-        chat = await _attached_chatflow(engine, repo, chatflow_id)
-        if node_id not in chat.nodes:
-            raise HTTPException(
-                404, f"node {node_id} not in chatflow {chatflow_id}"
+    submit_lock = await engine.submit_lock(chatflow_id)
+    async with submit_lock:
+        async with session_maker() as session:
+            repo = _repo(session)
+            chat = await _attached_chatflow(engine, repo, chatflow_id)
+            if node_id not in chat.nodes:
+                raise HTTPException(
+                    404, f"node {node_id} not in chatflow {chatflow_id}"
+                )
+
+        try:
+            compact_node = await engine.compact_chain(
+                chat.id,
+                node_id,
+                compact_instruction=body.compact_instruction,
+                must_keep=body.must_keep,
+                must_drop=body.must_drop,
+                preserve_recent_turns=body.preserve_recent_turns,
+                target_tokens=body.target_tokens,
+                model=body.model,
             )
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
-    try:
-        compact_node = await engine.compact_chain(
-            chat.id,
-            node_id,
-            compact_instruction=body.compact_instruction,
-            must_keep=body.must_keep,
-            must_drop=body.must_drop,
-            preserve_recent_turns=body.preserve_recent_turns,
-            target_tokens=body.target_tokens,
-            model=body.model,
-        )
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
-
-    async with session_maker() as session:
-        await _repo(session).save(chat)
-        await session.commit()
+        async with session_maker() as session:
+            await _repo(session).save(chat)
+            await session.commit()
 
     return CompactChainResponse(
         node_id=compact_node.id,
@@ -1032,34 +1043,36 @@ async def pack_chain(
     """
     engine = _get_engine(request)
 
-    async with session_maker() as session:
-        repo = _repo(session)
-        chat = await _attached_chatflow(engine, repo, chatflow_id)
+    submit_lock = await engine.submit_lock(chatflow_id)
+    async with submit_lock:
+        async with session_maker() as session:
+            repo = _repo(session)
+            chat = await _attached_chatflow(engine, repo, chatflow_id)
 
-    from agentloom.engine.chatflow_engine import PackRangeError
+        from agentloom.engine.chatflow_engine import PackRangeError
 
-    try:
-        pack_node = await engine.pack_chain_range(
-            chat.id,
-            packed_range=body.packed_range,
-            use_detailed_index=body.use_detailed_index,
-            preserve_last_n=body.preserve_last_n,
-            pack_instruction=body.pack_instruction,
-            must_keep=body.must_keep,
-            must_drop=body.must_drop,
-            target_tokens=body.target_tokens,
-            model=body.model,
-        )
-    except PackRangeError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        try:
+            pack_node = await engine.pack_chain_range(
+                chat.id,
+                packed_range=body.packed_range,
+                use_detailed_index=body.use_detailed_index,
+                preserve_last_n=body.preserve_last_n,
+                pack_instruction=body.pack_instruction,
+                must_keep=body.must_keep,
+                must_drop=body.must_drop,
+                target_tokens=body.target_tokens,
+                model=body.model,
+            )
+        except PackRangeError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
-    async with session_maker() as session:
-        await _repo(session).save(chat)
-        await session.commit()
+        async with session_maker() as session:
+            await _repo(session).save(chat)
+            await session.commit()
 
     snap = pack_node.pack_snapshot
     return PackChainResponse(
@@ -1126,34 +1139,36 @@ async def merge_chain(
     """
     engine = _get_engine(request)
 
-    async with session_maker() as session:
-        repo = _repo(session)
-        chat = await _attached_chatflow(engine, repo, chatflow_id)
-        if body.left_id not in chat.nodes:
-            raise HTTPException(
-                404, f"node {body.left_id} not in chatflow {chatflow_id}"
-            )
-        if body.right_id not in chat.nodes:
-            raise HTTPException(
-                404, f"node {body.right_id} not in chatflow {chatflow_id}"
-            )
+    submit_lock = await engine.submit_lock(chatflow_id)
+    async with submit_lock:
+        async with session_maker() as session:
+            repo = _repo(session)
+            chat = await _attached_chatflow(engine, repo, chatflow_id)
+            if body.left_id not in chat.nodes:
+                raise HTTPException(
+                    404, f"node {body.left_id} not in chatflow {chatflow_id}"
+                )
+            if body.right_id not in chat.nodes:
+                raise HTTPException(
+                    404, f"node {body.right_id} not in chatflow {chatflow_id}"
+                )
 
-    try:
-        merge_node = await engine.merge_chain(
-            chat.id,
-            left_id=body.left_id,
-            right_id=body.right_id,
-            merge_instruction=body.merge_instruction,
-            model=body.model,
-        )
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+        try:
+            merge_node = await engine.merge_chain(
+                chat.id,
+                left_id=body.left_id,
+                right_id=body.right_id,
+                merge_instruction=body.merge_instruction,
+                model=body.model,
+            )
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
-    async with session_maker() as session:
-        await _repo(session).save(chat)
-        await session.commit()
+        async with session_maker() as session:
+            await _repo(session).save(chat)
+            await session.commit()
 
     return MergeChainResponse(
         node_id=merge_node.id,

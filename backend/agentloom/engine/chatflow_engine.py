@@ -658,22 +658,42 @@ def _split_tag_status(tag: str) -> tuple[str, str | None]:
 def _walk_chat_chain_to_root(
     chatflow: ChatFlow, node: ChatFlowNode
 ) -> list[NodeId]:
-    """Walk primary-parent chain from *node*'s parent up to root.
-    Returns ids in root-first order. Excludes *node* itself — only
-    ancestors are returned (the brief's own produced_tags are what
-    we're computing).
+    """Walk parent chain(s) from *node* up to root, returning ids in
+    root-first order. Excludes *node* itself — only ancestors are
+    returned (the brief's own produced_tags are what we're computing).
+
+    For ordinary nodes (1 parent) this is a linear walk via
+    ``parent_ids[0]``. For **merge** nodes (≥2 parents) we union both
+    parent chains so the brief's ``ancestral_tags_active`` reflects
+    concepts from BOTH branches — without this, the merge brief sees
+    only LEFT's anchors and misclassifies RIGHT's concepts as
+    "produced" (they're aggregated-not-introduced).
     """
-    chain: list[NodeId] = []
+    if not node.parent_ids:
+        return []
+
     seen: set[NodeId] = set()
-    cursor: NodeId | None = node.parent_ids[0] if node.parent_ids else None
-    while cursor and cursor not in seen:
+    # BFS from each parent so we collect every ancestor (across
+    # multiple parent chains for merge / future multi-parent nodes).
+    # We don't preserve strict chronological order across branches,
+    # but ``_aggregate_active_tags`` only cares about the multiset
+    # of (concept, status) pairs — its dict update treats merge
+    # ordering as "latest within each branch wins" which is fine.
+    chain: list[NodeId] = []
+    queue: list[NodeId] = [pid for pid in node.parent_ids if pid]
+    while queue:
+        cursor = queue.pop(0)
+        if cursor in seen:
+            continue
         seen.add(cursor)
         chain.append(cursor)
         ancestor = chatflow.nodes.get(cursor)
         if ancestor is None:
-            break
-        cursor = ancestor.parent_ids[0] if ancestor.parent_ids else None
-    chain.reverse()  # root first
+            continue
+        for pid in ancestor.parent_ids or ():
+            if pid and pid not in seen:
+                queue.append(pid)
+    chain.reverse()  # root-first (approximate for multi-parent nodes)
     return chain
 
 
@@ -783,6 +803,21 @@ class ChatFlowEngine:
         )
         self._runtimes: dict[str, ChatFlowRuntime] = {}
         self._registry_lock = asyncio.Lock()
+        #: Per-chatflow turn-submission lock. The engine's `ChatFlow`
+        #: runtime object is shared across concurrent submit_turn /
+        #: enqueue / merge / compact_chain handlers; their `repo.save`
+        #: phases interleave on the same in-memory state and trip
+        #: `_assert_frozen_chatflow_nodes_unchanged` (any frozen node
+        #: that the engine wrote to during the other handler's window —
+        #: e.g. `sticky_restored` not in `_FROZEN_EXEMPT_FIELDS`, or
+        #: `child_ids` mutation on fork — looks "modified" to the
+        #: second save's prior-vs-new dump comparison). Until the
+        #: engine's mutation paths are reworked for true concurrency,
+        #: serialize whole submissions per chatflow id.
+        #:
+        #: Lock allocation is itself protected by `_registry_lock`
+        #: (acquire via `submit_lock(cf_id)`).
+        self._submit_locks: dict[str, asyncio.Lock] = {}
 
         # Load builtin workflow templates from disk (sync), one set per
         # shipped language. The engine materializes planner / judge_pre /
@@ -871,6 +906,20 @@ class ChatFlowEngine:
                 self._runtimes[chatflow.id] = runtime
             return runtime
 
+    async def submit_lock(self, chatflow_id: str) -> asyncio.Lock:
+        """Return the per-chatflow submission lock, creating it on first
+        use. Callers wrap the entire submit-turn flow (load → engine →
+        save) in ``async with await engine.submit_lock(cf_id):`` so
+        concurrent submissions for the same chatflow serialize. See
+        ``_submit_locks`` field doc for the underlying rationale.
+        """
+        async with self._registry_lock:
+            lock = self._submit_locks.get(chatflow_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._submit_locks[chatflow_id] = lock
+            return lock
+
     def get_runtime(self, chatflow_id: str) -> ChatFlowRuntime | None:
         return self._runtimes.get(chatflow_id)
 
@@ -908,6 +957,7 @@ class ChatFlowEngine:
     async def detach(self, chatflow_id: str, *, cancel: bool = False) -> None:
         async with self._registry_lock:
             runtime = self._runtimes.pop(chatflow_id, None)
+            self._submit_locks.pop(chatflow_id, None)
         if runtime is None:
             return
         if cancel:
