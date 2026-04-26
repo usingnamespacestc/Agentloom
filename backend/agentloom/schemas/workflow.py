@@ -133,6 +133,28 @@ class WorkFlowNode(NodeBase):
     #: Must be None for every other step_kind. See MemoryBoard design.
     scope: NodeScope | None = None
     tool_constraints: ToolConstraints | None = None
+    #: M7.5 capability model — registry tool names this node is
+    #: permitted to call. ``None`` means "fall back to legacy
+    #: ``tool_constraints`` + chatflow disabled list" (the pre-M7.5
+    #: behavior; PR 3's engine filter checks this distinction). ``[]``
+    #: means an explicit empty whitelist (e.g. monitoring nodes that
+    #: shouldn't call any tool). PR 1 only adds the field; consumer
+    #: filtering lands in PR 3.
+    effective_tools: list[str] | None = None
+    #: M7.5 capability model — registry tool names this node is allowed
+    #: to **delegate to children**, i.e. the ceiling for any subtask
+    #: ``effective_tools`` it spawns. Only meaningful for ``PRE_JUDGE``
+    #: (writes the WorkFlow's overall ceiling), ``PLAN`` (re-distributes
+    #: to subtasks), and ``DELEGATE`` (re-distributes to sub_workflow
+    #: roots). All other roles leave this ``None``.
+    inheritable_tools: list[str] | None = None
+    #: M7.5 capability_request signal slot — when an execution node
+    #: discovers it needs a tool that isn't in its ``effective_tools``,
+    #: it emits the missing tool name(s) here instead of silently
+    #: failing. judge_during / monitoring scans for non-empty lists and
+    #: bubbles them to a re-plan request via ``JudgeVerdict.
+    #: capability_escalation``. PR 5 implements the read+propagate path.
+    capability_request: list[str] = Field(default_factory=list)
     #: Pin for the model this specific WorkNode's LLM call uses. Set by
     #: the engine at spawn time (from the enclosing ChatNode's
     #: ``resolved_model``) and propagated across retries/tool-call
@@ -313,15 +335,25 @@ class WorkFlow(BaseModel):
     description: EditableText | None = None
     inputs: EditableText | None = None
     expected_outcome: EditableText | None = None
-    #: Pre-check capability slice — the list of tools / skills / resources
-    #: judge_pre decided this WorkFlow needs. Written by
-    #: ``_apply_judge_pre_trio`` from ``JudgeVerdict.extracted_capabilities``
-    #: before the planner runs. Empty = judge_pre didn't scope (either
-    #: because it halted before extraction or because the fixture doesn't
-    #: ask for capabilities yet). Planner and downstream delegation can
-    #: read this to avoid re-parsing the full conversation on every
-    #: sub-worker spawn.
-    capabilities: list[str] = Field(default_factory=list)
+    #: M7.5 capability model — the registry tool names planner is
+    #: permitted to authorize for downstream subtasks (the "ceiling"
+    #: that worker ``effective_tools`` cannot exceed). Written by
+    #: ``_apply_judge_pre_trio`` from ``JudgeVerdict.extracted_inheritable_tools``
+    #: before the planner runs. Empty = judge_pre didn't scope OR a
+    #: pre-M7.5 chatflow that hasn't run a fresh judge_pre — engine
+    #: PR 3 fallback is to treat empty as "registry full set" so legacy
+    #: chatflows keep current behavior. Planner reads this to constrain
+    #: each subtask's ``effective_tools`` allocation.
+    inheritable_tools: list[str] = Field(default_factory=list)
+    #: Natural-language capability provenance — kept for UI display,
+    #: human review, and debugging. Pre-M7.5 this field was named
+    #: ``capabilities`` and stored e.g. ["web_search", "code_execution"];
+    #: M7.5 keeps that semantic but renames + pairs it with the
+    #: registry-name list above. Pydantic validator below accepts the
+    #: legacy ``capabilities`` JSON key as an alias on ingest so old
+    #: persisted chatflows decode cleanly. Empty = judge_pre didn't
+    #: emit a natural-language list.
+    capabilities_origin: list[str] = Field(default_factory=list)
 
     # Execution behavior — each WorkFlow (including nested ones) picks its own
     execution_mode: ExecutionMode = ExecutionMode.NATIVE_REACT
@@ -397,6 +429,33 @@ class WorkFlow(BaseModel):
         invariant going forward is ``len(root_ids) <= 1`` on new data.
         """
         return self.root_ids[0] if self.root_ids else None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_capabilities(cls, data: Any) -> Any:
+        """Backwards-compat for the M7.5 capability model rename.
+
+        Pre-M7.5 the natural-language capability list lived on the
+        ``capabilities`` field. M7.5 splits that into:
+
+        - ``inheritable_tools`` (NEW, registry tool names — engine
+          consumed)
+        - ``capabilities_origin`` (RENAMED from ``capabilities``,
+          natural-language provenance — UI / human review)
+
+        Persisted JSON from older chatflows still carries the
+        ``capabilities`` key. This validator translates it to
+        ``capabilities_origin`` on ingest. Legacy data has no
+        ``inheritable_tools`` — engine PR 3 fallback treats empty as
+        "registry full set" so old chatflows keep current behavior
+        until the next judge_pre run repopulates both fields.
+        """
+        if isinstance(data, dict):
+            if "capabilities" in data and "capabilities_origin" not in data:
+                data = {**data, "capabilities_origin": data["capabilities"]}
+            if "capabilities" in data:
+                data = {k: v for k, v in data.items() if k != "capabilities"}
+        return data
 
     # ----------------------------------------------------------- construction
 

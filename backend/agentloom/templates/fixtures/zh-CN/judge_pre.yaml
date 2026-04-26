@@ -90,18 +90,35 @@ plan:
                 是没有请求的闲聊等），就让三个字段都为空串。planner
                 会看到这个信号并以 infeasible 中止。
 
-            (2) 预估 worker 可能需要的能力（capabilities）：
+            (2) 预估 worker 可能需要的能力，分两栏输出：
 
+                **栏 A — extracted_capabilities（自然语言）**：
                 列出完成该任务可能用到的资源 / 工具 / 技能——例如
                 需要查新信息时给 ``["web_search"]``、需要跑或验证
                 代码时给 ``["code_execution"]``、需要拉取具体 URL
                 时给 ``["file_read", "web_fetch"]``。用简短的
-                snake_case 词元，每个词元对应一个独立能力。若该任务
-                是纯对话 / 纯推理、不需要任何外部资源，则省略该字段
-                或返回空数组——这种情况下 worker 会默认拥有全部工具
-                池。该列表是**预先缩圈的提示**，不是硬性白名单；
-                planner 会参考它决定给下游子 worker 分哪些切片，
-                所以此处**写具体**比**写全**更有用。
+                snake_case 词元。这一栏给 UI 展示和人工 review 用，
+                **不直接进入引擎过滤管线**。
+
+                **栏 B — extracted_inheritable_tools（精确名）**：
+                **从下方"可用工具目录"里逐字挑选**该任务真正需要的
+                工具名，原样复制到列表里。注意：
+                  - 必须 **逐字复制**目录中的 ``Name`` 字段（带
+                    ``mcp__<server>__<tool>`` 前缀的也要带）；
+                  - 别凭记忆写名字——如果引擎收到目录里没有的串，
+                    会丢弃并打 warning，等于该工具 planner 拿不到；
+                  - 宁缺勿滥：只挑你 **确信** 任务需要的，多余的
+                    会变成 planner 给子 worker 的额外攻击面；
+                  - 若该任务纯对话 / 纯推理 / 不需要任何工具，返回
+                    空数组 ``[]``——引擎会把空数组当成 "registry
+                    全开"（pre-M7.5 行为兜底），所以空数组安全；
+                  - 若目录里没有合适的工具名但任务又需要，把缺口写
+                    进栏 A 自然语言列表，planner 会看见但不会下放
+                    工具。
+
+                两栏要 **保持一致**：栏 A 列出的每条自然语言能力，
+                如果在目录里能找到对应工具名，就**也**应该出现在
+                栏 B 里；栏 B 不应有栏 A 没暗示过的工具。
 
             (3) 基于你刚写出的 trio 判断可行性：
 
@@ -125,6 +142,7 @@ plan:
                "extracted_inputs": str,
                "extracted_expected_outcome": str,
                "extracted_capabilities": [str, ...],
+               "extracted_inheritable_tools": [str, ...],
                "feasibility": "ok"|"risky"|"infeasible",
                "blockers": [str, ...],
                "missing_inputs": [str, ...]}

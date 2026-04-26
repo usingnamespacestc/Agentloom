@@ -182,6 +182,16 @@ _VARIANT_SCHEMAS: dict[JudgeVariant, dict[str, Any]] = {
                 "type": "array",
                 "items": {"type": "string"},
             },
+            "extracted_inheritable_tools": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "M7.5 capability model: registry tool names this "
+                    "WorkFlow's planner is permitted to authorize for "
+                    "subtasks. Pick verbatim from the catalog block in "
+                    "the judge_pre prompt."
+                ),
+            },
         },
         "required": [
             "extracted_description",

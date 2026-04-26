@@ -114,22 +114,42 @@ plan:
                 fields. The planner will see that and halt as
                 infeasible.
 
-            (2) Scope the capabilities the worker will need:
+            (2) Scope the capabilities the worker will need — TWO
+                fields:
 
+                **Field A — extracted_capabilities (natural language)**:
                 List the resources / tools / skills the task plausibly
                 needs — e.g. ``["web_search"]`` for a question that
                 requires fresh information, ``["code_execution"]`` for
                 a task that runs or validates code, ``["file_read",
                 "web_fetch"]`` for a task that pulls specific URLs.
-                Use short, snake_case tokens; one token per distinct
-                capability. Omit the field (or return an empty list)
-                when the task is pure chat / reasoning with no
-                external affordances needed — the worker will default
-                to its full tool pool in that case. This list is a
-                *pre-scope hint*, not a hard allow-list; the planner
-                reads it to decide which sub-workers need which
-                slices, so being specific here is more useful than
-                being exhaustive.
+                Short snake_case tokens. This list goes to UI / human
+                review and **does not directly drive engine filtering**.
+
+                **Field B — extracted_inheritable_tools (exact names)**:
+                **Pick verbatim from the "available tools catalog"
+                below**. Rules:
+                  - Copy the ``Name`` field byte-for-byte (including
+                    any ``mcp__<server>__<tool>`` prefix);
+                  - Do NOT make up names from memory — the engine
+                    drops unknown strings with a warning, which means
+                    that tool won't reach the planner;
+                  - Be conservative: only include tools you are
+                    **confident** the task needs; extras become
+                    surface area the planner could mis-allocate;
+                  - For pure-chat / pure-reasoning / no-tools tasks,
+                    return ``[]`` — the engine treats empty as
+                    "registry full set" (pre-M7.5 fallback), so an
+                    empty list is safe;
+                  - If a needed capability has no matching tool in the
+                    catalog, mention it in field A (natural language)
+                    so the planner sees the gap, but leave it out
+                    of field B.
+
+                The two fields should **agree**: every natural-language
+                capability in A should map to a tool in B if such a
+                tool exists in the catalog. B should not contain tools
+                that A didn't motivate.
 
             (3) Decide feasibility given the trio you just wrote:
 
@@ -156,6 +176,7 @@ plan:
                "extracted_inputs": str,
                "extracted_expected_outcome": str,
                "extracted_capabilities": [str, ...],
+               "extracted_inheritable_tools": [str, ...],
                "feasibility": "ok"|"risky"|"infeasible",
                "blockers": [str, ...],
                "missing_inputs": [str, ...]}

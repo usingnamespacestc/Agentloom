@@ -3324,7 +3324,11 @@ class ChatFlowEngine:
             # judge_pre will re-run and may refine, but seeding with the
             # parent's list means a first-round planner already sees the
             # right slice without waiting for the sub's judge_pre verdict.
-            capabilities=list(parent.capabilities),
+            # M7.5 split: ``capabilities_origin`` (natural language, UI
+            # provenance) and ``inheritable_tools`` (registry names, engine
+            # consumed) propagate independently.
+            capabilities_origin=list(parent.capabilities_origin),
+            inheritable_tools=list(parent.inheritable_tools),
             # Delegation depth fuse: each sub-WorkFlow is one level
             # deeper than the planner that spawned it. When it hits
             # the budget, ``_after_planner_judge`` forces any further
@@ -5290,13 +5294,20 @@ def _apply_judge_pre_trio(workflow: WorkFlow, verdict: JudgeVerdict) -> None:
     _set("description", verdict.extracted_description)
     _set("inputs", verdict.extracted_inputs)
     _set("expected_outcome", verdict.extracted_expected_outcome)
-    # Capabilities is a plain list, not an EditableText — the user
-    # typically doesn't hand-edit the tool-slice so there's no
-    # provenance to track. Overwrite only when judge_pre actually
-    # returned a non-empty list, so a capabilities-less fixture or a
-    # halted verdict doesn't clobber a previous extraction.
+    # M7.5 capability model: judge_pre now emits TWO lists.
+    # ``extracted_capabilities`` is the natural-language list (UI / human
+    # review) → ``WorkFlow.capabilities_origin``.
+    # ``extracted_inheritable_tools`` is the registry-name list (engine
+    # consumed) → ``WorkFlow.inheritable_tools``.
+    # Both fields independently overwrite only when judge_pre returned
+    # non-empty values, so a partial extraction (e.g. older fixture
+    # that only emits ``extracted_capabilities``) keeps the other
+    # field's previous value untouched. PR 3 wires the engine filter
+    # to read ``inheritable_tools``; for now this is plumbing only.
     if verdict.extracted_capabilities:
-        workflow.capabilities = list(verdict.extracted_capabilities)
+        workflow.capabilities_origin = list(verdict.extracted_capabilities)
+    if verdict.extracted_inheritable_tools:
+        workflow.inheritable_tools = list(verdict.extracted_inheritable_tools)
 
 
 def _judge_pre_should_halt(verdict: JudgeVerdict) -> bool:
@@ -6220,9 +6231,12 @@ def _trio_params(workflow: WorkFlow) -> dict[str, str]:
     template that asks for ``{{ inputs }}`` doesn't blow up on a
     legacy WorkFlow that predates trio seeding.
 
-    ``capabilities`` is flattened to a comma-joined string — the template
-    substitutor handles scalars, and empty string lets ``{% if capabilities %}``
-    suppress the whole block cleanly when judge_pre didn't pre-scope.
+    ``capabilities`` is flattened to a comma-joined string from the
+    natural-language ``capabilities_origin`` (M7.5 split: ``inheritable_tools``
+    is the registry-name list for engine routing, kept off the prompt
+    surface to avoid token bloat). Templates referencing ``{% if
+    capabilities %}`` keep working — the field still exists, just sourced
+    from ``capabilities_origin`` post-rename.
     """
     return {
         "description": workflow.description.text if workflow.description else "",
@@ -6230,7 +6244,7 @@ def _trio_params(workflow: WorkFlow) -> dict[str, str]:
         "expected_outcome": (
             workflow.expected_outcome.text if workflow.expected_outcome else ""
         ),
-        "capabilities": ", ".join(workflow.capabilities),
+        "capabilities": ", ".join(workflow.capabilities_origin),
     }
 
 

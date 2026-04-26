@@ -362,12 +362,24 @@ class JudgeVerdict(BaseModel):
     extracted_inputs: str | None = None
     extracted_expected_outcome: str | None = None
     #: Resources / tools / skills judge_pre infers the task will need
-    #: (e.g. ``["web_search", "code_execution"]``). Written onto
-    #: ``WorkFlow.capabilities`` so the planner and downstream workers
-    #: can read a pre-scoped slice of available resources. ``None`` or
-    #: empty = judge_pre didn't scope (legacy behavior / older fixtures
-    #: without a capabilities field).
+    #: (e.g. ``["web_search", "code_execution"]``). Natural-language
+    #: provenance — written onto ``WorkFlow.capabilities_origin`` for
+    #: UI display and human review. M7.5 keeps this field for the
+    #: judge LLM's "what does this need?" reasoning step, paired with
+    #: ``extracted_inheritable_tools`` below for the engine-consumed
+    #: registry-name list.
     extracted_capabilities: list[str] | None = None
+    #: M7.5 capability model — registry tool names judge_pre selected
+    #: from the chatflow's tool catalog (injected at fixture-render
+    #: time). Written onto ``WorkFlow.inheritable_tools`` so the
+    #: planner can constrain each subtask's ``effective_tools``
+    #: allocation. ``None`` or empty = judge_pre didn't (or couldn't)
+    #: pick from the catalog; engine PR 3 fallback treats this as
+    #: "registry full set" so legacy chatflows / older fixtures keep
+    #: current behavior. The fixture prompt instructs the LLM to
+    #: copy names verbatim from the catalog block; the engine
+    #: drops unknown names with a warning rather than aborting.
+    extracted_inheritable_tools: list[str] | None = None
 
     # --- judge_during ---
     critiques: list[Critique] = Field(default_factory=list)
