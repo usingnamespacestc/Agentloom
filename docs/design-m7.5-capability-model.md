@@ -458,6 +458,8 @@ memory `_drill_down_ids.md` 确认 commit `9e5dcba` 已 ship 同 ChatFlow 内 dr
 2. **`SideEffect.WRITE` 默认保守**：所有未标注的工具变 WRITE 后，monitoring / post_check 会看不到——这是设计意图（"显式标 read 才能进 read-only 集合"）但可能误伤 MCP server 上批量未标 readOnlyHint 的查询工具。如果出现，临时给特定 server 配 `default_side_effect: read` 覆写。
 3. **catalog 注入双语**：`_resolve_tool_catalog` 当前不分语言。中文 ChatFlow 看到英文 description 会有点割裂。本里程碑不处理；UI 已 i18n 后再考虑工具 description 的多语言池。
 4. **判 atomic vs recon 由 cognitive_start 自己判定**：弱模型可能永远选 atomic 跳过 recon，导致 DAG 路径几乎不走。本里程碑接受这个风险——judge_pre 单 LLM 现行 fixture 已经有"该用 grounding 时不用"问题；DAG 不会比现状更差。
+   - **2026-04-26 post-ship 实测验证**：claude-haiku-4-5 + claude-sonnet-4-6 共 3 次 auto_plan + cognitive_react_enabled 跑，**0 次 emit `recon_plan`**。即使 prompt 写 "Don't guess — verify against the file"，sonnet 也判 atomic 让 worker 自己跑 Read。模型倾向相信"worker 拿着只读工具能搞定"，不主动占用判官层做侦察。`extracted_inheritable_tools` 选对了（`['Read', 'Grep']`），但没用 recon。
+   - **结论**：sonnet 也归"弱模型"档（在这个意义上）。要让 recon 真激活需要：(a) opus 级 reasoning + (b) 把 fixture 引导从 "may emit" 强化到 "should emit when X"，或 (c) 跑信息明确不足的 fixture（"基于一份你看不到的文件…"模板）。
 
 ### 10.2 Weak provider fallback
 
@@ -476,7 +478,37 @@ memory 估计 catalog 注入 +5-9K token / chatflow。验证：
 - 按 chatflow 平均 3 turn 算 ~10K token——比 memory 估计略高但仍在可接受范围。
 - **分级建议**（如果 token 涨得厉害）：A 档（仅 name）作 fallback，env var `AGENTLOOM_CATALOG_VERBOSITY={a,b}` 控制。本里程碑默认 B，不预实现 A。
 
-### 10.4 Memory 与代码不一致
+**2026-04-26 post-ship 实测**：当前 8 个 built-in 工具实际 catalog 渲染 ~3188 字符 ≈ 800 token。乘以 5 cognitive 节点 = **~4K token / chatflow turn**，比设计预估的 5-9K 低 50%。原因：description first-line 截断比预期更激进（~50 token / 条而不是 ~100）。**A 档 fallback 不必要**——除非 MCP 接入后工具数量翻倍，否则当前 B 档常驻就够。
+
+### 10.5 Emergent: catalog inject 前置吸收 capability_request 路径（post-ship 2026-04-26）
+
+设计阶段把 PR 4（catalog inject）和 PR 5（capability_request）当作两条**独立的工具缺口信号源**：catalog 让判官知道有什么工具，capability_request 让 worker 在执行中喊缺什么。落地后的真模型实测发现两条路径**互相覆盖**：
+
+**实验设置**：`disabled_tool_names=["Write", "Edit", "Bash"]` + auto_plan + cognitive_react_enabled=True + task `"Create a Python file at /tmp/hello_m75.py..."`。意图是触发 worker emit `<capability_request>Write</capability_request>`。
+
+**实际行为**：
+- judge_pre 看 catalog 直接发现里面没 Write/Edit/Bash → 判 `feasibility=infeasible`
+- 整个 chain 在 judge_pre 阶段 halt，4 个 worknode 后干净结束
+- worker 根本没被 spawn，所以 `capability_request` 永远不会被 emit
+- agent_response: `"no file writing tool is available"`
+
+**这是个 emergent positive property**：catalog inject 把"工具缺口"的检测**前置**到了 judge 层。worker 被请出战场之前缺口已经暴露了。
+
+**对 PR 5 capability_request 实际应用面的重新评估**：
+
+设计时假设的"worker-first 检测 + 信号上传"应用面被压缩到这几个剩余场景：
+
+1. **Judge 看 catalog 误判 ok**——任务表述足够模糊让 judge 觉得只读工具够，但 worker 实操才发现需要写。这种 prompt 工程性的 corner case 不容易自然复现
+2. **MCP 工具池动态变化**——catalog 在 judge_pre 时是 stale 的，worker 跑时 server 已 disconnect。这要等 MCP 真正接入有 churn 后才会出现
+3. **多步任务中 worker 中途升级需求**——比 judge 的 trio 更精细的需求分析。也是要真实负载才能观察
+4. **ToolConstraints allow/deny 否决 catalog 里看似存在的工具**——judge 看 catalog 有 Write 觉得 ok，但 worker 实际调 Write 被 check_call 拒。当前 ToolError → ToolResult(is_error=True) 没把这个错误形态翻译成 cap_request，可以做但已超出 M7.5
+
+**对 follow-up roadmap 的影响**：
+- ~~"judge_during 注入 capability_request 内容到 prompt"~~ —— **不急做**。当前 cap_request 触发率太低，先观察真实负载有多少场景命中"judge 误判 ok"再决定
+- 真要让 cap_request 有用，可能反而是上面 #4：让 ToolConstraints 否决在 worker 视角呈现为 cap_request marker，而不是 ToolResult error。这是个独立小 PR，未来可做
+- catalog 路径已经吸收了大部分缺工具检测责任，这是设计时没明确预测的 positive collapse
+
+
 
 逐项核对 memory：
 - ✅ `_inject_upstream_outputs_into_ready_children` 仍在 `chatflow_engine.py:4053`（depth_over_breadth memory 准确）。
