@@ -19,13 +19,13 @@ up:
 
 dev:
 	docker compose up -d postgres redis
-	cd backend && uvicorn agentloom.main:app --reload --host 0.0.0.0 --port 8000
+	cd backend && uvicorn agentloom.main:app --reload --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 5
 
 dev-down:
 	docker compose down
 
 backend:
-	cd backend && uvicorn agentloom.main:app --reload --host 0.0.0.0 --port 8000
+	cd backend && uvicorn agentloom.main:app --reload --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 5
 
 frontend:
 	cd frontend && npm run dev

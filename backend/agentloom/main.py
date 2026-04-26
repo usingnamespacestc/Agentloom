@@ -156,6 +156,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # Aggressive shutdown for `--reload` cycles. Without this,
+        # any in-flight ``submit_turn`` whose worker is mid-LLM-call
+        # blocks ``uvicorn``'s graceful shutdown until the call finishes
+        # naturally (often minutes for qwen36 / auto_plan). The watcher
+        # then prints "Waiting for background tasks to complete" and
+        # the dev has to ``kill -9`` the process. We instead cancel
+        # every attached chatflow runtime first — each ``detach``
+        # sends ``CancelledError`` into the runtime's active scheduler
+        # tasks and awaits ``runtime.drain()`` — so by the time
+        # uvicorn checks "any work left?" the answer is reliably no.
+        # Trade-off: an in-flight turn loses its assistant draft if
+        # the user happens to reload backend code mid-LLM-call. That's
+        # the right priority in dev: don't let one stuck turn force
+        # a manual kill.
+        engine = getattr(app.state, "chatflow_engine", None)
+        if engine is not None:
+            for cf_id in list(engine.attached_chatflow_ids()):
+                try:
+                    await engine.detach(cf_id, cancel=True)
+                except Exception:  # noqa: BLE001 — best-effort drain
+                    logging.getLogger(__name__).exception(
+                        "lifespan: detach failed for chatflow %s", cf_id
+                    )
         if mcp_task is not None and not mcp_task.done():
             mcp_task.cancel()
             try:

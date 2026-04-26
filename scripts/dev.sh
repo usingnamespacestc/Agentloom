@@ -61,7 +61,13 @@ info "running alembic upgrade head..."
 info "launching backend (uvicorn :8000) — log: $BACKEND_LOG"
 (
   cd backend
-  exec uvicorn agentloom.main:app --reload --host 0.0.0.0 --port 8000
+  # ``--timeout-graceful-shutdown 5`` caps how long uvicorn will wait
+  # for in-flight requests + background tasks to finish on a reload.
+  # Combined with the lifespan hook that actively cancels chatflow
+  # runtimes on shutdown, this means a backend code edit reloads in
+  # 5 seconds max even if a long qwen36 ``submit_turn`` is mid-flight.
+  exec uvicorn agentloom.main:app --reload --host 0.0.0.0 --port 8000 \
+    --timeout-graceful-shutdown 5
 ) > "$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
 
