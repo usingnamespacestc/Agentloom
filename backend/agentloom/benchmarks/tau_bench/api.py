@@ -47,6 +47,16 @@ class CreateSessionRequest(BaseModel):
     title: str | None = Field(
         None, description="Optional ChatFlow title; default ``[tau-bench] {domain} #{task_index}``"
     )
+    tool_loop_budget: int = Field(
+        30,
+        ge=1,
+        description="Max tool-use iterations per turn. Default 30 (vs "
+        "the ChatFlow default 12) because airline tasks legitimately "
+        "need 5-10+ tool calls per turn (lookup user → list "
+        "reservations → for each: get details + update flights + "
+        "update baggage). Set lower if you specifically want to "
+        "stress-test the budget guard.",
+    )
 
 
 class CreateSessionResponse(BaseModel):
@@ -140,6 +150,7 @@ async def create_session(
         chat.draft_model = body.agent_model
     # Match the per-call-type override pattern: judge / tool_call / brief
     # all default to draft_model unless overridden later.
+    chat.tool_loop_budget = body.tool_loop_budget
 
     session_id = chat.id  # 1:1 mapping
     try:

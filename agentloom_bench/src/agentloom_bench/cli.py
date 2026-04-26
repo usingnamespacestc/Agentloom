@@ -101,12 +101,14 @@ def run(
         ..., "--agent-model", help="Model id under that provider."
     ),
     user_model: str = typer.Option(
-        "doubao-1-5-pro-32k-250115",
+        "doubao-seed-2-0-pro-260215",
         "--user-model",
         help="Model id for the user simulator (litellm-style). Default "
-        "is the volcengine doubao-pro 32k variant (free tier on "
-        "volcengine API). litellm does NOT recognize the ARK console "
-        "alias ``ark-code-latest`` — pass an actual doubao series id.",
+        "is volcengine doubao-seed 2.0 Pro (latest general-purpose "
+        "Pro tier; free tier on volcengine API). Versionless aliases "
+        "like ``doubao-seed-2-0-pro`` are NOT accepted — the date "
+        "suffix is required. The ARK console alias ``ark-code-latest`` "
+        "is also rejected by litellm; pass actual doubao series ids.",
     ),
     user_provider: Optional[str] = typer.Option(
         "volcengine",
