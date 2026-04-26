@@ -373,7 +373,7 @@ class ChatFlow(BaseModel):
     #: hint). ``None`` means "use the built-in default" — the engine
     #: falls back to a workspace-language-appropriate template. Set this
     #: to override (e.g. for models that need a different framing). See
-    #: ``_maybe_prepend_runtime_note`` in the engine for the wire-up.
+    #: ``_compose_system_envelope`` in the engine for the wire-up.
     runtime_environment_note: str | None = None
     #: Tier 1 pre-llm_call auto-compact threshold. When the estimated
     #: ancestor-context footprint of a pending llm_call crosses

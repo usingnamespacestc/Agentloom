@@ -896,6 +896,17 @@ class WorkflowEngine:
         #: keeps bare-engine tests that don't pipe a chatflow through
         #: behaving exactly as before.
         self._effective_runtime_note: str = ""
+        #: Pre-rendered M7.5 inheritable-tool catalog. ChatFlowEngine
+        #: builds it via ``_resolve_tool_catalog(chatflow)`` and hands
+        #: it in via ``execute(chatflow_tool_catalog=...)``. Injected as
+        #: a system-message suffix before every cognitive (judge /
+        #: planner) LLM call so the model can ``extracted_inheritable_tools``
+        #: verbatim from real registry names. Worker calls do not see
+        #: it — their tool definitions already enumerate availability,
+        #: and the catalog block (5-9K tokens) would just bloat the
+        #: prompt. Empty string disables the inject; default empty
+        #: keeps bare-engine tests behaving like pre-M7.5.
+        self._effective_tool_catalog: str = ""
         #: ChatFlow-level caps on brief tag emissions, threaded into
         #: ``_spawn_node_brief`` so the fixture's prompt bounds the
         #: emitted ``produced_tags`` / ``consumed_tags`` arrays. Defaults
@@ -918,6 +929,7 @@ class WorkflowEngine:
         chatflow_compact_preserve_mode: CompactPreserveMode | object = _UNSET,
         chatflow_compact_model: ProviderModelRef | None | object = _UNSET,
         chatflow_runtime_environment_note: str | object = _UNSET,
+        chatflow_tool_catalog: str | object = _UNSET,
         chatflow_max_produced_tags: int | object = _UNSET,
         chatflow_max_consumed_tags: int | object = _UNSET,
         chatflow_id: str | None = None,
@@ -983,6 +995,11 @@ class WorkflowEngine:
             ""
             if chatflow_runtime_environment_note is _UNSET
             else str(chatflow_runtime_environment_note or "")
+        )
+        self._effective_tool_catalog = (
+            ""
+            if chatflow_tool_catalog is _UNSET
+            else str(chatflow_tool_catalog or "")
         )
         if chatflow_max_produced_tags is not _UNSET:
             self._effective_max_produced_tags = int(chatflow_max_produced_tags)  # type: ignore[arg-type]
@@ -1372,15 +1389,19 @@ class WorkflowEngine:
             )
             tool_defs = [ToolDefinition(**t.definition()) for t in resolved]
 
-        # Runtime environment note — prepended as an extra system message
-        # only when this call exposes tools. Pure judge / brief calls
-        # (tools=[]) skip the inject so we don't waste tokens on calls
-        # that can't tool-call anyway. Empty effective note also skips.
-        # Note text is ChatFlowEngine-resolved (static user text +
-        # dynamic OS / shell / Bash-disabled hint), passed in via
-        # ``execute(chatflow_runtime_environment_note=...)``.
-        messages = _maybe_prepend_runtime_note(
-            messages, tool_defs, self._effective_runtime_note
+        # System envelope — prepend the runtime-environment note (always
+        # for tool-bearing worker calls, plus for cognitive calls that
+        # also need the inheritable-tool catalog) and the M7.5 catalog
+        # block (cognitive roles only). See ``_compose_system_envelope``
+        # for the exact gating. The catalog body (5-9K tokens) is too
+        # heavy to ship to every worker call — workers already get the
+        # full tool definitions in the provider call's ``tools=`` slot.
+        messages = _compose_system_envelope(
+            messages,
+            self._effective_runtime_note,
+            self._effective_tool_catalog,
+            expose_tools=expose_tools,
+            node_role=node.role,
         )
 
         response = await self._provider_call(
@@ -2538,43 +2559,72 @@ def _spawn_tool_loop_children(workflow: WorkFlow, parent_llm: WorkFlowNode) -> N
     workflow.add_node(follow_up)
 
 
-def _maybe_prepend_runtime_note(
+def _compose_system_envelope(
     messages: list[Message],
-    tool_defs: list[ToolDefinition],
-    note: str,
+    runtime_note: str,
+    tool_catalog: str,
+    *,
+    expose_tools: bool,
+    node_role: WorkNodeRole | None,
 ) -> list[Message]:
-    """Prepend the runtime-environment note as an extra system message
-    when the call exposes tools.
+    """Prepend the per-call system envelope as an extra system message.
 
-    Skips silently when:
-    - No tool definitions in this call (judges/briefs without tool
-      access don't need the anti-hallucination framing — saves tokens
-      and keeps cache prefix stable for those code paths).
-    - Note is empty after strip (caller explicitly disabled).
-    - First message already IS the same runtime note (dedup): the
-      previous LLM call's saved ``input_messages`` already carry it,
-      and ``_build_tagged_context_from_ancestors`` reuses the most
-      recent DRAFT ancestor's ``input_messages`` as the seed for
-      tool-loop follow-ups, so prepending again would stack a new
-      copy each iteration. Observed 2026-04-25 on the v7 qwen36 run:
-      a worker draft 4 tool-loop iterations deep had 4 copies of
-      the runtime note as system messages [0..3]. Dedup keeps it at
-      exactly one copy per node's saved context.
+    Two distinct payloads share one prepend slot so we can dedup
+    against the saved ``input_messages`` seed (see "cache-stable"
+    below):
 
-    The note is fully pre-rendered by the caller (ChatFlowEngine
-    combines static user text + dynamic OS / shell / cwd hints into
-    one string). The engine's only job here is the tool-gated
-    prepend.
+    - **runtime note** (anti-hallucination framing — OS / shell /
+      Bash-disabled hint). Pre-rendered by ChatFlowEngine and passed
+      in via ``execute(chatflow_runtime_environment_note=...)``.
+    - **inheritable-tool catalog** (M7.5: registry names + one-line
+      descriptions). Pre-rendered by
+      ``ChatFlowEngine._resolve_tool_catalog`` and passed in via
+      ``execute(chatflow_tool_catalog=...)``. Lets cognitive nodes
+      pick verbatim into ``extracted_inheritable_tools`` without
+      hallucinating tool names.
 
-    Cache-friendly: the note carries no per-call dynamic content (no
-    timestamps, no per-turn ids), so identical notes across calls
-    share the same prefix and KV cache stays warm.
+    Gating (each independent):
+
+    - Worker calls (``expose_tools=True``): runtime note only. The
+      provider's ``tools=`` slot already enumerates every tool the
+      worker may call, so the catalog block would just bloat the
+      prompt by 5-9K tokens.
+    - Cognitive calls (``expose_tools=False`` AND
+      ``node_role`` is one of PRE_JUDGE / PLAN / PLAN_JUDGE /
+      WORKER_JUDGE / POST_JUDGE): runtime note + ``\\n---\\n`` +
+      catalog. The judge/planner needs registry names but never gets
+      a tool slot.
+    - Bare calls (briefs, compact, judges with neither role nor
+      catalog): no envelope. Preserves the pre-M7.5 token frugality
+      for cleanup paths.
+
+    Empty inputs short-circuit: empty runtime note and empty catalog
+    means no envelope at all, original messages returned untouched.
+
+    Cache-stable: the envelope carries no per-call dynamic content.
+    First call in a turn primes the prefix; subsequent calls in the
+    same chatflow share it. Dedup against
+    ``isinstance(messages[0], SystemMessage) and messages[0].content
+    == text`` prevents tool-loop follow-ups from stacking duplicates
+    when ``input_messages`` already carries the envelope from the
+    parent draft (observed 2026-04-25 on the v7 qwen36 run, then 4
+    iterations deep would have 4 copies of the runtime note).
     """
-    if not tool_defs:
+    parts: list[str] = []
+    note = (runtime_note or "").strip()
+    if expose_tools:
+        if note:
+            parts.append(note)
+    else:
+        if node_role in _COGNITIVE_ROLES:
+            if note:
+                parts.append(note)
+            catalog = (tool_catalog or "").strip()
+            if catalog:
+                parts.append(catalog)
+    if not parts:
         return messages
-    text = (note or "").strip()
-    if not text:
-        return messages
+    text = "\n\n---\n\n".join(parts)
     if (
         messages
         and isinstance(messages[0], SystemMessage)

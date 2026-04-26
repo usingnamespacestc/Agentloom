@@ -1640,6 +1640,7 @@ class ChatFlowEngine:
                 # would recurse uselessly.
                 chatflow_compact_trigger_pct=None,
                 chatflow_runtime_environment_note=self._resolve_runtime_note(chatflow),
+                chatflow_tool_catalog=self._resolve_tool_catalog(chatflow),
                 chatflow_max_produced_tags=chatflow.max_produced_tags,
                 chatflow_max_consumed_tags=chatflow.max_consumed_tags,
                 chatflow_id=chatflow.id,
@@ -1872,6 +1873,7 @@ class ChatFlowEngine:
                 # own execute() and re-enable Tier 1 normally.
                 chatflow_compact_trigger_pct=None,
                 chatflow_runtime_environment_note=self._resolve_runtime_note(chatflow),
+                chatflow_tool_catalog=self._resolve_tool_catalog(chatflow),
                 chatflow_max_produced_tags=chatflow.max_produced_tags,
                 chatflow_max_consumed_tags=chatflow.max_consumed_tags,
                 chatflow_id=chatflow.id,
@@ -2460,6 +2462,7 @@ class ChatFlowEngine:
                 # conversation (it's templated as two big text blobs).
                 chatflow_compact_trigger_pct=None,
                 chatflow_runtime_environment_note=self._resolve_runtime_note(chatflow),
+                chatflow_tool_catalog=self._resolve_tool_catalog(chatflow),
                 chatflow_max_produced_tags=chatflow.max_produced_tags,
                 chatflow_max_consumed_tags=chatflow.max_consumed_tags,
                 chatflow_id=chatflow.id,
@@ -3180,6 +3183,54 @@ class ChatFlowEngine:
             return "(empty)"
         names = sorted(t.name for t in self._tools.all())
         return ", ".join(names) if names else "(empty)"
+
+    def _resolve_tool_catalog(self, chatflow: ChatFlow) -> str:
+        """Render the M7.5 inheritable-tool catalog injected before
+        every cognitive (judge / planner) LLM call.
+
+        Format — markdown so models read it as a structured list:
+
+            ## Available tools catalog
+
+            - Name: `Read`
+              Description: Read a file from the local filesystem.
+
+            - Name: `Bash`
+              Description: Execute a shell command.
+
+            ...
+
+        Sourced from the ChatFlowEngine's tool registry minus
+        ``chatflow.disabled_tool_names`` (workspace toggle off → not
+        a candidate for inheritable_tools). Tools are sorted by name
+        for stable cache prefix across calls in the same chatflow.
+
+        Returns the empty string when the registry is missing or
+        every tool is disabled. The engine treats empty as "skip the
+        catalog block in the system envelope".
+
+        Why a separate render rather than feeding into the prompt
+        template: catalog content is a tool-registry derived fact
+        (registration order, MCP server connect/disconnect), not
+        user-editable. Threading it through the system envelope
+        keeps the YAML fixtures stable and the catalog refreshes
+        automatically when MCP servers (un)register.
+        """
+        if self._tools is None:
+            return ""
+        disabled = chatflow.disabled_tool_names or frozenset()
+        rows: list[str] = []
+        for tool in sorted(self._tools.all(), key=lambda t: t.name):
+            if tool.name in disabled:
+                continue
+            description = (tool.description or "").strip().splitlines()
+            first_line = description[0].strip() if description else ""
+            rows.append(f"- Name: `{tool.name}`\n  Description: {first_line}")
+        if not rows:
+            return ""
+        lang = (self._current_fixture_language or "").lower()
+        heading = "## 可用工具目录" if lang.startswith("zh") else "## Available tools catalog"
+        return f"{heading}\n\n" + "\n\n".join(rows)
 
     # ------------------------------------------------------------ planner spawns
     #
@@ -4669,6 +4720,7 @@ class ChatFlowEngine:
                 chatflow_compact_preserve_mode=chatflow.compact_preserve_mode,
                 chatflow_compact_model=chatflow.compact_model,
                 chatflow_runtime_environment_note=self._resolve_runtime_note(chatflow),
+                chatflow_tool_catalog=self._resolve_tool_catalog(chatflow),
                 chatflow_max_produced_tags=chatflow.max_produced_tags,
                 chatflow_max_consumed_tags=chatflow.max_consumed_tags,
                 chatflow_id=chatflow.id,
@@ -4720,6 +4772,7 @@ class ChatFlowEngine:
                     await self._inner.execute(
                         chat_node.workflow,
                         chatflow_runtime_environment_note=self._resolve_runtime_note(chatflow),
+                chatflow_tool_catalog=self._resolve_tool_catalog(chatflow),
                 chatflow_max_produced_tags=chatflow.max_produced_tags,
                 chatflow_max_consumed_tags=chatflow.max_consumed_tags,
                         chatflow_id=chatflow.id,
