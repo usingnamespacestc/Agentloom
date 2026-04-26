@@ -18,7 +18,7 @@ from typing import Any
 
 from agentloom.mcp.client import MCPClient, MCPClientError
 from agentloom.schemas.common import ToolResult
-from agentloom.tools.base import Tool, ToolContext, ToolError
+from agentloom.tools.base import SideEffect, Tool, ToolContext, ToolError
 
 
 def mcp_tool_name(server_id: str, tool_name: str) -> str:
@@ -52,6 +52,7 @@ class MCPRemoteTool(Tool):
         remote_name: str,
         description: str,
         input_schema: dict[str, Any],
+        side_effect: SideEffect = SideEffect.WRITE,
     ) -> None:
         self._client = client
         self.server_id = server_id
@@ -59,6 +60,10 @@ class MCPRemoteTool(Tool):
         self.name = mcp_tool_name(server_id, remote_name)
         self.description = description or f"Remote MCP tool {remote_name} from {server_id}"
         self.parameters = input_schema or {"type": "object", "properties": {}}
+        # MCP 0.1.0+ tool annotations include ``readOnlyHint``; we map
+        # True → READ, False/missing → WRITE (conservative default).
+        # The bridge passes this through from the upstream tool listing.
+        self.side_effect = side_effect
 
     def detail_for_constraints(self, args: dict[str, Any]) -> str:
         # Servers vary wildly in what their "main" arg is; surface a

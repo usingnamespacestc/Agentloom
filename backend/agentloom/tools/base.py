@@ -25,6 +25,7 @@ target path; for Glob/Grep it's the pattern.
 from __future__ import annotations
 
 import contextvars
+import enum
 import fnmatch
 import re
 from abc import ABC, abstractmethod
@@ -33,6 +34,29 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 from agentloom.schemas.common import ToolConstraints, ToolResult
+
+
+class SideEffect(str, enum.Enum):
+    """How a tool affects external state. Drives M7.5's capability
+    model: cognitive nodes (judges) get only ``NONE`` / ``READ`` tools
+    by default, ``WRITE`` is reserved for execution nodes.
+
+    PR 1 only adds the metadata. Engine consumers (registry filter,
+    capability model defaults) come in PR 2-3 — for now this is pure
+    documentation that future passes will read.
+    """
+
+    #: No external resources touched; pure compute / in-memory query.
+    #: Rare in practice — most "lookup" tools talk to the DB so they're
+    #: ``READ`` not ``NONE``.
+    NONE = "none"
+    #: Read external state (filesystem read, HTTP GET, registry
+    #: lookup). Idempotent, safe to call from cognitive nodes.
+    READ = "read"
+    #: Modify external state (filesystem write, HTTP POST, exec, DB
+    #: mutation). Only ``execution`` (Layer-2 ``draft`` / ``tool_call``
+    #: / ``delegate``) nodes should see these by default.
+    WRITE = "write"
 
 
 class ToolError(Exception):
@@ -123,6 +147,14 @@ class Tool(ABC):
     description: str = ""
     #: JSONSchema for the ``arguments`` object.
     parameters: dict[str, Any] = {}
+    #: How this tool affects external state. Default ``WRITE`` is
+    #: deliberately conservative: a new tool that forgot to opt in
+    #: stays out of cognitive-node ``effective_tools`` (M7.5 default
+    #: filter for judges = NONE/READ only). Override on the subclass:
+    #: read-only tools set ``side_effect = SideEffect.READ``.
+    #: PR 1 (commit pending) only stores the field; consumer
+    #: filtering lands in PR 3.
+    side_effect: SideEffect = SideEffect.WRITE
 
     @abstractmethod
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:

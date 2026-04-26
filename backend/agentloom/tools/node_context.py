@@ -34,6 +34,7 @@ from agentloom.schemas.chatflow import ChatFlowNode
 from agentloom.schemas.common import ToolResult
 from agentloom.schemas.workflow import WorkFlow, WorkFlowNode
 from agentloom.tools.base import (
+    SideEffect,
     Tool,
     ToolContext,
     ToolError,
@@ -47,6 +48,7 @@ _MAX_MAX_BYTES = 500_000
 
 class GetNodeContextTool(Tool):
     name = "get_node_context"
+    side_effect = SideEffect.READ
     description = (
         "Fetch another node's raw context by node id. For a ChatNode, "
         "returns just that turn's user_message and agent_response (no "

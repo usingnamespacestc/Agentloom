@@ -57,7 +57,7 @@ from sqlalchemy import select
 from agentloom.db.base import get_session_maker
 from agentloom.db.models.board_item import BoardItemRow
 from agentloom.schemas.common import ToolResult
-from agentloom.tools.base import Tool, ToolContext, ToolError
+from agentloom.tools.base import SideEffect, Tool, ToolContext, ToolError
 
 _DEFAULT_LIMIT = 50
 _MAX_LIMIT = 200
@@ -70,6 +70,7 @@ _DEFAULT_TAG_MATCH_MODE = "any"
 
 class MemoryBoardLookupTool(Tool):
     name = "memoryboard_lookup"
+    side_effect = SideEffect.READ
     description = (
         "Read the MemoryBoard — the short ``description`` distilled from "
         "every ChatNode/WorkNode's brief, plus its concept tags. Prefer "

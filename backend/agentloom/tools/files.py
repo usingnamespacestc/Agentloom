@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from agentloom.schemas.common import ToolResult
-from agentloom.tools.base import Tool, ToolContext, ToolError
+from agentloom.tools.base import SideEffect, Tool, ToolContext, ToolError
 
 
 def _resolve(ctx: ToolContext, path_str: str) -> Path:
@@ -23,6 +23,7 @@ def _resolve(ctx: ToolContext, path_str: str) -> Path:
 
 class ReadTool(Tool):
     name = "Read"
+    side_effect = SideEffect.READ
     description = (
         "Read a text file and return its contents. Supports an optional "
         "line-range window via 'offset' (1-based start line) and 'limit' "
@@ -68,6 +69,7 @@ class ReadTool(Tool):
 
 class WriteTool(Tool):
     name = "Write"
+    side_effect = SideEffect.WRITE  # explicit (matches default; documents intent)
     description = (
         "Write text to a file, creating it (and parent directories) if "
         "needed. Overwrites any existing content — prefer Edit for "
@@ -105,6 +107,7 @@ class WriteTool(Tool):
 
 class EditTool(Tool):
     name = "Edit"
+    side_effect = SideEffect.WRITE  # explicit (matches default)
     description = (
         "Replace the first occurrence of 'old_string' with 'new_string' "
         "in a file. Set 'replace_all' to true to replace every "

@@ -7,11 +7,12 @@ from pathlib import Path
 from typing import Any
 
 from agentloom.schemas.common import ToolResult
-from agentloom.tools.base import Tool, ToolContext, ToolError
+from agentloom.tools.base import SideEffect, Tool, ToolContext, ToolError
 
 
 class GlobTool(Tool):
     name = "Glob"
+    side_effect = SideEffect.READ
     description = (
         "Find files matching a glob pattern (e.g. 'src/**/*.py'). "
         "Returns newline-separated absolute paths, sorted by "
@@ -58,6 +59,7 @@ class GlobTool(Tool):
 
 class GrepTool(Tool):
     name = "Grep"
+    side_effect = SideEffect.READ
     description = (
         "Search file contents for a regex pattern. Returns "
         "file:line:content triples, capped at 250 matches. Optionally "

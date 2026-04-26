@@ -19,10 +19,12 @@ after the first success.
 
 from __future__ import annotations
 
+from typing import Any
+
 from agentloom.mcp.client import MCPClient, MCPClientError
 from agentloom.mcp.tool_adapter import MCPRemoteTool
 from agentloom.mcp.types import MCPServerConfig
-from agentloom.tools.base import ToolRegistry
+from agentloom.tools.base import SideEffect, ToolRegistry
 
 
 class MCPToolSource:
@@ -69,6 +71,7 @@ class MCPToolSource:
                 remote_name=rt.name,
                 description=rt.description or "",
                 input_schema=rt.inputSchema or {"type": "object", "properties": {}},
+                side_effect=_mcp_side_effect(rt),
             )
             registry.register(wrapped)
             added.append(wrapped.name)
@@ -86,3 +89,31 @@ class MCPToolSource:
         calling close."""
         self._connected = False
         await self.client.close()
+
+
+def _mcp_side_effect(remote_tool: Any) -> SideEffect:
+    """Map an upstream MCP tool's annotations to ``SideEffect``.
+
+    MCP 0.1.0+ tool advertisements carry an optional ``annotations``
+    block (server-declared hints). The relevant key is ``readOnlyHint``:
+    ``True`` means the tool is read-only, ``False`` / missing means
+    write or unknown — we default to ``WRITE`` to stay conservative
+    (cognitive nodes won't accidentally see unmarked tools).
+
+    Different MCP client libraries surface annotations slightly
+    differently (attribute vs dict). We probe both shapes and tolerate
+    everything else as ``WRITE``.
+    """
+    annotations = getattr(remote_tool, "annotations", None)
+    if annotations is None:
+        return SideEffect.WRITE
+    # Dict-style annotations
+    if isinstance(annotations, dict):
+        if annotations.get("readOnlyHint") is True:
+            return SideEffect.READ
+        return SideEffect.WRITE
+    # Pydantic / dataclass style
+    hint = getattr(annotations, "readOnlyHint", None)
+    if hint is True:
+        return SideEffect.READ
+    return SideEffect.WRITE

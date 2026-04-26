@@ -6,11 +6,15 @@ import asyncio
 from typing import Any
 
 from agentloom.schemas.common import ToolResult
-from agentloom.tools.base import Tool, ToolContext, ToolError
+from agentloom.tools.base import SideEffect, Tool, ToolContext, ToolError
 
 
 class BashTool(Tool):
     name = "Bash"
+    # Conservative: arbitrary shell commands can mutate FS / network /
+    # processes. M7.5 ShellSkill split (deferred) will hand-pick a
+    # read-only subset; for now Bash stays WRITE.
+    side_effect = SideEffect.WRITE
     description = (
         "Execute a single shell command. On Linux/macOS the host shell "
         "is /bin/sh (POSIX commands: ls, cat, grep, ...); on Windows "
