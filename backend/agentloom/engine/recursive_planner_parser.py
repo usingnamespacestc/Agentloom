@@ -284,6 +284,26 @@ def submit_plan_tool_def() -> dict[str, Any]:
     discriminated ``oneOf`` body is just as expressive — the model
     picks ``mode`` and the matching branch's required fields are
     enforced by the same constraint engine.
+
+    Schema shape: we send the Pydantic-derived
+    ``RecursivePlannerOutput.model_json_schema()`` (flat properties:
+    ``mode`` required, ``atomic`` / ``subtasks`` / ``reason`` all
+    optional) rather than the strict ``oneOf`` shape from
+    :func:`planner_grammar_schema`. Reason: Anthropic's
+    ``tools.input_schema`` validator rejects ``oneOf`` / ``allOf`` /
+    ``anyOf`` at the top level entirely (observed 2026-04-26:
+    ``invalid_request_error: input_schema does not support oneOf,
+    allOf, or anyOf at the top level``). The cross-field constraint
+    (mode=atomic must populate ``atomic``, etc.) lives in the
+    ``@model_validator(mode="after")`` hook on
+    :class:`RecursivePlannerOutput` and is enforced by
+    :func:`parse_planner_from_tool_args`, so a model that emits
+    ``{"mode": "atomic"}`` without the ``atomic`` body still gets
+    caught — just at parse time, not at decoder time. The
+    response_format=json_schema path (volcengine / openai_chat) keeps
+    using the strict oneOf shape via :func:`planner_grammar_schema`,
+    so the belt-and-suspenders effect is preserved on those
+    providers.
     """
     return {
         "name": SUBMIT_PLAN_TOOL_NAME,
@@ -292,7 +312,7 @@ def submit_plan_tool_def() -> dict[str, Any]:
             "worker brief, decompose into N sub-tasks, or infeasible "
             "with a reason."
         ),
-        "parameters": planner_grammar_schema(),
+        "parameters": RecursivePlannerOutput.model_json_schema(),
     }
 
 
