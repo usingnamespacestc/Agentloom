@@ -412,6 +412,8 @@ async def list_chatflow_board_items(
             "created_at": row.created_at.isoformat() if row.created_at else None,
             "inner_chat_ids": list(row.inner_chat_ids or []),
             "work_node_ids": list(row.work_node_ids or []),
+            "produced_tags": list(row.produced_tags or []),
+            "consumed_tags": list(row.consumed_tags or []),
         }
         for row in rows
     ]
