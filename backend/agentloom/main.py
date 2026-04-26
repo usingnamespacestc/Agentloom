@@ -243,6 +243,17 @@ def create_app() -> FastAPI:
     app.include_router(tools.router)
     app.include_router(workspace_settings_api.router)
 
+    # τ-bench benchmark sessions — only registered when tau_bench is
+    # importable (i.e. backend/vendor/tau_bench present). Off by
+    # default in production-style deploys; harmless to leave on for
+    # dev since the endpoint just exposes session create/teardown.
+    try:
+        from agentloom.benchmarks.tau_bench.api import router as tau_bench_router
+
+        app.include_router(tau_bench_router)
+    except ImportError:  # pragma: no cover — vendor missing in stripped builds
+        pass
+
     @app.exception_handler(RequestValidationError)
     async def _log_422(request: Request, exc: RequestValidationError) -> JSONResponse:
         from fastapi.encoders import jsonable_encoder
