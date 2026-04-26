@@ -22,6 +22,10 @@ import {
   resolveDrilledWorkflow,
   useChatFlowStore,
 } from "@/store/chatflowStore";
+import {
+  maybeMigrateLegacyCanvasPrefs,
+  usePreferencesStore,
+} from "@/store/preferencesStore";
 
 export default function App() {
   const chatflow = useChatFlowStore((s) => s.chatflow);
@@ -65,6 +69,27 @@ export default function App() {
         if (cancelled) return;
         if (s.language && s.language !== i18n.language) {
           void i18n.changeLanguage(s.language);
+        }
+        // Hydrate the canvas-prefs store from the server. The store
+        // initializes at all-false defaults; this overlay lands in the
+        // first tick after boot so the canvas reflects the user's
+        // saved toggles by the time they navigate into a chatflow.
+        if (s.canvas_prefs) {
+          // One-shot migration: pre-2026-04-25 builds stored canvas
+          // prefs in localStorage. If the server is still empty
+          // (typical on first boot after this rework) AND the user
+          // had toggles saved client-side, push them to the server
+          // so they don't appear to "reset" after the upgrade.
+          const migrated = maybeMigrateLegacyCanvasPrefs(s.canvas_prefs);
+          const effective = migrated ?? s.canvas_prefs;
+          usePreferencesStore
+            .getState()
+            .hydrateCanvasPrefsFromServer(effective);
+          if (migrated) {
+            void api
+              .patchWorkspaceSettings({ canvas_prefs: migrated })
+              .catch(() => {});
+          }
         }
       })
       .catch(() => {});

@@ -47,6 +47,24 @@ BUILTIN_DEFAULT_STATES: dict[str, ToolState] = {
 WorkspaceLanguage = Literal["en-US", "zh-CN"]
 
 
+class CanvasPrefs(BaseModel):
+    """Per-workspace canvas display toggles, persisted to DB so they
+    follow the account rather than the browser. Frontend store mirrors
+    this shape; ``usePreferencesStore`` rehydrates from
+    ``GET /api/workspace/settings`` on boot and pushes changes back via
+    PATCH (write-through). ``composerModels`` and other purely-session
+    state stay client-side in localStorage — those are per-tab picks,
+    not workspace preferences.
+    """
+
+    show_node_id: bool = False
+    show_chatflow_id: bool = False
+    show_tokens: bool = False
+    show_gen_time: bool = False
+    show_gen_speed: bool = False
+    show_worknode_model: bool = False
+
+
 class WorkspaceSettings(BaseModel):
     """Settings payload stored in ``workspaces.payload``."""
 
@@ -57,6 +75,12 @@ class WorkspaceSettings(BaseModel):
     #: mirrors this to its i18n runtime on boot and pushes changes
     #: back via PATCH.
     language: WorkspaceLanguage = "en-US"
+    #: Canvas / display toggles. Default everything off so a fresh
+    #: workspace renders the minimum-clutter view; the user opts into
+    #: each overlay (node id, chatflow id, token counts, generation
+    #: timing/speed, WorkNode model badges) via the global Settings →
+    #: Canvas tab.
+    canvas_prefs: CanvasPrefs = Field(default_factory=CanvasPrefs)
 
     def state_for(self, tool_name: str) -> ToolState:
         """Return the stored state, falling back to the built-in

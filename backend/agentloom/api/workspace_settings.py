@@ -22,6 +22,7 @@ from agentloom.db.repositories.workspace_settings import (
     WorkspaceSettingsRepository,
 )
 from agentloom.schemas.workspace_settings import (
+    CanvasPrefs,
     ToolState,
     WorkspaceLanguage,
     WorkspaceSettings,
@@ -37,6 +38,7 @@ def _repo(session: AsyncSession) -> WorkspaceSettingsRepository:
 class PatchWorkspaceSettingsRequest(BaseModel):
     tool_states: dict[str, ToolState] | None = None
     language: WorkspaceLanguage | None = None
+    canvas_prefs: CanvasPrefs | None = None
 
 
 @router.get("")
@@ -65,6 +67,8 @@ async def patch_workspace_settings(
         current.tool_states = body.tool_states
     if "language" in provided and body.language is not None:
         current.language = body.language
+    if "canvas_prefs" in provided and body.canvas_prefs is not None:
+        current.canvas_prefs = body.canvas_prefs
 
     await repo.save(current)
     await session.commit()

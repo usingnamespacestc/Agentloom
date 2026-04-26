@@ -431,6 +431,7 @@ export const api = {
   patchWorkspaceSettings: (patch: {
     tool_states?: Record<string, ToolState>;
     language?: WorkspaceLanguage;
+    canvas_prefs?: CanvasPrefs;
   }) =>
     request<WorkspaceSettingsDTO>("/api/workspace/settings", {
       method: "PATCH",
@@ -453,9 +454,22 @@ export type ToolState = "default_allow" | "available" | "disabled";
 
 export type WorkspaceLanguage = "en-US" | "zh-CN";
 
+/** Canvas / display toggles, persisted server-side under
+ * ``WorkspaceSettings.canvas_prefs``. Mirrors the Python
+ * ``CanvasPrefs`` shape — keep in sync. */
+export interface CanvasPrefs {
+  show_node_id: boolean;
+  show_chatflow_id: boolean;
+  show_tokens: boolean;
+  show_gen_time: boolean;
+  show_gen_speed: boolean;
+  show_worknode_model: boolean;
+}
+
 export interface WorkspaceSettingsDTO {
   tool_states: Record<string, ToolState>;
   language: WorkspaceLanguage;
+  canvas_prefs: CanvasPrefs;
 }
 
 // ---- mcp types ----
