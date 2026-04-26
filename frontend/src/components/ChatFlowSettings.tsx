@@ -590,6 +590,12 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
 
             {activeTab === "tools" && (
               <div className="space-y-4">
+                <EffectiveToolCatalogSection
+                  allTools={allTools}
+                  mcpServers={mcpServers}
+                  enabledBuiltinNames={enabledBuiltinNames}
+                  enabledMcpIds={enabledMcpIds}
+                />
                 <BuiltinToolsSection
                   tools={allTools.filter((tt) => !tt.name.startsWith("mcp__"))}
                   selectedNames={enabledBuiltinNames}
@@ -1075,6 +1081,125 @@ function CompactSettingsSection({
     </div>
   );
 }
+
+function EffectiveToolCatalogSection({
+  allTools,
+  mcpServers,
+  enabledBuiltinNames,
+  enabledMcpIds,
+}: {
+  allTools: ToolDTO[];
+  mcpServers: MCPServerState[];
+  enabledBuiltinNames: string[];
+  enabledMcpIds: string[];
+}) {
+  const { t } = useTranslation();
+  const [showDisabled, setShowDisabled] = useState(false);
+
+  // Compute the live effective catalog from the dialog's working
+  // edit state (NOT from chatflow.disabled_tool_names) so the
+  // listing updates as the user toggles checkboxes below — same
+  // resolution rule as the save path so what you see here is what
+  // the worker will actually see.
+  const enabledMcpIdSet = useMemo(() => new Set(enabledMcpIds), [enabledMcpIds]);
+  const enabledBuiltinSet = useMemo(
+    () => new Set(enabledBuiltinNames),
+    [enabledBuiltinNames],
+  );
+  const mcpEnabledNames = useMemo(() => {
+    const out = new Set<string>();
+    for (const s of mcpServers) {
+      if (!s.enabled) continue;
+      if (!enabledMcpIdSet.has(s.id)) continue;
+      for (const n of s.tool_names) out.add(n);
+    }
+    return out;
+  }, [mcpServers, enabledMcpIdSet]);
+
+  const { enabled, disabled } = useMemo(() => {
+    const en: ToolDTO[] = [];
+    const dis: ToolDTO[] = [];
+    for (const tt of allTools) {
+      const isMcp = tt.name.startsWith("mcp__");
+      const isOn = isMcp
+        ? mcpEnabledNames.has(tt.name)
+        : enabledBuiltinSet.has(tt.name);
+      (isOn ? en : dis).push(tt);
+    }
+    return { enabled: en, disabled: dis };
+  }, [allTools, mcpEnabledNames, enabledBuiltinSet]);
+
+  if (allTools.length === 0) return null;
+
+  return (
+    <div>
+      <span className="text-[11px] font-medium text-gray-500">
+        {t("chatflow_settings.effective_tool_catalog")} ({enabled.length})
+      </span>
+      <div className="mt-1 max-h-64 overflow-y-auto rounded border border-gray-200 p-2">
+        {enabled.length === 0 ? (
+          <p className="px-1 py-1 text-[10px] italic text-gray-400">
+            {t("chatflow_settings.effective_tool_catalog_empty")}
+          </p>
+        ) : (
+          <ul className="space-y-1">
+            {enabled.map((tt) => (
+              <li
+                key={tt.name}
+                className="flex items-baseline gap-2 px-1 py-0.5 text-[11px]"
+              >
+                <span className="font-mono text-gray-700">{tt.name}</span>
+                {tt.description && (
+                  <span className="truncate text-[10px] text-gray-400">
+                    {tt.description}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        {disabled.length > 0 && (
+          <div className="mt-2 border-t border-gray-100 pt-2">
+            <button
+              type="button"
+              onClick={() => setShowDisabled((v) => !v)}
+              className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-gray-600"
+            >
+              <span>{showDisabled ? "▾" : "▸"}</span>
+              <span>
+                {t("chatflow_settings.effective_tool_catalog_disabled_label")} (
+                {disabled.length})
+              </span>
+            </button>
+            {showDisabled && (
+              <ul className="mt-1 max-h-40 space-y-0.5 overflow-y-auto pl-3">
+                {disabled.map((tt) => (
+                  <li
+                    key={tt.name}
+                    className="flex items-baseline gap-2 px-1 py-0.5 text-[11px] opacity-60"
+                  >
+                    <span className="font-mono text-gray-500 line-through decoration-gray-300">
+                      {tt.name}
+                    </span>
+                    {tt.description && (
+                      <span className="truncate text-[10px] text-gray-400">
+                        {tt.description}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
+      <p className="mt-1 text-[10px] text-gray-400">
+        {t("chatflow_settings.effective_tool_catalog_hint")}
+      </p>
+    </div>
+  );
+}
+
 
 function BuiltinToolsSection({
   tools,
