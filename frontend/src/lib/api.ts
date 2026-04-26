@@ -107,6 +107,8 @@ export const api = {
       compact_require_confirmation?: boolean;
       chatnode_compact_trigger_pct?: number | null;
       chatnode_compact_target_pct?: number;
+      max_produced_tags?: number;
+      max_consumed_tags?: number;
     },
   ) =>
     request<{ ok: boolean }>(`/api/chatflows/${id}`, {

@@ -1,35 +1,48 @@
 builtin_id: node_brief
 name: "节点简介"
 description: >
-  MemoryBoard 节点简介 worker。把单个 source WorkNode（PR 3 起还包括
-  ChatNode）浓缩成一句简短的散文描述，写入该节点
-  ``MemoryBoardItem.description`` 字段。引擎在任意非 brief、非
-  delegate 的 WorkNode 变为 SUCCEEDED 后自动挂起本节点。输出供
-  MemoryBoard 消费方查阅——请写得紧凑、可指认，不要讲故事。
+  MemoryBoard WorkNode 简介 worker。把单个 source WorkNode 浓缩为
+  ``{description, produced_tags, consumed_tags}`` 结构化 JSON。
+  description 写入 BoardItem.description；两组 tags 是逻辑索引，
+  ``memoryboard_lookup`` 按 tag 检索时使用。
 params_schema:
   source_kind:
     type: string
     required: true
     description: >
-      源 WorkNode 的 step_kind（``llm_call`` / ``judge_call`` /
-      ``merge`` / ``compact`` / ``planner`` 等）。``tool_call``
-      根本不会进入本 fixture。
+      源 WorkNode 的 step_kind（``draft`` / ``judge_call`` /
+      ``compact`` / ``delegate`` 等）。``tool_call`` 不会进入本 fixture
+      （由代码模板生成 brief）。
   source_inputs:
     type: string
     required: false
     description: >
-      渲染后的输入消息，每行一条（带 role 前缀）。若节点没有显式的
-      ``input_messages``（上下文由祖先链运行时构造），此项可能为空。
+      渲染后的输入消息，每行一条（带 role 前缀）。无 ``input_messages``
+      时可为空。
   source_output:
     type: string
     required: true
     description: >
-      源节点的输出——llm / judge 读 ``output_message.content``，
-      tool_call 读 ``tool_result.content``，compact 读
-      ``compact_snapshot.summary`` 等。总结器针对它写作。
+      源节点的输出（llm/judge 读 ``output_message.content``，compact
+      读 ``compact_snapshot.summary`` 等）。
+  max_produced_tags:
+    type: integer
+    required: true
+    description: >
+      ``produced_tags`` 数量硬上限。chatflow 级配置（默认 10）。
+  max_consumed_tags:
+    type: integer
+    required: true
+    description: >
+      ``consumed_tags`` 数量硬上限（默认 8）。
+  ancestral_tags_active:
+    type: string
+    required: false
+    description: >
+      WorkFlow 链上仍活跃的祖先概念 tag（空格分隔），用作 anchor。
 plan:
   description:
-    text: "为源 WorkNode 写一到两句简介。"
+    text: "为源 WorkNode 输出结构化简介 + tags。"
     provenance: pure_agent
   execution_mode: native_react
   nodes:
@@ -37,44 +50,70 @@ plan:
       parent_ids: []
       step_kind: draft
       description:
-        text: "把源 WorkNode 凝练为简短散文描述。"
+        text: "蒸馏源 WorkNode 输入输出为 JSON。"
         provenance: pure_agent
       input_messages:
         - role: system
           content: |
-            你是 MemoryBoard 总结器。任务：把**一个**WorkNode 的输入
-            与输出改写成一句简短的散文描述——一到两句话——让下游读者
-            不必再通读原节点即可掌握要点。
+            你是 MemoryBoard 总结器。把**一个**WorkNode 蒸馏为严格 JSON
+            输出：
 
-            硬性规则：
-              - 只涵盖两件事：该节点做了什么（意图），产出了什么
-                （结论/要点）。
-              - 总共一到两句。不要列表、不要标题、不要 markdown、
-                不要 JSON、不要代码围栏。纯散文。
-              - 保留读者后续回查时需要锚定的具体信息：工具名、文
-                件路径、数字、明确作出的决策、错误名。其它过程性
-                细节一律省掉。不要在正文里写出节点 id —— 节点 id 由
-                系统在写入 MemoryBoard 时以元数据形式附加。
-              - 不要推测下游用途（"这将有助于…"）。只描述发生了
-                什么。
-              - 不要复述系统提示、用户原问或流程叙述。只写结论与
-                关键事实。
-              - 不要编造原节点里没有的内容。
-              - 用中立的第三人称书写。
+              {
+                "description": "...",      // 一到两句散文摘要
+                "produced_tags": [...],   // 输出涉及的概念
+                "consumed_tags": [...]    // 输入引用/依赖的概念
+              }
+
+            ### description 写法
+              - 涵盖两件事：节点意图（做什么），节点产出（结论/要点）。
+              - 总共一到两句。纯散文，不要 markdown / 列表 / 代码围栏。
+              - 保留具体锚点：工具名、文件路径、数字、决策、错误名。
+              - 不写节点 id（系统会以元数据附加）。
+              - 不推测下游用途，只描述发生了什么。
+              - 不复述系统提示或流程。中立第三人称。
+
+            ### tag 命名约定
+              - 全小写 + underscore（snake_case）。例：
+                ``read_file_op``、``judge_pre_verdict``。
+                禁止大写、空格、连字符、点号。
+              - 单数优先。
+              - 状态后缀语法 ``concept_status``——仅当节点明确改变概念
+                状态时使用。
+
+            ### produced / consumed 选择
+              - produced_tags：本节点输出涉及的概念。
+              - consumed_tags：输入/上下文引用的概念。**祖先链上活跃的
+                anchor tag 如果在本节点被引用/refine/反驳，必须填进
+                consumed_tags（即使 raw text 没出现同样的词）**——
+                这是为了让下游按 tag 检索时不漏掉本节点。
+              - 既无产出也无引用时填空数组 ``[]``。
+
+            ### 数量约束
+              - produced_tags 最多 N 个、consumed_tags 最多 M 个
+                （见下方 user 消息）。
+
+            输出**严格 JSON 对象**。不要 markdown 围栏，不要前导/结尾
+            注释。
         - role: user
           content: |
             源节点 kind：{{ source_kind }}
 
-            源节点输入：
+            【祖先活跃概念】
+            {{ ancestral_tags_active or "（无）" }}
+
+            【源节点输入】
             ---
             {{ source_inputs }}
             ---
 
-            源节点输出：
+            【源节点输出】
             ---
             {{ source_output }}
             ---
 
-            现在写出一到两句简介。只输出简介正文——不要开场白、不要
-            结语。
+            【约束】
+            produced_tags 最多 {{ max_produced_tags }} 个
+            consumed_tags 最多 {{ max_consumed_tags }} 个
+
+            输出 JSON：
   root_ids: ["node_brief_root"]

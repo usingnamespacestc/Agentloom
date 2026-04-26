@@ -378,6 +378,8 @@ export interface ChatFlowStoreState {
     compact_require_confirmation?: boolean;
     chatnode_compact_trigger_pct?: number | null;
     chatnode_compact_target_pct?: number;
+    max_produced_tags?: number;
+    max_consumed_tags?: number;
   }) => Promise<void>;
 
   /** Which edge is currently hovered on the ChatFlow canvas — drives

@@ -1,34 +1,54 @@
 builtin_id: chat_brief
 name: "ChatNode brief"
 description: >
-  MemoryBoard ChatNode-brief worker. Summarizes one ChatNode's turn
-  (plain turn / compact / merge) into a single short prose description
-  that populates the ChatBoardItem.description field. Invoked by the
-  ChatFlowEngine's post-success hook; the model is ``chatflow.brief_model``
-  or ``chatflow.draft_model``. Output is read later by MemoryBoard
-  consumers — keep it compact and referential, not narrative.
+  MemoryBoard ChatNode-brief worker. Summarizes one ChatNode (plain
+  turn / compact / merge / pack) into structured JSON:
+  ``{description, produced_tags, consumed_tags}``. ``description`` is
+  the short prose summary humans/agents read; the two tag arrays form
+  MemoryBoard's logical index (concept produced / concept consumed)
+  used by ``memoryboard_lookup`` for tag filtering. Invoked by the
+  ChatFlowEngine's post-success hook; the model is
+  ``chatflow.brief_model`` or ``chatflow.draft_model``.
 params_schema:
   source_kind:
     type: string
     required: true
     description: >
-      ChatNode kind: ``chat_turn`` / ``chat_compact`` / ``chat_merge``.
+      ChatNode kind: ``chat_turn`` / ``chat_compact`` / ``chat_merge`` /
+      ``chat_pack``.
   user_message:
     type: string
     required: false
     description: >
-      The turn's pre-check user input (``ChatFlowNode.user_message.text``).
-      May be empty for merge nodes that lack an explicit user turn.
+      The turn's pre-check user input. Empty for merge / pack ChatNodes
+      that lack an explicit user turn.
   agent_response:
     type: string
     required: true
     description: >
-      The turn's post-check agent final reply
-      (``ChatFlowNode.agent_response.text``). For compact nodes this is
-      the compact summary; for merge nodes it is the merged reply.
+      The turn's final agent reply (compact summary / merged reply /
+      pack summary as appropriate).
+  max_produced_tags:
+    type: integer
+    required: true
+    description: >
+      Hard cap on ``produced_tags`` size, set per-chatflow (default 10).
+  max_consumed_tags:
+    type: integer
+    required: true
+    description: >
+      Hard cap on ``consumed_tags`` size, set per-chatflow (default 8).
+  ancestral_tags_active:
+    type: string
+    required: false
+    description: >
+      Space-separated list of ancestor concept tags still active on
+      this chain. The brief uses these as anchors when filling
+      ``consumed_tags`` — even if the current ChatNode's raw text
+      doesn't repeat the words.
 plan:
   description:
-    text: "Produce a one-to-two-sentence ChatNode brief."
+    text: "Emit a structured ChatNode brief with tags."
     provenance: pure_agent
   execution_mode: native_react
   nodes:
@@ -36,52 +56,98 @@ plan:
       parent_ids: []
       step_kind: draft
       description:
-        text: "Distill a ChatNode's turn into a short prose description."
+        text: "Distill a ChatNode into JSON: description + tags."
         provenance: pure_agent
       input_messages:
         - role: system
           content: |
-            You are a MemoryBoard summarizer. Your job: rewrite ONE
-            ChatNode's user input and agent reply into a single short
-            prose description — one or two sentences — that a downstream
-            reader can scan instead of re-reading the full conversation.
+            You are a MemoryBoard summarizer. Distill ONE ChatNode into
+            STRICT JSON output:
 
-            Hard rules:
+              {
+                "description": "...",      // 1-2 sentence prose summary
+                "produced_tags": [...],   // concepts this node OUTPUT covers
+                "consumed_tags": [...]    // concepts this node INPUT references
+              }
+
+            ### description rules
               - Cover exactly two things: what the user asked/required
                 this turn, and what the agent concluded/produced.
-              - One or two sentences total. No bullet points, no
-                headings, no markdown, no JSON, no code fences. Just
-                plain prose.
-              - Preserve concrete anchors the reader will need to find
-                things again: tool names, file paths, numbers, explicit
-                decisions, error names. Drop everything else. Do NOT
-                write ChatNode ids in the prose — the system attaches
-                them as metadata when it persists the brief to
-                MemoryBoard.
-              - Do not speculate about downstream use ("this will help
-                with…"). Describe only what happened here.
-              - Do not restate the system prompt or narrate the flow.
-                Conclusions and key facts only.
-              - Never invent content the turn doesn't contain.
-              - Write in neutral third person.
-              - For ``chat_compact``: describe what was compacted and
-                the takeaway of the summary.
-              - For ``chat_merge``: describe each source branch's
-                stance and the merged reply's conclusion.
+              - One or two sentences. No bullet points, no headings,
+                no markdown, no code fences. Plain prose.
+              - Preserve concrete anchors a future reader needs: tool
+                names, file paths, numbers, explicit decisions, error
+                names. Drop everything else. Do NOT write the ChatNode
+                id — the system attaches it as metadata.
+              - No speculation about downstream use. No restating the
+                system prompt or narrating flow. No invention.
+              - Neutral third person.
+              - For ``chat_compact`` / ``chat_pack`` / ``chat_merge``:
+                describe what was compressed/packed/merged and the
+                takeaway.
+
+            ### Tag naming convention (STRICT)
+              - lowercase + underscore (snake_case). Example:
+                ``retrieval_augmented_generation``, ``ivfflat_index``.
+                NEVER use uppercase, spaces, hyphens, or dots.
+              - Singular preferred: ``plan_x`` not ``plans_x``.
+              - Status-suffix syntax ``concept_status`` ONLY when this
+                node EXPLICITLY changes a concept's state:
+                  ``plan_x_rejected``    plan X was rejected
+                  ``plan_x_approved``    plan X was approved
+                  ``plan_x_deferred``    plan X was deferred
+                  ``plan_x_revived``     plan X was revived
+                  ``plan_x_finalized``   plan X was finalized
+                For ordinary discussion / refine, use the bare concept
+                ``plan_x`` without a status suffix.
+
+            ### produced_tags selection
+              - Concepts this node's OUTPUT covers / introduces.
+              - If the node changes a concept's status, use the
+                status-suffixed tag.
+              - Don't repeat ancestor anchors — those go in
+                consumed_tags.
+
+            ### consumed_tags selection (CRITICAL)
+              - Concepts the node's INPUT/CONTEXT references / depends on.
+              - If an ancestor anchor (listed below) is referenced /
+                refined / rejected by this node — even if the raw text
+                doesn't use the same word — INCLUDE that ancestor tag.
+                This is what lets downstream ``memoryboard_lookup``
+                catch this node when searching by the ancestor concept.
+              - Example: ancestor active = ``plan_x``. The user this
+                turn says "the previous proposal didn't work." Your
+                produced_tags should include ``plan_x_rejected``;
+                your consumed_tags should include ``plan_x``.
+
+            ### Quantity limits
+              - produced_tags up to N (see user message below).
+              - consumed_tags up to M.
+              - When this node neither produces nor consumes any
+                concept, return empty arrays ``[]``.
+
+            Output STRICT JSON only. No markdown fences, no leading
+            commentary, no trailing notes.
         - role: user
           content: |
             ChatNode kind: {{ source_kind }}
 
-            User input this turn:
+            [Active ancestor concepts]
+            {{ ancestral_tags_active or "(none)" }}
+
+            [User input this turn]
             ---
             {{ user_message }}
             ---
 
-            Agent final reply this turn:
+            [Agent final reply this turn]
             ---
             {{ agent_response }}
             ---
 
-            Write the one-to-two-sentence brief now. Output the brief
-            text only — no preamble, no postscript.
+            [Constraints]
+            produced_tags up to {{ max_produced_tags }}
+            consumed_tags up to {{ max_consumed_tags }}
+
+            Output JSON:
   root_ids: ["chat_brief_root"]

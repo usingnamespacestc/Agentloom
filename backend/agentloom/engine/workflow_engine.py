@@ -858,6 +858,13 @@ class WorkflowEngine:
         #: keeps bare-engine tests that don't pipe a chatflow through
         #: behaving exactly as before.
         self._effective_runtime_note: str = ""
+        #: ChatFlow-level caps on brief tag emissions, threaded into
+        #: ``_spawn_node_brief`` so the fixture's prompt bounds the
+        #: emitted ``produced_tags`` / ``consumed_tags`` arrays. Defaults
+        #: mirror the schema (10 / 8) so a bare engine without chatflow
+        #: context still produces a sensible brief.
+        self._effective_max_produced_tags: int = 10
+        self._effective_max_consumed_tags: int = 8
 
     async def execute(
         self,
@@ -873,6 +880,8 @@ class WorkflowEngine:
         chatflow_compact_preserve_mode: CompactPreserveMode | object = _UNSET,
         chatflow_compact_model: ProviderModelRef | None | object = _UNSET,
         chatflow_runtime_environment_note: str | object = _UNSET,
+        chatflow_max_produced_tags: int | object = _UNSET,
+        chatflow_max_consumed_tags: int | object = _UNSET,
         chatflow_id: str | None = None,
         post_node_hook: PostNodeHook | None = None,
         disabled_tool_names: frozenset[str] | None = None,
@@ -937,6 +946,10 @@ class WorkflowEngine:
             if chatflow_runtime_environment_note is _UNSET
             else str(chatflow_runtime_environment_note or "")
         )
+        if chatflow_max_produced_tags is not _UNSET:
+            self._effective_max_produced_tags = int(chatflow_max_produced_tags)  # type: ignore[arg-type]
+        if chatflow_max_consumed_tags is not _UNSET:
+            self._effective_max_consumed_tags = int(chatflow_max_consumed_tags)  # type: ignore[arg-type]
         self._revise_count = 0
         self._post_node_hook = post_node_hook
         self._disabled_tool_names = disabled_tool_names or frozenset()
@@ -1774,6 +1787,16 @@ class WorkflowEngine:
                     "source_kind": source.step_kind.value,
                     "source_inputs": inputs_rendered,
                     "source_output": output_text,
+                    "max_produced_tags": self._effective_max_produced_tags,
+                    "max_consumed_tags": self._effective_max_consumed_tags,
+                    # Node-level ancestral anchor lookup is deferred —
+                    # it'd require a board_reader chain walk per spawn,
+                    # which the engine doesn't currently do. Pass
+                    # empty so the fixture's anchor block falls back
+                    # to "(none)". Chat-level ancestral tracking
+                    # (where the user's main concern lives) IS done in
+                    # ``_collect_chat_ancestral_active_tags``.
+                    "ancestral_tags_active": "",
                 },
                 includes=includes,
             )
@@ -1828,6 +1851,8 @@ class WorkflowEngine:
 
         description: str
         fallback: bool
+        produced_tags: list[str] = []
+        consumed_tags: list[str] = []
 
         if node.input_messages is None:
             # tool_call source or fallback pre-arranged by the caller.
@@ -1838,18 +1863,36 @@ class WorkflowEngine:
             # LLM call was made.
             node.output_message = WireMessage(role="assistant", content=description)
         else:
+            from agentloom.engine.brief_parser import (
+                brief_grammar_schema,
+                parse_brief_output,
+            )
+
             try:
-                await self._invoke_and_freeze(workflow, node, expose_tools=False)
+                await self._invoke_and_freeze(
+                    workflow,
+                    node,
+                    expose_tools=False,
+                    json_schema=brief_grammar_schema(),
+                )
                 assert node.output_message is not None
-                description = (node.output_message.content or "").strip()
-                fallback = False
-                if not description:
-                    # Empty reply → fallback path.
+                raw = node.output_message.content or ""
+                if not raw.strip():
                     description = _brief_code_template_for_node(source)
                     fallback = True
                     node.output_message = WireMessage(
                         role="assistant", content=description
                     )
+                else:
+                    parsed = parse_brief_output(raw)
+                    description = parsed.description
+                    produced_tags = parsed.produced_tags[
+                        : self._effective_max_produced_tags
+                    ]
+                    consumed_tags = parsed.consumed_tags[
+                        : self._effective_max_consumed_tags
+                    ]
+                    fallback = False
             except Exception as exc:  # noqa: BLE001 — brief never fails
                 log.warning(
                     "brief LLM call failed for source=%s — falling back to "
@@ -1869,6 +1912,8 @@ class WorkflowEngine:
             scope=node.scope,
             description=description,
             fallback=fallback,
+            produced_tags=produced_tags,
+            consumed_tags=consumed_tags,
         )
 
     async def _persist_board_item(
@@ -1879,6 +1924,8 @@ class WorkflowEngine:
         scope: NodeScope,
         description: str,
         fallback: bool,
+        produced_tags: list[str] | None = None,
+        consumed_tags: list[str] | None = None,
     ) -> None:
         """Handoff to ``self._board_writer`` for a node-scope brief.
 
@@ -1897,6 +1944,8 @@ class WorkflowEngine:
                 scope=scope.value,
                 description=description,
                 fallback=fallback,
+                produced_tags=produced_tags,
+                consumed_tags=consumed_tags,
             )
         except Exception:  # noqa: BLE001 — board is best-effort
             log.exception(

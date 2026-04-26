@@ -433,6 +433,15 @@ class ChatFlow(BaseModel):
     #: fraction of the turn model's context window. Fed to the compact
     #: worker as ``target_tokens``.
     chatnode_compact_target_pct: float = 0.4
+    #: Hard cap on how many ``produced_tags`` / ``consumed_tags`` the
+    #: brief LLM is allowed to emit per BoardItem. Threaded into the
+    #: chat_brief / node_brief fixture instantiation so the prompt
+    #: bounds the tag list directly. Default 10 / 8 — empirically
+    #: enough to cover the concept surface without bloating the
+    #: serialized BoardItem row beyond practical sizes. ``0`` disables
+    #: that side of the index entirely.
+    max_produced_tags: int = 10
+    max_consumed_tags: int = 8
     sticky_notes: dict[str, StickyNote] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utcnow)
 

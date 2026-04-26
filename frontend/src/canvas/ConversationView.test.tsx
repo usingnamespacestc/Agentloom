@@ -73,6 +73,8 @@ function twoBranchFlow(): ChatFlow {
     compact_require_confirmation: true,
     chatnode_compact_trigger_pct: 0.6,
     chatnode_compact_target_pct: 0.4,
+    max_produced_tags: 10,
+    max_consumed_tags: 8,
     root_ids: ["a"],
     nodes: {
       a: node("a", [], "hello", "hi there", 0),
@@ -177,6 +179,8 @@ describe("ConversationView", () => {
       compact_require_confirmation: true,
       chatnode_compact_trigger_pct: 0.6,
       chatnode_compact_target_pct: 0.4,
+    max_produced_tags: 10,
+    max_consumed_tags: 8,
       root_ids: ["a"],
       nodes: {
         a: node("a", [], "topic 1 user", "topic 1 agent", 0),
@@ -276,6 +280,8 @@ describe("ConversationView", () => {
       compact_require_confirmation: true,
       chatnode_compact_trigger_pct: 0.6,
       chatnode_compact_target_pct: 0.4,
+    max_produced_tags: 10,
+    max_consumed_tags: 8,
       root_ids: ["a"],
       nodes: {
         a: node("a", [], "old user", "old agent", 0),

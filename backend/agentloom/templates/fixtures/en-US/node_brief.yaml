@@ -1,37 +1,47 @@
 builtin_id: node_brief
 name: "Node brief"
 description: >
-  MemoryBoard node-brief worker. Summarizes one source WorkNode
-  (ChatNode in PR 3) into a single short prose description that
-  populates the node's ``MemoryBoardItem.description`` field. Invoked
-  by the engine's auto-spawn hook after any non-brief, non-delegate
-  WorkNode reaches SUCCEEDED. The output is read later by MemoryBoard
-  consumers — keep it compact and referential, not narrative.
+  MemoryBoard WorkNode-brief worker. Summarizes one source WorkNode
+  into structured JSON: ``{description, produced_tags, consumed_tags}``.
+  ``description`` populates the BoardItem prose; the tag arrays are
+  the logical index used by ``memoryboard_lookup`` for tag filtering.
 params_schema:
   source_kind:
     type: string
     required: true
     description: >
-      The source WorkNode's step_kind (``llm_call``, ``judge_call``,
-      ``merge``, ``compact``, ``planner``, etc.) — ``tool_call``
-      sources bypass this fixture entirely.
+      The source WorkNode's step_kind. ``tool_call`` sources bypass
+      this fixture entirely (code template path).
   source_inputs:
     type: string
     required: false
     description: >
-      Rendered input messages, one per line with role prefix. May be
-      empty when the node has no explicit ``input_messages`` (context
-      built from ancestors at run time).
+      Rendered input messages with role prefix. May be empty.
   source_output:
     type: string
     required: true
     description: >
-      The source node's output — ``output_message.content`` for llm /
-      judge, ``tool_result.content`` for tool_call, ``compact_snapshot
-      .summary`` for compact, etc. The summarizer writes against this.
+      Source node's output (``output_message.content`` /
+      ``tool_result.content`` / ``compact_snapshot.summary``).
+  max_produced_tags:
+    type: integer
+    required: true
+    description: >
+      Hard cap on ``produced_tags`` (default 10).
+  max_consumed_tags:
+    type: integer
+    required: true
+    description: >
+      Hard cap on ``consumed_tags`` (default 8).
+  ancestral_tags_active:
+    type: string
+    required: false
+    description: >
+      Space-separated active ancestor concept tags on this WorkFlow
+      chain — used as anchors when filling ``consumed_tags``.
 plan:
   description:
-    text: "Produce a one-to-two-sentence node-brief."
+    text: "Emit a structured node brief with tags."
     provenance: pure_agent
   execution_mode: native_react
   nodes:
@@ -39,48 +49,76 @@ plan:
       parent_ids: []
       step_kind: draft
       description:
-        text: "Distill the source WorkNode into a short prose description."
+        text: "Distill a WorkNode into JSON: description + tags."
         provenance: pure_agent
       input_messages:
         - role: system
           content: |
-            You are a MemoryBoard summarizer. Your job: rewrite ONE
-            WorkNode's inputs and outputs into a single short prose
-            description — one or two sentences — that a downstream
-            reader can scan instead of re-reading the full node.
+            You are a MemoryBoard summarizer. Distill ONE WorkNode into
+            STRICT JSON output:
 
-            Hard rules:
-              - Cover exactly two things: what the source did
-                (intent), and what it produced (the takeaway).
-              - One or two sentences total. No bullet points, no
-                headings, no markdown, no JSON, no code fences. Just
-                plain prose.
-              - Preserve concrete anchors the reader will need to
-                find things again: tool names, file paths, numbers,
-                explicit decisions, error names. Drop everything
-                else. Do NOT write node ids in the prose — the system
-                attaches node ids as metadata when it persists the
-                brief to MemoryBoard.
-              - Do not speculate about downstream use ("this will
-                help with…"). Describe only what happened here.
-              - Do not restate the system prompt, the user question,
-                or process narration. Conclusions and key facts only.
-              - Never invent content the source doesn't contain.
-              - Write in neutral third person.
+              {
+                "description": "...",      // 1-2 sentence prose summary
+                "produced_tags": [...],   // concepts in OUTPUT
+                "consumed_tags": [...]    // concepts referenced by INPUT
+              }
+
+            ### description rules
+              - Cover exactly two things: what the source did (intent)
+                and what it produced (takeaway).
+              - One or two sentences. Plain prose. No markdown, lists,
+                or code fences.
+              - Preserve concrete anchors: tool names, file paths,
+                numbers, decisions, error names. Drop everything else.
+                Do NOT write node ids — system adds them as metadata.
+              - No speculation about downstream use. No restating the
+                prompt or narrating flow. No invention.
+              - Neutral third person.
+
+            ### Tag naming convention (STRICT)
+              - lowercase + underscore (snake_case). Examples:
+                ``read_file_op``, ``judge_pre_verdict``.
+                NEVER uppercase, spaces, hyphens, dots.
+              - Singular preferred.
+              - Status-suffix syntax ``concept_status`` ONLY when this
+                node EXPLICITLY changes a concept's state.
+
+            ### produced / consumed selection
+              - produced_tags: concepts the OUTPUT covers / introduces.
+              - consumed_tags: concepts the INPUT references / depends on.
+                **If an ancestor anchor (listed below) is referenced /
+                refined / rejected by this node — even if the raw
+                text doesn't use the same word — INCLUDE that ancestor
+                tag.** This is what lets downstream tag-search catch
+                this node.
+              - Empty arrays ``[]`` when neither side has concepts.
+
+            ### Quantity limits
+              - produced_tags up to N, consumed_tags up to M
+                (see user message below).
+
+            Output STRICT JSON only. No markdown fences, no leading or
+            trailing commentary.
         - role: user
           content: |
             Source node kind: {{ source_kind }}
 
-            Source inputs:
+            [Active ancestor concepts]
+            {{ ancestral_tags_active or "(none)" }}
+
+            [Source inputs]
             ---
             {{ source_inputs }}
             ---
 
-            Source output:
+            [Source output]
             ---
             {{ source_output }}
             ---
 
-            Write the one-to-two-sentence brief now. Output the brief
-            text only — no preamble, no postscript.
+            [Constraints]
+            produced_tags up to {{ max_produced_tags }}
+            consumed_tags up to {{ max_consumed_tags }}
+
+            Output JSON:
   root_ids: ["node_brief_root"]

@@ -86,6 +86,13 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
   const [compactPreserveMode, setCompactPreserveMode] = useState<
     "by_count" | "by_budget"
   >("by_count");
+  // MemoryBoard tag-index volume caps. Hard ceilings on how many
+  // ``produced_tags`` / ``consumed_tags`` the brief LLM may emit per
+  // BoardItem. Stored as integers — empty input falls back to the
+  // existing chatflow value on save. ``0`` disables that side of the
+  // index (brief still emits prose, but no tag chip lands on the row).
+  const [maxProducedTagsStr, setMaxProducedTagsStr] = useState("");
+  const [maxConsumedTagsStr, setMaxConsumedTagsStr] = useState("");
   // Per-tool visibility: set of built-in tool names the user has
   // enabled for this chatflow. A tool is "checked" iff its name is
   // NOT in the stored ``disabled_tool_names`` list.
@@ -175,6 +182,8 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
         String(Math.round((chatflow?.chatnode_compact_target_pct ?? 0.4) * 100)),
       );
       setCompactPreserveMode(chatflow?.compact_preserve_mode ?? "by_count");
+      setMaxProducedTagsStr(String(chatflow?.max_produced_tags ?? 10));
+      setMaxConsumedTagsStr(String(chatflow?.max_consumed_tags ?? 8));
     }
   }, [open, chatflow, loadProviders, loadMcpServers, loadTools]);
 
@@ -344,6 +353,26 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
         Number.isFinite(chatnodeTgtParsed) && chatnodeTgtParsed >= 1 && chatnodeTgtParsed <= 95
           ? chatnodeTgtParsed / 100
           : (chatflow?.chatnode_compact_target_pct ?? 0.4);
+      // Tag-index caps. ``0`` is meaningful (disables that side); empty
+      // string falls back to the stored value.
+      const maxProducedTrim = maxProducedTagsStr.trim();
+      const maxProducedParsed = maxProducedTrim === "" ? NaN : Number(maxProducedTrim);
+      const maxProducedTags =
+        Number.isFinite(maxProducedParsed) &&
+        Number.isInteger(maxProducedParsed) &&
+        maxProducedParsed >= 0 &&
+        maxProducedParsed <= 30
+          ? maxProducedParsed
+          : (chatflow?.max_produced_tags ?? 10);
+      const maxConsumedTrim = maxConsumedTagsStr.trim();
+      const maxConsumedParsed = maxConsumedTrim === "" ? NaN : Number(maxConsumedTrim);
+      const maxConsumedTags =
+        Number.isFinite(maxConsumedParsed) &&
+        Number.isInteger(maxConsumedParsed) &&
+        maxConsumedParsed >= 0 &&
+        maxConsumedParsed <= 30
+          ? maxConsumedParsed
+          : (chatflow?.max_consumed_tags ?? 8);
       // runtime_environment_note: send null when the user hasn't edited
       // (keep backend default lookup); send the typed string otherwise
       // (including empty string for explicit opt-out of the static framing).
@@ -369,6 +398,8 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
         chatnode_compact_target_pct: chatnodeTarget,
         compact_preserve_mode: compactPreserveMode,
         recalled_context_sticky_turns: recalledSticky,
+        max_produced_tags: maxProducedTags,
+        max_consumed_tags: maxConsumedTags,
       });
       onClose();
     } finally {
@@ -590,6 +621,12 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
 
             {activeTab === "tools" && (
               <div className="space-y-4">
+                <MemoryBoardTagSection
+                  maxProducedStr={maxProducedTagsStr}
+                  onMaxProducedChange={setMaxProducedTagsStr}
+                  maxConsumedStr={maxConsumedTagsStr}
+                  onMaxConsumedChange={setMaxConsumedTagsStr}
+                />
                 <BuiltinToolsSection
                   tools={allTools.filter((tt) => !tt.name.startsWith("mcp__"))}
                   selectedNames={enabledBuiltinNames}
@@ -668,6 +705,60 @@ function ModelPicker({
       </select>
       <p className="mt-1 text-[10px] text-gray-400">{hint}</p>
     </label>
+  );
+}
+
+function MemoryBoardTagSection({
+  maxProducedStr,
+  onMaxProducedChange,
+  maxConsumedStr,
+  onMaxConsumedChange,
+}: {
+  maxProducedStr: string;
+  onMaxProducedChange: (next: string) => void;
+  maxConsumedStr: string;
+  onMaxConsumedChange: (next: string) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div>
+      <span className="text-[11px] font-medium text-gray-500">
+        {t("chatflow_settings.memoryboard_tags_title")}
+      </span>
+      <p className="mt-1 text-[10px] text-gray-400">
+        {t("chatflow_settings.memoryboard_tags_hint")}
+      </p>
+      <div className="mt-2 grid grid-cols-2 gap-3">
+        <label className="flex flex-col gap-1 text-[11px] text-gray-700">
+          <span>{t("chatflow_settings.max_produced_tags")}</span>
+          <input
+            type="number"
+            min={0}
+            max={30}
+            value={maxProducedStr}
+            onChange={(e) => onMaxProducedChange(e.target.value)}
+            className="w-full rounded border border-gray-300 px-2 py-1 text-[11px]"
+          />
+          <span className="text-[10px] text-gray-400">
+            {t("chatflow_settings.max_produced_tags_hint")}
+          </span>
+        </label>
+        <label className="flex flex-col gap-1 text-[11px] text-gray-700">
+          <span>{t("chatflow_settings.max_consumed_tags")}</span>
+          <input
+            type="number"
+            min={0}
+            max={30}
+            value={maxConsumedStr}
+            onChange={(e) => onMaxConsumedChange(e.target.value)}
+            className="w-full rounded border border-gray-300 px-2 py-1 text-[11px]"
+          />
+          <span className="text-[10px] text-gray-400">
+            {t("chatflow_settings.max_consumed_tags_hint")}
+          </span>
+        </label>
+      </div>
+    </div>
   );
 }
 

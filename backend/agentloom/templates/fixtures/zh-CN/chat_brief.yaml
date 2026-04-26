@@ -2,31 +2,51 @@ builtin_id: chat_brief
 name: "ChatNode 简介"
 description: >
   MemoryBoard ChatNode 简介 worker。把一个 ChatNode（普通 turn / compact /
-  merge）的本轮用户输入与 agent 最终回复浓缩成一句简短的散文描述，写入
-  该 ChatBoardItem.description。引擎在 ChatNode 变为 SUCCEEDED 后自动挂起
-  本 fixture；模型来自 ``chatflow.brief_model`` 或 ``chatflow.draft_model``。
-  输出供 MemoryBoard 下游消费方查阅——保持紧凑、可指认，不讲故事。
+  merge / pack）的本轮用户输入与 agent 最终回复浓缩成结构化 JSON：
+  ``{description, produced_tags, consumed_tags}``。description 是一到两句
+  散文摘要供阅读；两组 tags 是 MemoryBoard 的逻辑索引（产出概念 / 引用
+  概念），后续 ``memoryboard_lookup`` 按 tag 检索时使用。引擎在 ChatNode
+  变为 SUCCEEDED 后自动挂起本 fixture；模型来自 ``chatflow.brief_model``
+  或 ``chatflow.draft_model``。
 params_schema:
   source_kind:
     type: string
     required: true
     description: >
-      ChatNode 类型：``chat_turn`` / ``chat_compact`` / ``chat_merge``。
+      ChatNode 类型：``chat_turn`` / ``chat_compact`` / ``chat_merge`` /
+      ``chat_pack``。
   user_message:
     type: string
     required: false
     description: >
       本轮 pre-check 前的用户输入（``ChatFlowNode.user_message.text``）。
-      merge 节点没有显式用户输入时可为空。
+      merge / pack 节点没有显式用户输入时可为空。
   agent_response:
     type: string
     required: true
     description: >
-      本轮 post-check 后的 agent 最终回复（``ChatFlowNode.agent_response.text``）。
-      compact 节点这里是压缩摘要；merge 节点这里是合并后的回复。
+      本轮 post-check 后的 agent 最终回复。compact / pack 节点这里是
+      压缩/打包后的摘要；merge 节点这里是合并后的回复。
+  max_produced_tags:
+    type: integer
+    required: true
+    description: >
+      ``produced_tags`` 数量硬上限。chatflow 级配置（默认 10）。
+  max_consumed_tags:
+    type: integer
+    required: true
+    description: >
+      ``consumed_tags`` 数量硬上限。chatflow 级配置（默认 8）。
+  ancestral_tags_active:
+    type: string
+    required: false
+    description: >
+      已知活跃的祖先概念 tag 列表（空格分隔），用作 anchor。如果本节点
+      reference / refine / reject 这些概念（即使 raw text 没用同样的
+      词），就把对应 tag 填进 consumed_tags。
 plan:
   description:
-    text: "为 ChatNode 写一到两句简介。"
+    text: "为 ChatNode 输出结构化简介 + tags。"
     provenance: pure_agent
   execution_mode: native_react
   nodes:
@@ -34,45 +54,94 @@ plan:
       parent_ids: []
       step_kind: draft
       description:
-        text: "把 ChatNode 本轮输入与输出凝练为简短散文描述。"
+        text: "蒸馏 ChatNode 的输入输出，输出 JSON 结构。"
         provenance: pure_agent
       input_messages:
         - role: system
           content: |
-            你是 MemoryBoard 总结器。任务：把**一个**ChatNode 本轮的用户
-            输入与 agent 最终回复改写成一句简短的散文描述——一到两句
-            话——让下游读者不必再回溯完整对话即可掌握要点。
+            你是 MemoryBoard 总结器。把**一个**ChatNode 蒸馏为严格的
+            JSON 输出：
 
-            硬性规则：
+              {
+                "description": "...",      // 一到两句散文摘要
+                "produced_tags": [...],   // 本节点输出涉及的概念
+                "consumed_tags": [...]    // 本节点引用/依赖的概念
+              }
+
+            ### description 写法
               - 只涵盖两件事：用户本轮问/要求了什么，agent 给出了什么
                 结论/产出。
               - 总共一到两句。不要列表、不要标题、不要 markdown、不要
-                JSON、不要代码围栏。纯散文。
+                代码围栏。纯散文。
               - 保留读者后续回查时需要锚定的具体信息：工具名、文件路
                 径、数字、明确作出的决策、错误名。其它过程性细节一律
-                省掉。不要在正文里写出 ChatNode id —— 系统在写入
-                MemoryBoard 时会以元数据形式附加。
+                省掉。不要在正文里写出 ChatNode id —— 系统会以元数据
+                形式附加。
               - 不要推测下游用途（"这将有助于…"）。只描述发生了什么。
-              - 不要复述系统提示或流程叙述。只写结论与关键事实。
               - 不要编造对话里没有的内容。
               - 用中立的第三人称书写。
               - 对 ``chat_compact``：描述被压缩了什么，以及摘要的要点。
               - 对 ``chat_merge``：描述合并来源的两条分支各自的取向，
                 以及合并后的回复结论。
+              - 对 ``chat_pack``：描述打包范围与摘要的关键事实。
+
+            ### tag 命名约定（必须严格遵守）
+              - 全小写 + underscore（snake_case）。例：
+                ``retrieval_augmented_generation``、``ivfflat_index``。
+                禁止使用大写字母、空格、连字符、点号。
+              - 单数形式优先：``plan_x`` 而非 ``plans_x``。
+              - 状态后缀语法 ``concept_status``——仅当本节点**明确改变**
+                概念状态时使用：
+                  ``plan_x_rejected``    方案 X 被驳回
+                  ``plan_x_approved``    方案 X 被采纳
+                  ``plan_x_deferred``    方案 X 被搁置
+                  ``plan_x_revived``     方案 X 被复活
+                  ``plan_x_finalized``   方案 X 被定稿
+                普通讨论/refine 时只用裸概念 ``plan_x``，不带状态。
+
+            ### produced_tags 选择
+              - 这个节点的输出**涉及/覆盖**了哪些概念。
+              - 如果节点改变了某概念的状态（驳回/采纳/搁置等），用对应
+                状态后缀 tag。
+              - 不要重复祖先 anchor —— 那些归 consumed_tags。
+
+            ### consumed_tags 选择（关键）
+              - 这个节点的输入/上下文**引用/依赖**了哪些概念。
+              - 如果上方"祖先活跃概念"列出的 tag 在本节点被引用、
+                refine 或反驳（**即使你的 raw text 没出现同样的词**），
+                必须把这些祖先 tag 填进 consumed_tags。这是为了让下游
+                按 tag 检索时不漏掉本节点这个 consumer。
+              - 例：祖先 active = ``plan_x``。本节点用户说"上一个
+                方案不合适"——你的 produced_tags 应该带
+                ``plan_x_rejected``，consumed_tags 应该带 ``plan_x``。
+
+            ### 数量约束
+              - produced_tags 最多 N 个（见下方 user 消息）。
+              - consumed_tags 最多 M 个。
+              - 既无产出概念也无引用概念时各填空数组 ``[]``。
+
+            输出**严格的 JSON 对象**，不要 markdown 围栏，不要前导/结
+            尾注释。
         - role: user
           content: |
             ChatNode 类型：{{ source_kind }}
 
-            本轮用户输入：
+            【祖先活跃概念】
+            {{ ancestral_tags_active or "（无）" }}
+
+            【本轮用户输入】
             ---
             {{ user_message }}
             ---
 
-            本轮 agent 最终回复：
+            【本轮 agent 最终回复】
             ---
             {{ agent_response }}
             ---
 
-            现在写出一到两句简介。只输出简介正文——不要开场白、不要
-            结语。
+            【约束】
+            produced_tags 最多 {{ max_produced_tags }} 个
+            consumed_tags 最多 {{ max_consumed_tags }} 个
+
+            输出 JSON：
   root_ids: ["chat_brief_root"]

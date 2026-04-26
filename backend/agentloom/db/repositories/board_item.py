@@ -33,6 +33,8 @@ class BoardItemRepository(WorkspaceScopedRepository):
         fallback: bool = False,
         inner_chat_ids: list[str] | None = None,
         work_node_ids: list[str] | None = None,
+        produced_tags: list[str] | None = None,
+        consumed_tags: list[str] | None = None,
     ) -> BoardItemRow:
         """Insert or update the BoardItem row keyed by ``source_node_id``.
 
@@ -67,6 +69,8 @@ class BoardItemRepository(WorkspaceScopedRepository):
                 fallback=fallback,
                 inner_chat_ids=inner_chat_ids,
                 work_node_ids=work_node_ids,
+                produced_tags=list(produced_tags or []),
+                consumed_tags=list(consumed_tags or []),
             )
             self.session.add(row)
         else:
@@ -78,6 +82,8 @@ class BoardItemRepository(WorkspaceScopedRepository):
             row.fallback = fallback
             row.inner_chat_ids = inner_chat_ids
             row.work_node_ids = work_node_ids
+            row.produced_tags = list(produced_tags or [])
+            row.consumed_tags = list(consumed_tags or [])
         await self.session.flush()
         return row
 

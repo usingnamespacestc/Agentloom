@@ -482,6 +482,12 @@ export interface ChatFlow {
    * of the turn model's context window. Default 0.4.
    */
   chatnode_compact_target_pct: number;
+  /** Hard ceiling on ``produced_tags`` that ``chat_brief`` /
+   * ``node_brief`` may emit per BoardItem. Concept anchors beyond this
+   * are dropped. Default 10. */
+  max_produced_tags: number;
+  /** Hard ceiling on ``consumed_tags`` per BoardItem. Default 8. */
+  max_consumed_tags: number;
   sticky_notes?: Record<string, StickyNote>;
   created_at: string;
 }
@@ -522,4 +528,11 @@ export interface BoardItem {
    * one in a different ChatNode's WorkFlow) pull a specific WorkNode's
    * content via ``get_node_context`` without re-reading the full chain. */
   work_node_ids?: NodeId[];
+  /** Concept anchors this brief introduces (e.g. ``plan_x``,
+   * ``plan_x_rejected``). Used by ``memoryboard_lookup`` for tag-based
+   * retrieval in addition to free-text search. */
+  produced_tags?: string[];
+  /** Concept anchors this brief touches without minting (downstream
+   * references to upstream produced_tags). */
+  consumed_tags?: string[];
 }

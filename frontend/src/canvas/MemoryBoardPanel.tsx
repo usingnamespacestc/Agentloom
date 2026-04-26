@@ -198,6 +198,29 @@ export function MemoryBoardPanel({
                     {preview}
                   </div>
                 )}
+                {((item.produced_tags && item.produced_tags.length > 0) ||
+                  (item.consumed_tags && item.consumed_tags.length > 0)) && (
+                  <div className="mt-1 flex flex-wrap gap-0.5 text-[9px]">
+                    {item.produced_tags?.map((tag) => (
+                      <span
+                        key={`p-${tag}`}
+                        className="rounded bg-emerald-50 px-1 py-[1px] font-mono text-emerald-700"
+                        title={`produced: ${tag}`}
+                      >
+                        {`+${tag}`}
+                      </span>
+                    ))}
+                    {item.consumed_tags?.map((tag) => (
+                      <span
+                        key={`c-${tag}`}
+                        className="rounded bg-indigo-50 px-1 py-[1px] font-mono text-indigo-700"
+                        title={`consumed: ${tag}`}
+                      >
+                        {`→${tag}`}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </li>
             );
           })}

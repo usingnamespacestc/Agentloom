@@ -9,43 +9,47 @@ while this tool returns the short ``description`` rows produced by the
 Callers that only need a node's take-away should prefer this tool — it
 stays small even when the upstream node's tool_result is megabyte-sized.
 
-Supported filters (all optional; all AND-combined; at least one of
+Supported filters (all optional; AND-combined; at least one of
 ``chatflow_id`` / ``workflow_id`` must be provided):
 
-- ``chatflow_id`` — restrict to one ChatFlow's board items.
-- ``workflow_id`` — restrict to items produced inside one WorkFlow.
-- ``scope`` — ``"chat"`` / ``"node"`` / ``"flow"``; matches
-  :class:`agentloom.schemas.common.NodeScope` plus the PR 3 chat scope.
+- ``chatflow_id`` / ``workflow_id`` — scope by ChatFlow or WorkFlow.
+- ``scope`` — ``"chat"`` / ``"node"`` / ``"flow"``.
 - ``source_node_id`` — direct address; returns at most one row.
 - ``query`` — case-insensitive substring match over ``description``.
+- ``tag`` — single concept; returns rows that match it on EITHER
+  ``produced_tags`` OR ``consumed_tags`` (the producer+consumer dual
+  view from the 2026-04-25 logical-index design — gets the rejection
+  context at node 2 even when the search is for "plan_x" emitted by
+  node 1).
+- ``produced_tags`` / ``consumed_tags`` — explicit producer- or
+  consumer-only filters when the caller wants to narrow by side.
+- ``tag_match_mode`` — ``"any"`` (default) or ``"all"`` for multi-tag.
+- ``prefix_match`` — when true, a tag like ``plan_x`` also matches
+  ``plan_x_rejected`` / ``plan_x_approved`` etc. Use to pull the
+  full lifecycle of a concept across status changes.
+- ``expand_chain`` — after matching, also include downstream board
+  items that drill from each matched row (one hop). Helps surface
+  the consumer-side context of a producer match.
+- ``since`` — ISO 8601 datetime; only return rows created at or after.
+- ``limit`` — max rows (default 50, capped at 200).
 
 Two return shapes (opt in via ``format``, default ``"prompt"``):
 
-- ``"prompt"`` — a readable prose block rendered for LLM consumption.
-  Each item becomes a metadata line (``scope``, ``source_kind``,
-  ``source_node_id``, ``created_at``) followed by the indented brief
-  description. This is the default because the tool's primary caller
-  is an LLM planning/judging node — raw JSON wastes tokens on
-  structural punctuation the model has to parse back out.
-- ``"json"`` — the legacy ``{"items": [...], "truncated": bool}``
-  shape. Each item carries ``description``, ``scope``,
-  ``source_node_id``, ``source_kind``, ``fallback``, ``chatflow_id``,
-  ``workflow_id``, ``created_at``. Use this when the caller is
-  programmatic (tests, UI, another tool).
-
-PR B (2026-04-21): the prompt form is the architectural read-time
-JSON→prose conversion the MemoryBoard design calls for — briefs are
-stored as structured rows and materialized as prose at the moment a
-consumer reads them, never edge-connected to consumer nodes.
+- ``"prompt"`` — readable prose block for LLM consumption. Each item
+  becomes a metadata line (``scope``, ``source_kind``,
+  ``source_node_id``, tag set, ``created_at``) followed by the
+  indented brief description.
+- ``"json"`` — programmatic ``{items: [...], truncated: bool}``
+  shape with full structured fields.
 
 Cross-workspace isolation is enforced by :class:`BoardItemRepository`
-— every query filters by ``ctx.workspace_id``, so a node id from
-another workspace simply yields zero rows.
+— every query filters by ``ctx.workspace_id``.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -59,85 +63,122 @@ _DEFAULT_LIMIT = 50
 _MAX_LIMIT = 200
 _VALID_SCOPES = {"chat", "node", "flow"}
 _VALID_FORMATS = {"prompt", "json"}
+_VALID_TAG_MATCH_MODES = {"any", "all"}
 _DEFAULT_FORMAT = "prompt"
+_DEFAULT_TAG_MATCH_MODE = "any"
 
 
 class MemoryBoardLookupTool(Tool):
     name = "memoryboard_lookup"
     description = (
         "Read the MemoryBoard — the short ``description`` distilled from "
-        "every ChatNode/WorkNode's brief. Prefer this over "
-        "``get_node_context`` when you only need the take-away, not the "
-        "raw messages. Filter by ``chatflow_id`` or ``workflow_id`` "
-        "(at least one required), plus optional ``scope`` "
-        "(``chat``/``node``/``flow``), ``source_node_id`` for direct "
-        "address, or ``query`` substring match over the description. "
-        "Returns at most ``limit`` rows (default 50, max 200). "
-        "``format`` chooses the output shape: ``prompt`` (default, "
-        "readable prose block for LLM consumption) or ``json`` "
-        "(structured rows for programmatic callers). "
-        "Cross-workspace items are never visible."
+        "every ChatNode/WorkNode's brief, plus its concept tags. Prefer "
+        "this over ``get_node_context`` when you only need the take-away "
+        "and the concept lifecycle, not the raw messages. Filter by "
+        "``chatflow_id`` / ``workflow_id`` (at least one), plus optional "
+        "``scope``, ``source_node_id``, ``query`` substring, ``tag`` "
+        "(single concept matched against either produced or consumed — "
+        "use this to find both the proposer and the rejecter of one "
+        "concept), ``produced_tags`` / ``consumed_tags`` (side-specific), "
+        "``tag_match_mode`` (any / all), ``prefix_match`` (plan_x also "
+        "matches plan_x_rejected etc), ``expand_chain`` (one hop of "
+        "drill-down to surface consumers), or ``since`` ISO datetime "
+        "for time windows. ``limit`` defaults to 50, capped at 200. "
+        "``format`` chooses ``prompt`` (readable, default) or ``json`` "
+        "(structured rows). Cross-workspace items are never visible."
     )
     parameters = {
         "type": "object",
         "properties": {
-            "chatflow_id": {
-                "type": "string",
-                "description": (
-                    "Restrict results to one ChatFlow. At least one of "
-                    "``chatflow_id`` / ``workflow_id`` must be provided."
-                ),
-            },
-            "workflow_id": {
-                "type": "string",
-                "description": (
-                    "Restrict results to items produced inside one "
-                    "WorkFlow. At least one of ``chatflow_id`` / "
-                    "``workflow_id`` must be provided."
-                ),
-            },
-            "scope": {
-                "type": "string",
-                "enum": ["chat", "node", "flow"],
-                "description": (
-                    "Filter by MemoryBoardItem scope: ``chat`` for "
-                    "ChatNode items (PR 3), ``node`` for WorkNode "
-                    "node-briefs, ``flow`` for WorkFlow flow-briefs."
-                ),
-            },
-            "source_node_id": {
-                "type": "string",
-                "description": (
-                    "Return the single item summarizing exactly this "
-                    "source node. Combine with ``chatflow_id`` for the "
-                    "tightest lookup."
-                ),
-            },
+            "chatflow_id": {"type": "string"},
+            "workflow_id": {"type": "string"},
+            "scope": {"type": "string", "enum": ["chat", "node", "flow"]},
+            "source_node_id": {"type": "string"},
             "query": {
                 "type": "string",
+                "description": "Case-insensitive substring on description.",
+            },
+            "tag": {
+                "type": "string",
                 "description": (
-                    "Case-insensitive substring match over the "
-                    "description text. Applied after other filters."
+                    "Single concept tag. Matched against EITHER "
+                    "``produced_tags`` OR ``consumed_tags`` so the "
+                    "lookup returns both the node that proposed the "
+                    "concept and downstream nodes that referenced or "
+                    "rejected it. Combine with ``prefix_match`` to "
+                    "include status-suffixed forms."
+                ),
+            },
+            "produced_tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Restrict to rows whose ``produced_tags`` matches. "
+                    "Combine via ``tag_match_mode`` for multi-tag."
+                ),
+            },
+            "consumed_tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Restrict to rows whose ``consumed_tags`` matches."
+                ),
+            },
+            "tag_match_mode": {
+                "type": "string",
+                "enum": sorted(_VALID_TAG_MATCH_MODES),
+                "default": _DEFAULT_TAG_MATCH_MODE,
+                "description": (
+                    "``any`` (default) — row matches if at least one "
+                    "requested tag is in the array. ``all`` — every "
+                    "requested tag must be present."
+                ),
+            },
+            "prefix_match": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "When true, treat each requested tag as a prefix. "
+                    "``plan_x`` then also matches ``plan_x_rejected``, "
+                    "``plan_x_approved``, etc — covers the concept's "
+                    "full lifecycle across status changes."
+                ),
+            },
+            "expand_chain": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "After matching, also include one hop of downstream "
+                    "BoardItems (rows whose ``inner_chat_ids`` / "
+                    "``work_node_ids`` reference a matched row, OR whose "
+                    "``consumed_tags`` overlap a matched row's "
+                    "``produced_tags``). Helps surface the consumer-"
+                    "side context of a producer hit."
+                ),
+            },
+            "since": {
+                "type": "string",
+                "description": (
+                    "ISO 8601 datetime. Drop rows created before this. "
+                    "Use to scope the time-index axis and bound volume "
+                    "on long chats."
                 ),
             },
             "limit": {
                 "type": "integer",
-                "description": (
-                    f"Max rows to return. Default {_DEFAULT_LIMIT}, "
-                    f"capped at {_MAX_LIMIT}."
-                ),
                 "default": _DEFAULT_LIMIT,
+                "description": (
+                    f"Max rows. Default {_DEFAULT_LIMIT}, capped at {_MAX_LIMIT}."
+                ),
             },
             "format": {
                 "type": "string",
                 "enum": sorted(_VALID_FORMATS),
-                "description": (
-                    "Output shape. ``prompt`` (default) renders a "
-                    "readable prose block for LLM consumption. "
-                    "``json`` returns the structured ``{items, "
-                    "truncated}`` object for programmatic callers."
-                ),
                 "default": _DEFAULT_FORMAT,
+                "description": (
+                    "``prompt`` (default) renders prose for LLMs. "
+                    "``json`` returns ``{items, truncated}``."
+                ),
             },
         },
     }
@@ -149,6 +190,15 @@ class MemoryBoardLookupTool(Tool):
         scope = _str_or_none(args, "scope")
         query = _str_or_none(args, "query")
         fmt = _str_or_none(args, "format") or _DEFAULT_FORMAT
+        tag_single = _str_or_none(args, "tag")
+        produced_arg = _list_str_or_none(args, "produced_tags")
+        consumed_arg = _list_str_or_none(args, "consumed_tags")
+        tag_match_mode = (
+            _str_or_none(args, "tag_match_mode") or _DEFAULT_TAG_MATCH_MODE
+        )
+        prefix_match = bool(args.get("prefix_match", False))
+        expand_chain = bool(args.get("expand_chain", False))
+        since_str = _str_or_none(args, "since")
 
         if not chatflow_id and not workflow_id:
             raise ToolError(
@@ -168,15 +218,39 @@ class MemoryBoardLookupTool(Tool):
                 f"must be one of {sorted(_VALID_FORMATS)}"
             )
 
+        if tag_match_mode not in _VALID_TAG_MATCH_MODES:
+            raise ToolError(
+                f"memoryboard_lookup: invalid tag_match_mode "
+                f"{tag_match_mode!r}; must be one of "
+                f"{sorted(_VALID_TAG_MATCH_MODES)}"
+            )
+
+        since_dt: datetime | None = None
+        if since_str:
+            try:
+                since_dt = datetime.fromisoformat(since_str)
+            except ValueError as exc:
+                raise ToolError(
+                    f"memoryboard_lookup: 'since' must be ISO 8601 datetime, "
+                    f"got {since_str!r}"
+                ) from exc
+
         raw_limit = args.get("limit", _DEFAULT_LIMIT)
         try:
             limit = int(raw_limit)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
             raise ToolError(
                 f"memoryboard_lookup: 'limit' must be an integer, "
                 f"got {raw_limit!r}"
-            ) from None
+            ) from exc
         limit = max(1, min(limit, _MAX_LIMIT))
+
+        # Resolve which side filters apply. Single ``tag`` shorthand
+        # expands to "match in EITHER produced or consumed" — that's
+        # the producer+consumer dual view designed for "find the
+        # rejection context even when the search keyword is the
+        # proposed concept".
+        union_tags = [tag_single] if tag_single else []
 
         async with get_session_maker()() as session:
             stmt = select(BoardItemRow).where(
@@ -191,16 +265,51 @@ class MemoryBoardLookupTool(Tool):
             if scope is not None:
                 stmt = stmt.where(BoardItemRow.scope == scope)
             if query is not None and query:
-                # ILIKE on Postgres, case-insensitive LIKE on sqlite.
                 stmt = stmt.where(
                     BoardItemRow.description.ilike(f"%{query}%")
                 )
-            # Fetch limit+1 so we know whether the tail was truncated.
-            stmt = stmt.order_by(BoardItemRow.created_at).limit(limit + 1)
-            rows = list((await session.execute(stmt)).scalars().all())
+            if since_dt is not None:
+                stmt = stmt.where(BoardItemRow.created_at >= since_dt)
+            stmt = stmt.order_by(BoardItemRow.created_at)
+            # Fetch a generous candidate pool; tag-filter happens in
+            # Python so we may need to over-fetch before truncating.
+            # SQLAlchemy doesn't expose a clean dialect-portable JSONB
+            # ``?|`` op — Python filtering keeps SQLite (test) happy
+            # AND avoids an extra dialect branch.
+            stmt = stmt.limit(_MAX_LIMIT * 4)
+            all_rows = list((await session.execute(stmt)).scalars().all())
 
-        truncated = len(rows) > limit
-        rows = rows[:limit]
+        wants_tag_filter = (
+            bool(union_tags) or bool(produced_arg) or bool(consumed_arg)
+        )
+        if wants_tag_filter:
+            filtered = [
+                r
+                for r in all_rows
+                if _row_matches_tags(
+                    r,
+                    union_tags=union_tags,
+                    produced_required=produced_arg or [],
+                    consumed_required=consumed_arg or [],
+                    mode=tag_match_mode,
+                    prefix_match=prefix_match,
+                )
+            ]
+        else:
+            filtered = all_rows
+
+        if expand_chain and filtered:
+            extras = _expand_chain_one_hop(filtered, all_rows)
+            # Preserve original order while appending non-duplicates.
+            seen_ids = {r.id for r in filtered}
+            for extra in extras:
+                if extra.id not in seen_ids:
+                    filtered.append(extra)
+                    seen_ids.add(extra.id)
+            filtered.sort(key=lambda r: (r.created_at, r.id))
+
+        truncated = len(filtered) > limit
+        rows = filtered[:limit]
 
         if fmt == "json":
             payload = {
@@ -224,6 +333,150 @@ def _str_or_none(args: dict[str, Any], key: str) -> str | None:
     return val or None
 
 
+def _list_str_or_none(args: dict[str, Any], key: str) -> list[str] | None:
+    val = args.get(key)
+    if val is None:
+        return None
+    if not isinstance(val, list):
+        raise ToolError(
+            f"memoryboard_lookup: {key!r} must be a list of strings, "
+            f"got {type(val).__name__}"
+        )
+    out: list[str] = []
+    for item in val:
+        if not isinstance(item, str):
+            raise ToolError(
+                f"memoryboard_lookup: {key!r} entries must be strings"
+            )
+        s = item.strip()
+        if s:
+            out.append(s)
+    return out or None
+
+
+def _tag_in_list(needle: str, hay: list[str], *, prefix_match: bool) -> bool:
+    """Membership check honoring prefix_match.
+
+    With ``prefix_match=False``: exact match. With ``prefix_match=True``:
+    ``needle`` must equal a tag OR be its underscore-prefix (so
+    ``plan_x`` matches ``plan_x``, ``plan_x_rejected``, ``plan_x_done``).
+    The underscore guard prevents ``plan`` from matching ``planet``.
+    """
+    if not prefix_match:
+        return needle in hay
+    needle_us = needle + "_"
+    for tag in hay:
+        if tag == needle or tag.startswith(needle_us):
+            return True
+    return False
+
+
+def _row_matches_tags(
+    row: BoardItemRow,
+    *,
+    union_tags: list[str],
+    produced_required: list[str],
+    consumed_required: list[str],
+    mode: str,
+    prefix_match: bool,
+) -> bool:
+    """Apply tag filters in Python (works on both PG JSONB and SQLite
+    JSON since we operate on the deserialized list).
+
+    A row passes when:
+    - For each requested ``union_tag``: at least one of the row's
+      ``produced_tags`` OR ``consumed_tags`` matches (mode + prefix
+      semantics applied per element).
+    - For each requested ``produced_required``: matches against the
+      row's ``produced_tags`` only.
+    - For each requested ``consumed_required``: matches against the
+      row's ``consumed_tags`` only.
+    """
+    produced_tags = list(row.produced_tags or [])
+    consumed_tags = list(row.consumed_tags or [])
+
+    def side_matches(needles: list[str], hay: list[str]) -> bool:
+        if not needles:
+            return True
+        hits = [
+            _tag_in_list(n, hay, prefix_match=prefix_match) for n in needles
+        ]
+        if mode == "all":
+            return all(hits)
+        return any(hits)
+
+    def union_side_matches(needles: list[str]) -> bool:
+        if not needles:
+            return True
+        results = []
+        for n in needles:
+            results.append(
+                _tag_in_list(n, produced_tags, prefix_match=prefix_match)
+                or _tag_in_list(n, consumed_tags, prefix_match=prefix_match)
+            )
+        if mode == "all":
+            return all(results)
+        return any(results)
+
+    if not union_side_matches(union_tags):
+        return False
+    if not side_matches(produced_required, produced_tags):
+        return False
+    if not side_matches(consumed_required, consumed_tags):
+        return False
+    return True
+
+
+def _expand_chain_one_hop(
+    seeds: list[BoardItemRow], pool: list[BoardItemRow]
+) -> list[BoardItemRow]:
+    """Find one hop of downstream rows for each seed.
+
+    Two relations count as "downstream":
+    1. ``inner_chat_ids`` / ``work_node_ids`` reference: pool row's
+       drill-down id list contains the seed's source_node_id, OR the
+       seed's drill ids contain the pool row's source_node_id.
+    2. Tag-flow: pool row's ``consumed_tags`` overlaps the seed's
+       ``produced_tags`` (the pool row was 'built on' the seed's
+       concepts).
+
+    Returns rows from ``pool`` that aren't already in ``seeds``.
+    """
+    seed_ids = {r.id for r in seeds}
+    seed_source_ids = {r.source_node_id for r in seeds}
+    seed_drill = set()
+    for r in seeds:
+        for did in (r.inner_chat_ids or []):
+            seed_drill.add(did)
+        for did in (r.work_node_ids or []):
+            seed_drill.add(did)
+
+    seed_produced_by_source: dict[str, set[str]] = {
+        r.source_node_id: set(r.produced_tags or []) for r in seeds
+    }
+
+    out: list[BoardItemRow] = []
+    for cand in pool:
+        if cand.id in seed_ids:
+            continue
+        # Drill reference (either direction).
+        cand_drill = set(cand.inner_chat_ids or []) | set(cand.work_node_ids or [])
+        if cand_drill & seed_source_ids:
+            out.append(cand)
+            continue
+        if cand.source_node_id in seed_drill:
+            out.append(cand)
+            continue
+        # Tag flow: cand consumed something a seed produced.
+        cand_consumed = set(cand.consumed_tags or [])
+        if cand_consumed:
+            for produced in seed_produced_by_source.values():
+                if cand_consumed & produced:
+                    out.append(cand)
+                    break
+    return out
+
+
 def _serialize_row(row: BoardItemRow) -> dict[str, Any]:
     return {
         "id": row.id,
@@ -234,6 +487,10 @@ def _serialize_row(row: BoardItemRow) -> dict[str, Any]:
         "scope": row.scope,
         "description": row.description,
         "fallback": row.fallback,
+        "produced_tags": list(row.produced_tags or []),
+        "consumed_tags": list(row.consumed_tags or []),
+        "inner_chat_ids": list(row.inner_chat_ids or []),
+        "work_node_ids": list(row.work_node_ids or []),
         "created_at": row.created_at.isoformat() if row.created_at else None,
     }
 
@@ -242,10 +499,12 @@ def _render_prompt_block(rows: list[BoardItemRow], *, truncated: bool) -> str:
     """Format ``rows`` as a readable prose block for LLM consumption.
 
     Each row renders as a metadata line (``scope`` / ``source_kind`` /
-    ``source_node_id`` / ``created_at``) followed by the indented brief
-    description. ``source_node_id`` is in the metadata — not inside the
-    description prose — so the consumer can cite it in ``redo_targets``
-    or feed it to ``get_node_context`` for a deeper read.
+    ``source_node_id`` / produced + consumed tag set / ``created_at``)
+    followed by the indented brief description. Tags surface as
+    sets of comma-separated names so the consumer can reason about
+    concept lifecycles (e.g. seeing both ``plan_x`` on a producer
+    row and ``plan_x_rejected`` on a later consumer row tells the
+    full story without a second lookup).
     """
     if not rows:
         return "MemoryBoard lookup — no items matched."
@@ -264,6 +523,10 @@ def _render_prompt_block(rows: list[BoardItemRow], *, truncated: bool) -> str:
             f"source={row.source_node_id}",
             f"at={ts}",
         ]
+        if row.produced_tags:
+            meta_parts.append("produced=" + ",".join(row.produced_tags))
+        if row.consumed_tags:
+            meta_parts.append("consumed=" + ",".join(row.consumed_tags))
         if row.fallback:
             meta_parts.append("fallback=true")
         meta = " · ".join(meta_parts)

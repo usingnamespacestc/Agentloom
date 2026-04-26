@@ -316,6 +316,8 @@ def _make_board_writer(
         fallback: bool,
         inner_chat_ids: list[str] | None = None,
         work_node_ids: list[str] | None = None,
+        produced_tags: list[str] | None = None,
+        consumed_tags: list[str] | None = None,
     ) -> None:
         if chatflow_id is None:
             # Without a chatflow id we can't satisfy the board_items
@@ -335,6 +337,8 @@ def _make_board_writer(
                     fallback=fallback,
                     inner_chat_ids=inner_chat_ids,
                     work_node_ids=work_node_ids,
+                    produced_tags=produced_tags,
+                    consumed_tags=consumed_tags,
                 )
                 await session.commit()
         except Exception:  # noqa: BLE001 — board is best-effort
@@ -617,6 +621,89 @@ def _render_runtime_system_info(
         f"- Shell: {shell}{bash_note}\n"
         "- ChatFlow has no bound cwd — use absolute paths for files"
     )
+
+
+#: Tag suffixes that mark a concept as no-longer-active. Matches the
+#: ``concept_status`` syntax pinned in the brief fixture system
+#: prompts. Used when computing ``ancestral_tags_active`` so a concept
+#: that was rejected upstream isn't surfaced as an anchor for the
+#: current ChatNode's brief.
+_DEAD_TAG_STATUSES: set[str] = {"rejected", "deferred"}
+_KNOWN_TAG_STATUSES: set[str] = {
+    "rejected",
+    "approved",
+    "deferred",
+    "revived",
+    "finalized",
+}
+
+
+def _split_tag_status(tag: str) -> tuple[str, str | None]:
+    """Decompose a possibly-status-suffixed tag into ``(base, status)``.
+
+    Convention (set in chat_brief / node_brief fixtures): a status
+    suffix is the LAST underscore-delimited segment when it matches
+    one of :data:`_KNOWN_TAG_STATUSES`. Other underscores are part of
+    a multi-word base concept (``retrieval_augmented_generation`` →
+    base = ``retrieval_augmented_generation``, status = None).
+    """
+    if "_" not in tag:
+        return tag, None
+    base, _, last = tag.rpartition("_")
+    if last in _KNOWN_TAG_STATUSES:
+        return base, last
+    return tag, None
+
+
+def _walk_chat_chain_to_root(
+    chatflow: ChatFlow, node: ChatFlowNode
+) -> list[NodeId]:
+    """Walk primary-parent chain from *node*'s parent up to root.
+    Returns ids in root-first order. Excludes *node* itself — only
+    ancestors are returned (the brief's own produced_tags are what
+    we're computing).
+    """
+    chain: list[NodeId] = []
+    seen: set[NodeId] = set()
+    cursor: NodeId | None = node.parent_ids[0] if node.parent_ids else None
+    while cursor and cursor not in seen:
+        seen.add(cursor)
+        chain.append(cursor)
+        ancestor = chatflow.nodes.get(cursor)
+        if ancestor is None:
+            break
+        cursor = ancestor.parent_ids[0] if ancestor.parent_ids else None
+    chain.reverse()  # root first
+    return chain
+
+
+def _aggregate_active_tags(
+    chain_tags: list[list[str]],
+    *,
+    max_anchors: int = 12,
+) -> list[str]:
+    """Walk per-ancestor produced_tags lists in chronological order
+    (root first, leaf-parent last) and return the active anchor set.
+
+    Active = base concept whose latest observed status isn't dead
+    (``_rejected`` / ``_deferred``). A later ``plan_x_revived`` revives
+    the concept that an earlier ``plan_x_rejected`` killed; the dict
+    update preserves this naturally because we walk oldest-to-newest
+    and "latest wins".
+
+    Capped at the most-recent ``max_anchors`` to keep the brief prompt
+    bounded (long chains can accumulate dozens of concepts; we want a
+    focused anchor list).
+    """
+    concept_status: dict[str, str | None] = {}
+    for tags in chain_tags:
+        for tag in tags:
+            base, status = _split_tag_status(tag)
+            concept_status[base] = status
+    active = [c for c, s in concept_status.items() if s not in _DEAD_TAG_STATUSES]
+    if len(active) > max_anchors:
+        active = active[-max_anchors:]
+    return active
 
 
 def _drill_down_footer(
@@ -1503,6 +1590,8 @@ class ChatFlowEngine:
                 # would recurse uselessly.
                 chatflow_compact_trigger_pct=None,
                 chatflow_runtime_environment_note=self._resolve_runtime_note(chatflow),
+                chatflow_max_produced_tags=chatflow.max_produced_tags,
+                chatflow_max_consumed_tags=chatflow.max_consumed_tags,
                 chatflow_id=chatflow.id,
                 disabled_tool_names=effective_disabled,
             )
@@ -1583,6 +1672,12 @@ class ChatFlowEngine:
             )
             description = f"{summary}\n\n{footer}" if footer else summary
             try:
+                # Pack write bypasses ``chat_brief`` (the pack's own
+                # summary IS the brief), so produced_tags / consumed_tags
+                # are empty here. Downstream tag-walkers traverse through
+                # the pack to its pre-pack ancestors via the primary
+                # parent chain, so an untagged pack doesn't block the
+                # ancestral anchor lookup.
                 await self._inner._board_writer(
                     chatflow_id=chatflow.id,
                     workflow_id=None,
@@ -1593,6 +1688,8 @@ class ChatFlowEngine:
                     fallback=False,
                     inner_chat_ids=inner_chat_ids,
                     work_node_ids=work_node_ids,
+                    produced_tags=[],
+                    consumed_tags=[],
                 )
             except Exception:  # noqa: BLE001 — board is best-effort
                 log.exception(
@@ -1725,6 +1822,8 @@ class ChatFlowEngine:
                 # own execute() and re-enable Tier 1 normally.
                 chatflow_compact_trigger_pct=None,
                 chatflow_runtime_environment_note=self._resolve_runtime_note(chatflow),
+                chatflow_max_produced_tags=chatflow.max_produced_tags,
+                chatflow_max_consumed_tags=chatflow.max_consumed_tags,
                 chatflow_id=chatflow.id,
                 disabled_tool_names=effective_disabled,
             )
@@ -2311,6 +2410,8 @@ class ChatFlowEngine:
                 # conversation (it's templated as two big text blobs).
                 chatflow_compact_trigger_pct=None,
                 chatflow_runtime_environment_note=self._resolve_runtime_note(chatflow),
+                chatflow_max_produced_tags=chatflow.max_produced_tags,
+                chatflow_max_consumed_tags=chatflow.max_consumed_tags,
                 chatflow_id=chatflow.id,
                 disabled_tool_names=effective_disabled,
             )
@@ -4514,6 +4615,8 @@ class ChatFlowEngine:
                 chatflow_compact_preserve_mode=chatflow.compact_preserve_mode,
                 chatflow_compact_model=chatflow.compact_model,
                 chatflow_runtime_environment_note=self._resolve_runtime_note(chatflow),
+                chatflow_max_produced_tags=chatflow.max_produced_tags,
+                chatflow_max_consumed_tags=chatflow.max_consumed_tags,
                 chatflow_id=chatflow.id,
                 post_node_hook=(
                     None
@@ -4563,6 +4666,8 @@ class ChatFlowEngine:
                     await self._inner.execute(
                         chat_node.workflow,
                         chatflow_runtime_environment_note=self._resolve_runtime_note(chatflow),
+                chatflow_max_produced_tags=chatflow.max_produced_tags,
+                chatflow_max_consumed_tags=chatflow.max_consumed_tags,
                         chatflow_id=chatflow.id,
                         disabled_tool_names=effective_disabled,
                     )
@@ -4835,8 +4940,14 @@ class ChatFlowEngine:
         if node.user_message is None and node.agent_response.text == "":
             return
         source_kind = _chat_board_source_kind(node)
-        description, fallback = await self._render_chat_board_description(
-            chatflow, node, source_kind
+        # Pull ancestor produced_tags out of the existing ChatBoardItem
+        # rows so the brief LLM has anchors when filling consumed_tags.
+        # See ``_aggregate_active_tags`` for the dead-status filter.
+        ancestral = await self._collect_chat_ancestral_active_tags(chatflow, node)
+        description, produced_tags, consumed_tags, fallback = (
+            await self._render_chat_board_description(
+                chatflow, node, source_kind, ancestral
+            )
         )
         # Drill-down pointers — collected fresh each upsert because pack
         # range / merged parents / WorkBoard membership can shift
@@ -4861,6 +4972,8 @@ class ChatFlowEngine:
                 fallback=fallback,
                 inner_chat_ids=inner_chat_ids,
                 work_node_ids=work_node_ids,
+                produced_tags=produced_tags,
+                consumed_tags=consumed_tags,
             )
         except Exception:  # noqa: BLE001 — board is best-effort
             log.exception(
@@ -4871,23 +4984,83 @@ class ChatFlowEngine:
                 source_kind,
             )
 
+    async def _collect_chat_ancestral_active_tags(
+        self, chatflow: ChatFlow, node: ChatFlowNode
+    ) -> list[str]:
+        """Walk the primary-parent chain from root to *node*'s parent
+        and return the ancestor concept anchor set.
+
+        Implementation:
+        1. Walk chain: node.parent_ids[0] → … → root, reverse to root-first.
+        2. Fetch every ChatBoardItem row in this chatflow once (one SQL
+           round-trip), index by source_node_id.
+        3. Aggregate ``produced_tags`` from each ancestor row in
+           chronological order via :func:`_aggregate_active_tags` —
+           dead-status concepts (``_rejected`` / ``_deferred``) are
+           filtered out.
+
+        Best-effort: no DB session, missing rows, or fetch errors all
+        return ``[]`` so the brief still runs (just without ancestor
+        anchors).
+        """
+        if self._tool_ctx is None:
+            return []
+        chain = _walk_chat_chain_to_root(chatflow, node)
+        if not chain:
+            return []
+        from agentloom.db.base import get_session_maker
+        from agentloom.db.models.tenancy import DEFAULT_WORKSPACE_ID
+        from agentloom.db.repositories.board_item import BoardItemRepository
+
+        workspace_id = self._tool_ctx.workspace_id or DEFAULT_WORKSPACE_ID
+        try:
+            async with get_session_maker()() as session:
+                repo = BoardItemRepository(session, workspace_id=workspace_id)
+                rows = await repo.list_by_chatflow(chatflow.id)
+        except Exception:  # noqa: BLE001 — best-effort, brief still runs
+            log.exception(
+                "ancestral tags fetch failed for chatflow=%s — brief will "
+                "run without anchors",
+                chatflow.id,
+            )
+            return []
+        produced_by_source: dict[str, list[str]] = {
+            row.source_node_id: list(row.produced_tags or [])
+            for row in rows
+            if row.scope == "chat"
+        }
+        # chain is root-first; the LAST element is node's primary parent.
+        chain_tags = [
+            produced_by_source.get(src, []) for src in chain
+        ]
+        return _aggregate_active_tags(chain_tags)
+
     async def _render_chat_board_description(
         self,
         chatflow: ChatFlow,
         node: ChatFlowNode,
         source_kind: str,
-    ) -> tuple[str, bool]:
-        """Produce the ChatBoardItem ``description`` text for *node*.
+        ancestral_tags_active: list[str],
+    ) -> tuple[str, list[str], list[str], bool]:
+        """Produce the ChatBoardItem distillation for *node*.
 
-        Returns ``(description, fallback)``. Tries the LLM path first
-        (``chat_brief`` fixture + ``chatflow.brief_model or draft_model``);
-        on no model, empty reply, or any provider exception, returns
-        :func:`_chat_board_description` with ``fallback=True``. The brief
-        is best-effort: its failure must never break the ChatNode cascade.
+        Returns ``(description, produced_tags, consumed_tags, fallback)``.
+        Tries the LLM path first (``chat_brief`` fixture +
+        ``chatflow.brief_model`` or ``draft_model``, with response_format
+        json_schema enforced via :func:`brief_grammar_schema`); on no
+        model, empty reply, or any provider exception, returns
+        :func:`_chat_board_description` with empty tag arrays and
+        ``fallback=True``. The brief is best-effort — its failure must
+        never break the ChatNode cascade.
         """
+        from agentloom.engine.brief_parser import (
+            brief_grammar_schema,
+            parse_brief_output,
+        )
+
         model_ref = chatflow.brief_model or chatflow.draft_model
         if model_ref is None:
-            return _chat_board_description(node), True
+            return _chat_board_description(node), [], [], True
         from agentloom.engine.workflow_engine import _get_brief_fixture
 
         try:
@@ -4898,7 +5071,7 @@ class ChatFlowEngine:
                 "back to code template",
                 chatflow.id,
             )
-            return _chat_board_description(node), True
+            return _chat_board_description(node), [], [], True
 
         user_text = node.user_message.text if node.user_message else ""
         agent_text = node.agent_response.text if node.agent_response else ""
@@ -4909,6 +5082,9 @@ class ChatFlowEngine:
                     "source_kind": source_kind,
                     "user_message": user_text,
                     "agent_response": agent_text,
+                    "max_produced_tags": chatflow.max_produced_tags,
+                    "max_consumed_tags": chatflow.max_consumed_tags,
+                    "ancestral_tags_active": " ".join(ancestral_tags_active),
                 },
                 includes=includes,
             )
@@ -4922,11 +5098,23 @@ class ChatFlowEngine:
                 if model_ref.provider_id
                 else model_ref.model_id
             )
-            response = await self._provider(messages, [], model_str)
+            response = await self._provider(
+                messages,
+                [],
+                model_str,
+                json_schema=brief_grammar_schema(),
+            )
             content = (response.message.content or "").strip()
             if not content:
-                return _chat_board_description(node), True
-            return content, False
+                return _chat_board_description(node), [], [], True
+            parsed = parse_brief_output(content)
+            # Apply per-chatflow caps post-parse — the prompt bounds
+            # them but a stray model might overshoot. Caps are also
+            # the upper bound on the indexed tag set; over-cap entries
+            # are dropped silently rather than rejected.
+            produced = parsed.produced_tags[: chatflow.max_produced_tags]
+            consumed = parsed.consumed_tags[: chatflow.max_consumed_tags]
+            return parsed.description, produced, consumed, False
         except Exception as exc:  # noqa: BLE001 — brief is best-effort
             log.warning(
                 "chat_brief LLM call failed for chatflow=%s node=%s — "
@@ -4935,7 +5123,7 @@ class ChatFlowEngine:
                 node.id,
                 exc,
             )
-            return _chat_board_description(node), True
+            return _chat_board_description(node), [], [], True
 
     async def _relay_inner_events(
         self,
