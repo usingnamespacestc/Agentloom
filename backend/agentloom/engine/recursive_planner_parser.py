@@ -252,3 +252,75 @@ def parse_recursive_planner_output(raw: str) -> RecursivePlannerOutput:
         raise PlannerParseError(
             f"planner output failed schema validation: {exc}"
         ) from exc
+
+
+# ------------------------------------------------------------------ tool_use
+
+
+#: Tool name the planner is pinned to via ``forced_tool_name`` when the
+#: M7.5 PR 6 tool-use path runs. Mirrors ``judge_verdict`` for symmetry
+#: — engine and parser key on this string, the LLM sees it via
+#: ``tools=`` slot.
+SUBMIT_PLAN_TOOL_NAME = "submit_plan"
+
+
+def submit_plan_tool_def() -> dict[str, Any]:
+    """Return a ToolDefinition-shaped dict that forces the planner to
+    emit its decision via tool_use instead of free-text JSON.
+
+    Mirrors the judge path: one tool, discriminated body. The
+    ``parameters`` schema is the same ``oneOf`` shape that
+    :func:`planner_grammar_schema` ships, so a model that does both
+    tool_use and ``response_format=json_schema`` (volcengine /
+    openai_chat under ``_RESPONSE_FORMAT_COEXISTS_WITH_TOOLS``) gets
+    belt-and-suspenders enforcement: the tool_choice pin guarantees
+    the structured call lands, and the json_schema double-checks the
+    body shape.
+
+    Why a single tool instead of ``[atomic, decompose, infeasible]``:
+    keeps the engine free of cross-provider ``tool_choice="any"``
+    plumbing (Anthropic, OpenAI, volcengine all spell it differently)
+    and matches the existing ``judge_verdict`` precedent. The
+    discriminated ``oneOf`` body is just as expressive — the model
+    picks ``mode`` and the matching branch's required fields are
+    enforced by the same constraint engine.
+    """
+    return {
+        "name": SUBMIT_PLAN_TOOL_NAME,
+        "description": (
+            "Submit the planner's decomposition decision: atomic single-"
+            "worker brief, decompose into N sub-tasks, or infeasible "
+            "with a reason."
+        ),
+        "parameters": planner_grammar_schema(),
+    }
+
+
+def parse_planner_from_tool_args(args: dict[str, Any]) -> RecursivePlannerOutput:
+    """Parse ``tool_use.arguments`` into a :class:`RecursivePlannerOutput`.
+
+    Symmetric counterpart to :func:`parse_judge_from_tool_args` —
+    skips the JSON-extraction step (arguments arrive as a parsed
+    dict already) and runs the same Pydantic validation as the
+    free-text path.
+
+    Special case: ``{"_raw": <str>}`` is a sentinel some adapters
+    emit when ``tool_call.arguments`` couldn't be parsed as JSON
+    (observed with ark-code-latest on Chinese payloads — literal
+    inner ``"`` left unescaped). Surface the raw body so the
+    caller's retry path can echo it back to the model with an
+    explicit escape hint instead of treating empty args as
+    "atomic with no body".
+    """
+    if set(args.keys()) == {"_raw"} and isinstance(args["_raw"], str):
+        raw_preview = args["_raw"][:400]
+        raise PlannerParseError(
+            f"planner tool_use arguments are not valid JSON (adapter "
+            f"sentinel _raw): {raw_preview!r}"
+        )
+    try:
+        return RecursivePlannerOutput.model_validate(args)
+    except ValidationError as exc:
+        raise PlannerParseError(
+            f"planner tool_use args failed validation: {exc}"
+        ) from exc

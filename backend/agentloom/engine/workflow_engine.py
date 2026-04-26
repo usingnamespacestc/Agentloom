@@ -41,7 +41,9 @@ from agentloom.engine.judge_parser import (
 from agentloom.engine.model_resolution import effective_model_for
 from agentloom.engine.recursive_planner_parser import (
     RecursivePlannerOutput,
+    SUBMIT_PLAN_TOOL_NAME,
     planner_grammar_schema,
+    submit_plan_tool_def,
 )
 from agentloom.providers.types import (
     AssistantMessage,
@@ -1463,8 +1465,28 @@ class WorkflowEngine:
         planner_schema: dict[str, Any] | None = (
             planner_grammar_schema() if is_planner else None
         )
+        # M7.5 PR 6: planner tool_use path. Mirrors the judge_verdict
+        # mechanism — pin a single ``submit_plan`` tool whose body
+        # schema is the same discriminated oneOf shape, so both the
+        # tool_choice and the response_format double-enforce the
+        # planner output. Belt-and-suspenders matters here because
+        # ark-code-latest (and other reasoning-mode adapters) have
+        # been observed ignoring response_format under long prompts
+        # while still honoring tool_choice. The chatflow-side parse
+        # prefers ``output_message.tool_uses[0]`` when it carries
+        # ``submit_plan`` and falls back to free-text JSON otherwise.
+        planner_override_tools: list[ToolDefinition] | None = None
+        planner_forced_tool: str | None = None
+        if is_planner:
+            planner_override_tools = [ToolDefinition(**submit_plan_tool_def())]
+            planner_forced_tool = SUBMIT_PLAN_TOOL_NAME
         await self._invoke_and_freeze(
-            workflow, node, expose_tools=not is_planner, json_schema=planner_schema
+            workflow,
+            node,
+            expose_tools=not is_planner,
+            override_tools=planner_override_tools,
+            json_schema=planner_schema,
+            forced_tool_name=planner_forced_tool,
         )
         assert node.output_message is not None
 

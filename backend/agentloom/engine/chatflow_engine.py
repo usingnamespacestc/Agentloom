@@ -52,7 +52,9 @@ from agentloom.engine.recursive_planner_parser import (
     AtomicBrief,
     PlannerParseError,
     RecursivePlannerOutput,
+    SUBMIT_PLAN_TOOL_NAME,
     SubTask,
+    parse_planner_from_tool_args,
     parse_recursive_planner_output,
 )
 from agentloom import tenancy_runtime
@@ -3754,7 +3756,7 @@ class ChatFlowEngine:
             return
 
         try:
-            plan = parse_recursive_planner_output(planner_node.output_message.content)
+            plan = _parse_planner_output_message(planner_node.output_message)
         except PlannerParseError as exc:
             # Ops-facing hint: parse failures usually mean the model
             # picked ``mode: atomic`` (or decompose) but skipped the
@@ -6221,6 +6223,32 @@ def _sub_workflow_effective_output(sub: WorkFlow) -> str:
     return body
 
 
+def _parse_planner_output_message(
+    output: WireMessage,
+) -> RecursivePlannerOutput:
+    """Parse a planner WorkNode's frozen ``output_message`` into a
+    :class:`RecursivePlannerOutput`, preferring the tool_use path
+    when the model honored ``forced_tool_name="submit_plan"``.
+
+    M7.5 PR 6 wired the planner to a single ``submit_plan`` tool;
+    strong providers (anthropic / openai_chat / volcengine / ark)
+    now return the structured arguments via
+    ``output_message.tool_uses[0]`` and the engine never had to
+    parse free-text JSON. Weak providers and adapters that drop
+    tool_choice silently keep returning content-only — for those we
+    fall back to the pre-PR 6 path so legacy chatflows + Ollama /
+    llama.cpp keep working without configuration churn.
+
+    Raises :class:`PlannerParseError` from whichever branch ran —
+    callers handle that as a planner failure regardless of source.
+    """
+    if output.tool_uses:
+        for tu in output.tool_uses:
+            if tu.name == SUBMIT_PLAN_TOOL_NAME:
+                return parse_planner_from_tool_args(dict(tu.arguments))
+    return parse_recursive_planner_output(output.content or "")
+
+
 def _atomic_brief_for_worker(
     workflow: WorkFlow, worker_node: WorkFlowNode
 ) -> AtomicBrief | None:
@@ -6252,7 +6280,7 @@ def _atomic_brief_for_worker(
     if planner is None or planner.output_message is None:
         return None
     try:
-        plan = parse_recursive_planner_output(planner.output_message.content)
+        plan = _parse_planner_output_message(planner.output_message)
     except PlannerParseError:
         return None
     return plan.atomic if plan.mode == "atomic" else None
