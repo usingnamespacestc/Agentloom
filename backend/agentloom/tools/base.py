@@ -249,11 +249,66 @@ class ToolRegistry:
 
         This drives what the LLM *sees* — the execute-time allow/deny
         check in ``check_call`` is the enforcing gate.
+
+        .. note::
+            Pre-M7.5 entry point. Engine callers should prefer
+            :meth:`resolve_for_node`, which folds chatflow-disabled +
+            ``effective_tools`` whitelist + side-effect filter into the
+            same pass. This method survives for tests and for the legacy
+            "no capability model" code path.
         """
         out: list[dict[str, Any]] = []
         for t in self._tools.values():
             if self._visible(t, constraints):
                 out.append(t.definition())
+        return out
+
+    def resolve_for_node(
+        self,
+        *,
+        node_effective: list[str] | None,
+        chatflow_disabled: frozenset[str] = frozenset(),
+        side_effect_filter: set[SideEffect] | None = None,
+        legacy_constraints: ToolConstraints | None = None,
+    ) -> list["Tool"]:
+        """M7.5 unified pipeline: resolve which tools a WorkNode may call.
+
+        Pipeline (each filter is independent and applied in order):
+
+        1. **chatflow_disabled** — the workspace/chatflow toggled this
+           tool off entirely. Drops the tool unconditionally.
+        2. **node_effective** (whitelist) — when not ``None``, only
+           tools whose name appears in the list survive. ``[]`` means
+           "no tools". ``None`` means "fall through to legacy behavior"
+           (= pre-M7.5 chatflow path; engine schedules without an
+           effective_tools allocation).
+        3. **side_effect_filter** — when set, drops tools whose
+           ``side_effect`` is not in the set. Cognitive nodes (judges,
+           planner) pass ``{NONE, READ}`` so they can't call WRITE tools
+           even if a careless prompt asks for one.
+        4. **legacy_constraints** — when set, the existing allow/deny
+           ``ToolConstraints`` glob check (the same logic
+           ``definitions_for_constraints`` uses). Kept for nodes that
+           still attach explicit allow/deny lists alongside the M7.5
+           whitelist; both gates apply (intersection).
+
+        Returns surviving :class:`Tool` objects in registration order so
+        the engine can render their ``.definition()`` for the provider.
+        """
+        whitelist: set[str] | None = (
+            set(node_effective) if node_effective is not None else None
+        )
+        out: list[Tool] = []
+        for tool in self._tools.values():
+            if tool.name in chatflow_disabled:
+                continue
+            if whitelist is not None and tool.name not in whitelist:
+                continue
+            if side_effect_filter is not None and tool.side_effect not in side_effect_filter:
+                continue
+            if legacy_constraints is not None and not self._visible(tool, legacy_constraints):
+                continue
+            out.append(tool)
         return out
 
     def _visible(self, tool: Tool, constraints: ToolConstraints | None) -> bool:

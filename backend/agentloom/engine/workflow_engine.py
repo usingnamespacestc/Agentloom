@@ -68,7 +68,7 @@ from agentloom.schemas.common import (
 )
 from agentloom.schemas.common import ToolUse as SchemaToolUse
 from agentloom.schemas.workflow import CompactSnapshot, WireMessage
-from agentloom.tools.base import ToolContext, ToolRegistry
+from agentloom.tools.base import SideEffect, ToolContext, ToolRegistry
 
 #: Provider call surface — the engine never instantiates an adapter
 #: directly, the caller injects a closure. ``on_token`` is the
@@ -770,6 +770,44 @@ _JUDGE_PARSE_MAX_RETRIES = 2
 #: filters — a moment to clear without spamming the endpoint.
 _JUDGE_PARSE_RETRY_BASE_DELAY = 0.5
 
+#: M7.5 cognitive roles: judges + planner. These nodes do not take
+#: tool actions on the world — they reason about what the worker
+#: should do — so the registry filter restricts them to NONE / READ
+#: side-effect tools. Even if a future change flips ``expose_tools``
+#: on for one of these roles by accident, ``resolve_for_node`` will
+#: still drop any WRITE tool from their visible set.
+_COGNITIVE_ROLES: frozenset[WorkNodeRole] = frozenset(
+    {
+        WorkNodeRole.PRE_JUDGE,
+        WorkNodeRole.PLAN,
+        WorkNodeRole.PLAN_JUDGE,
+        WorkNodeRole.WORKER_JUDGE,
+        WorkNodeRole.POST_JUDGE,
+    }
+)
+
+#: Side-effect set permitted to cognitive roles. ``NONE`` covers the
+#: rare pure-compute tool; ``READ`` covers filesystem reads, registry
+#: lookups, get_node_context, MemoryBoard lookups. Excludes ``WRITE``.
+_COGNITIVE_SIDE_EFFECTS: frozenset[SideEffect] = frozenset(
+    {SideEffect.NONE, SideEffect.READ}
+)
+
+
+def _side_effect_filter_for(node: WorkFlowNode) -> set[SideEffect] | None:
+    """Return the side-effect filter that should apply to *node*'s tool
+    visibility, or ``None`` to skip the filter.
+
+    Cognitive roles (judges + planner) get ``{NONE, READ}``. Every
+    other role — including ``WORKER`` (the executing draft) and the
+    ``DELEGATE`` re-distribution path, plus legacy nodes whose
+    ``role`` is ``None`` — falls through with no extra filter so they
+    can call WRITE tools.
+    """
+    if node.role in _COGNITIVE_ROLES:
+        return set(_COGNITIVE_SIDE_EFFECTS)
+    return None
+
 
 class WorkflowEngine:
     def __init__(
@@ -1314,15 +1352,25 @@ class WorkflowEngine:
         # node's constraints. Empty list means "no tools" — stays
         # backward-compatible with M3 callers that don't configure a
         # registry. Judges never see tools even if a registry exists.
+        # M7.5: ``resolve_for_node`` folds chatflow-disabled,
+        # ``effective_tools`` whitelist, side-effect filter, and the
+        # legacy allow/deny ``tool_constraints`` into a single pass.
+        # When ``effective_tools is None`` (legacy nodes that pre-date
+        # the capability model, or chatflows where judge_pre hasn't
+        # populated the field yet) the whitelist step short-circuits
+        # to "all tools allowed" and behavior matches the pre-M7.5
+        # path.
         tool_defs: list[ToolDefinition] = []
         if override_tools is not None:
             tool_defs = override_tools
         elif expose_tools and self._tools is not None:
-            tool_defs = [
-                ToolDefinition(**d)
-                for d in self._tools.definitions_for_constraints(node.tool_constraints)
-                if d["name"] not in self._disabled_tool_names
-            ]
+            resolved = self._tools.resolve_for_node(
+                node_effective=node.effective_tools,
+                chatflow_disabled=self._disabled_tool_names,
+                side_effect_filter=_side_effect_filter_for(node),
+                legacy_constraints=node.tool_constraints,
+            )
+            tool_defs = [ToolDefinition(**t.definition()) for t in resolved]
 
         # Runtime environment note — prepended as an extra system message
         # only when this call exposes tools. Pure judge / brief calls
