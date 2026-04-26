@@ -209,6 +209,7 @@ __marimo__/
 # Local-only design docs and test code (not committed)
 /docs/*
 /tests/
+/runs/
 # Exception: devlog + README-linked screenshots + design docs are shipped
 !/docs/devlog.md
 !/docs/images/
