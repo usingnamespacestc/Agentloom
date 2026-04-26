@@ -99,6 +99,22 @@ plan:
                   ``plan_x_finalized``   方案 X 被定稿
                 普通讨论/refine 时只用裸概念 ``plan_x``，不带状态。
 
+            ### 概念拼写一致性（关键 — 反 fuzz）
+              - 同一个概念在整条对话里**必须用完全一样的 tag 字符串**。
+                跨节点检索是按字符串精确匹配的，不同写法会被当成不同
+                概念，破坏召回率。
+              - **如果"祖先活跃概念"里已经有这个概念，原样复用**——
+                不要换说法、不要加修饰词、不要名词化。
+                  ✗ 祖先有 ``plan_x``，本节点写 ``original_plan_x`` /
+                    ``user_proposed_plan_x`` / ``the_plan_x_scheme``
+                  ✓ 祖先有 ``plan_x``，本节点也写 ``plan_x``
+                  ✗ 祖先有 ``mobilenetv3_small``，本节点写
+                    ``mobile_net_v3_small`` / ``mobilenet_v3_small``
+                  ✓ 祖先有 ``mobilenetv3_small``，本节点也写
+                    ``mobilenetv3_small``
+              - 概念第一次出现（祖先没有）时挑**最简洁、单数、无修饰**
+                的写法，作为之后所有节点的规范拼写。
+
             ### produced_tags 选择
               - 这个节点的输出**涉及/覆盖**了哪些概念。
               - 如果节点改变了某概念的状态（驳回/采纳/搁置等），用对应

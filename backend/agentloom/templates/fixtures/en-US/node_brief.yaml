@@ -83,6 +83,25 @@ plan:
               - Status-suffix syntax ``concept_status`` ONLY when this
                 node EXPLICITLY changes a concept's state.
 
+            ### Concept-spelling consistency (CRITICAL — anti-fuzz)
+              - Across the whole workflow, the SAME concept MUST use
+                the EXACT SAME tag string. Cross-node retrieval is
+                literal string matching; different spellings get
+                treated as different concepts and silently kill recall.
+              - **If the "active ancestor concepts" list already has
+                this concept, reuse it verbatim** — don't rephrase,
+                don't add modifiers, don't nominalize.
+                  ✗ ancestor has ``plan_x``; this node writes
+                    ``original_plan_x`` / ``user_proposed_plan_x``
+                  ✓ ancestor has ``plan_x``; this node also writes
+                    ``plan_x``
+                  ✗ ancestor has ``mobilenetv3_small``; this node writes
+                    ``mobile_net_v3_small`` / ``mobilenet_v3_small``
+                  ✓ ancestor has ``mobilenetv3_small``; this node also
+                    writes ``mobilenetv3_small``
+              - When a concept first appears (no ancestor entry), pick
+                the SHORTEST, SINGULAR, UNMODIFIED form.
+
             ### produced / consumed selection
               - produced_tags: concepts the OUTPUT covers / introduces.
               - consumed_tags: concepts the INPUT references / depends on.
