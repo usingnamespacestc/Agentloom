@@ -136,6 +136,23 @@ async def test_teardown_returns_response_dict():
 
 
 @pytest.mark.asyncio
+async def test_get_session_state_returns_dict():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"session_id": "s", "domain": "retail",
+                  "data": {"orders": {"o1": {"status": "pending"}}}},
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://t"
+    ) as http:
+        client = TauBenchBackendClient(http)
+        result = await client.get_session_state("s")
+    assert result["data"]["orders"]["o1"]["status"] == "pending"
+
+
+@pytest.mark.asyncio
 async def test_create_session_propagates_http_errors():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, json={"detail": "task index out of range"})

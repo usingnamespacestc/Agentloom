@@ -74,6 +74,10 @@ class TaskTrace:
     stop_reason: str = "unknown"
     total_duration_seconds: float = 0.0
     error: str | None = None
+    #: Mock DB snapshot fetched right before backend teardown (when
+    #: ``run_task(fetch_final_state=True)``). Reward computation
+    #: needs this; pure plumbing tests can leave it ``None``.
+    final_state: dict | None = None
 
 
 class TauBenchRunner:
@@ -98,7 +102,16 @@ class TauBenchRunner:
         task_index: int,
         user_simulator: UserSimulator,
         agent_model: dict[str, str] | None = None,
+        fetch_final_state: bool = True,
     ) -> TaskTrace:
+        """Drive one τ-bench task to completion.
+
+        ``fetch_final_state=True`` pulls the backend's mock DB snapshot
+        right before teardown. The runner needs this to compute reward
+        (DB hash comparison via ``calculate_reward``). Set ``False``
+        for plumbing-only smoke runs to skip the network round-trip
+        and the dict copy.
+        """
         t0 = time.monotonic()
         session = await self._backend.create_session(
             domain=domain,
@@ -125,6 +138,21 @@ class TauBenchRunner:
         try:
             await self._loop(trace, session, user_simulator, user_msg)
         finally:
+            # Pull final state BEFORE teardown — once teardown runs,
+            # the env_data dict in backend's source registry is
+            # released and unreachable.
+            if fetch_final_state:
+                try:
+                    state_resp = await self._backend.get_session_state(
+                        session.session_id
+                    )
+                    trace.final_state = state_resp.get("data")
+                except Exception as exc:  # noqa: BLE001
+                    # Don't lose the trace just because state fetch
+                    # failed. Reward computation will see
+                    # ``final_state is None`` and skip db_hash_match.
+                    if trace.error is None:
+                        trace.error = f"final_state fetch failed: {exc!r}"
             await self._teardown_quiet(session)
             trace.total_duration_seconds = time.monotonic() - t0
 

@@ -46,6 +46,7 @@ class StubBackend:
     teardown_calls: list[str] = field(default_factory=list)
     submit_should_raise: Exception | None = None
     teardown_should_raise: Exception | None = None
+    state_response: dict = field(default_factory=lambda: {"data": {"orders": {}}})
 
     async def create_session(self, **kwargs):
         return self.create_response
@@ -63,6 +64,9 @@ class StubBackend:
             _, status, body = reply.split(":", 2)
             return TurnResult(node_id="n", status=status, agent_response=body)
         return TurnResult(node_id="n", status="succeeded", agent_response=reply)
+
+    async def get_session_state(self, session_id):
+        return self.state_response
 
     async def teardown_session(self, session_id):
         self.teardown_calls.append(session_id)
@@ -241,6 +245,37 @@ async def test_runner_teardown_failure_does_not_mask_trace():
     assert trace.stop_reason == "agent_stop_token"
     # teardown was attempted
     assert backend.teardown_calls == ["sess-1"]
+
+
+@pytest.mark.asyncio
+async def test_runner_fetch_final_state_lands_in_trace():
+    """``fetch_final_state=True`` (the default) should call
+    backend.get_session_state right before teardown and store the
+    data dict on trace.final_state."""
+    backend = StubBackend(
+        agent_replies=["done ###STOP###"],
+        state_response={"session_id": "sess-1", "domain": "retail",
+                        "data": {"orders": {"sentinel": True}}},
+    )
+    user = StubUser(messages=["hi"])
+    trace = await TauBenchRunner(backend).run_task(
+        domain="retail", task_index=0, user_simulator=user
+    )
+    assert trace.final_state == {"orders": {"sentinel": True}}
+
+
+@pytest.mark.asyncio
+async def test_runner_skip_final_state_leaves_trace_clean():
+    backend = StubBackend(agent_replies=["done ###STOP###"])
+    user = StubUser(messages=["hi"])
+    trace = await TauBenchRunner(backend).run_task(
+        domain="retail",
+        task_index=0,
+        user_simulator=user,
+        fetch_final_state=False,
+    )
+    assert trace.final_state is None
+    assert trace.error is None
 
 
 @pytest.mark.asyncio

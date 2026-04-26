@@ -68,6 +68,25 @@ class TeardownResponse(BaseModel):
     unregistered_tools: int
 
 
+class SessionStateResponse(BaseModel):
+    """Snapshot of a session's mock DB. Returned by
+    ``GET /api/tau-bench/sessions/{id}/state``.
+
+    The runner pulls this after a task's dialogue completes, then
+    feeds it into upstream ``Env.calculate_reward`` (which needs
+    ``self.data`` to compute the post-state hash and compare against
+    a ground-truth replay of ``task.actions``).
+
+    Snapshots are LARGE — retail's ``orders`` dict alone is ~1.8MB
+    serialized. Don't poll this endpoint in a hot loop; one call per
+    task at teardown is the intended pattern.
+    """
+
+    session_id: str
+    domain: str
+    data: dict
+
+
 def _retail_task(task_index: int) -> Any:
     from tau_bench.envs.retail.tasks_test import TASKS_TEST
 
@@ -146,6 +165,28 @@ async def create_session(
         task_index=body.task_index,
         instruction=task.instruction or "",
         num_tools=len(source.registered_names),
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/state", response_model=SessionStateResponse
+)
+async def get_session_state(session_id: str) -> SessionStateResponse:
+    """Return the current mock DB snapshot for ``session_id``.
+
+    Runner uses this to compute reward locally via upstream
+    ``Env.calculate_reward()`` after the dialogue ends. Backend stays
+    dumb: just exposes the data dict, doesn't compute reward itself
+    (that would force importing more of the upstream surface than
+    we vendor).
+    """
+    src = tau_runtime.get_session(session_id)
+    if src is None:
+        raise HTTPException(404, f"tau-bench session {session_id!r} not found")
+    return SessionStateResponse(
+        session_id=session_id,
+        domain=src.domain,
+        data=src.env_data,
     )
 
 

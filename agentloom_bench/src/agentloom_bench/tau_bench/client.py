@@ -123,6 +123,18 @@ class TauBenchBackendClient:
             agent_response=body["agent_response"],
         )
 
+    async def get_session_state(self, session_id: str) -> dict[str, Any]:
+        """``GET /api/tau-bench/sessions/{id}/state``. Returns the
+        session's current mock DB snapshot ({session_id, domain,
+        data}). Used after task completion for reward computation.
+        """
+        resp = await self._http.get(
+            f"/api/tau-bench/sessions/{session_id}/state",
+            timeout=self._timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     async def teardown_session(self, session_id: str) -> dict[str, Any]:
         """``POST /api/tau-bench/sessions/{id}/teardown``. Idempotent —
         unknown session id returns ``ok: true, unregistered_tools: 0``.
