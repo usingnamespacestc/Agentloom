@@ -184,20 +184,18 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
   const hiddenBeforeCompact =
     path.length - visiblePath.length;
 
-  // Fetch the backend's segmented inbound-context preview so the UI can
-  // render the pieces `visiblePath` can't derive locally — namely the
-  // sticky-restored synthetic recall pairs (no real ChatNode on the
-  // chain) and the ChatBoard bullets that the backend folds into the
-  // summary preamble. Only fetch when the visible chain touches a
-  // compact ancestor; plain pre-compact chats gain nothing from the
-  // round-trip.
+  // Fetch the backend's full segmented inbound-context preview. Used
+  // as the authoritative render source when populated — drives every
+  // bubble in the panel through ``SegmentRenderer`` so what the user
+  // reads matches what the next ``llm_call`` will see (compact
+  // summary + preserved tail + ancestors + sticky recalls + pack
+  // ranges replaced by their summary, etc.). On fetch failure or for
+  // brand-new chatflows that don't yet have a selectable node, the
+  // panel falls back to walking ``visiblePath`` directly so the unit
+  // tests (which don't mock the API) and offline use stay functional.
   const [inboundSegments, setInboundSegments] = useState<InboundContextSegment[]>([]);
-  const pathTouchesCompact = useMemo(
-    () => visiblePath.some((nid) => chatflow?.nodes[nid]?.compact_snapshot != null),
-    [chatflow, visiblePath],
-  );
   useEffect(() => {
-    if (!chatflow || !selectedNodeId || !pathTouchesCompact) {
+    if (!chatflow || !selectedNodeId) {
       setInboundSegments([]);
       return;
     }
@@ -216,7 +214,7 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
     // chatflow.nodes mutates in place on SSE ticks; key off chatflow.id
     // and the selected node only so we don't thrash the endpoint on
     // every streaming chunk.
-  }, [chatflow?.id, selectedNodeId, pathTouchesCompact]);
+  }, [chatflow?.id, selectedNodeId]);
   const stickySegments = useMemo(
     () => inboundSegments.filter((s) => s.kind === "sticky_restored"),
     [inboundSegments],
@@ -373,51 +371,57 @@ function ChatFlowConversation({ chatflow }: { chatflow: ChatFlow | null }) {
         data-testid="conversation-body"
         className="flex-1 space-y-5 overflow-auto px-4 py-4"
       >
-        {hiddenBeforeCompact > 0 && (
-          <div
-            data-testid="compact-truncation-notice"
-            className="flex items-center gap-2 text-[11px] text-gray-400"
-          >
-            <div className="h-px flex-1 bg-gray-200" />
-            <span>
-              {t("conversation.compact_truncated", { count: hiddenBeforeCompact })}
-            </span>
-            <div className="h-px flex-1 bg-gray-200" />
-          </div>
+        {inboundSegments.length > 0 ? (
+          <SegmentRenderer
+            segments={inboundSegments}
+            chatflow={chatflow}
+            selectedNodeId={selectedNodeId}
+            forkAt={forkAt}
+            onSelectNode={selectNode}
+            onPickBranch={pickBranch}
+          />
+        ) : (
+          <>
+            {hiddenBeforeCompact > 0 && (
+              <div
+                data-testid="compact-truncation-notice"
+                className="flex items-center gap-2 text-[11px] text-gray-400"
+              >
+                <div className="h-px flex-1 bg-gray-200" />
+                <span>
+                  {t("conversation.compact_truncated", { count: hiddenBeforeCompact })}
+                </span>
+                <div className="h-px flex-1 bg-gray-200" />
+              </div>
+            )}
+            {visiblePath.map((nid, idx) => {
+              const node = chatflow.nodes[nid];
+              if (!node) return null;
+              const fork = forkAt.get(nid);
+              const isLast = idx === visiblePath.length - 1;
+              return (
+                <div key={nid}>
+                  {isLast && stickySegments.length > 0 && (
+                    <StickyRestoredBlock segments={stickySegments} />
+                  )}
+                  <ChatMessageBubble
+                    node={node}
+                    isSelected={nid === selectedNodeId}
+                    onSelect={() => selectNode(nid)}
+                    cbiBullets={cbiByCompactNodeId.get(nid)}
+                  />
+                  {fork && (
+                    <BranchSelector
+                      chatflowNodes={chatflow.nodes}
+                      fork={fork}
+                      onPick={(childId) => pickBranch(fork.nodeId, childId)}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </>
         )}
-        {visiblePath.map((nid, idx) => {
-          const node = chatflow.nodes[nid];
-          if (!node) return null;
-          const fork = forkAt.get(nid);
-          // Sticky-restored synthetic recall pairs live between the
-          // chain's historical ancestors and the current turn —
-          // matches `_build_chat_context`'s tail placement. Rendering
-          // them just before the leaf bubble keeps the KV-cache-friendly
-          // "summary + preserved + history" prefix stable in the UI
-          // too, and prevents the muted recall styling from being
-          // mistaken for a live turn.
-          const isLast = idx === visiblePath.length - 1;
-          return (
-            <div key={nid}>
-              {isLast && stickySegments.length > 0 && (
-                <StickyRestoredBlock segments={stickySegments} />
-              )}
-              <ChatMessageBubble
-                node={node}
-                isSelected={nid === selectedNodeId}
-                onSelect={() => selectNode(nid)}
-                cbiBullets={cbiByCompactNodeId.get(nid)}
-              />
-              {fork && (
-                <BranchSelector
-                  chatflowNodes={chatflow.nodes}
-                  fork={fork}
-                  onPick={(childId) => pickBranch(fork.nodeId, childId)}
-                />
-              )}
-            </div>
-          );
-        })}
 
         {/* Pending queue items on the leaf node. */}
         {leafNode && leafNode.pending_queue?.length > 0 && (
@@ -805,6 +809,222 @@ function CopyTextButton({ text }: { text: string }) {
     </button>
   );
 }
+
+/** Drive the conversation panel from the backend's segmented inbound
+ * context (``GET /chatflows/{cid}/nodes/{nid}/inbound_context``).
+ *
+ * Each segment kind lands on a dedicated bubble component so the user
+ * reads exactly what the next ``llm_call`` will see, with synthetic
+ * blocks (compact summary, sticky recalls, pack range collapses) styled
+ * consistently muted to distinguish them from verbatim turns. ``ancestor``
+ * and ``current_turn`` route to the existing :func:`ChatMessageBubble`
+ * (which itself dispatches on compact/merge); ``summary_preamble`` →
+ * :func:`CompactMessageBubble` with the segment's ``cbi_entries`` for
+ * drill-down bullets; ``pack_summary`` → :func:`PackMessageBubble`;
+ * ``preserved`` → :func:`PreservedSegment` rendering the verbatim wire
+ * messages; ``sticky_restored`` → existing :func:`StickyRestoredSegment`
+ * inline (one card per recalled source ChatNode).
+ *
+ * Fork branch selectors attach after segments whose ``source_node_id``
+ * is in ``forkAt`` — same UX as the local-fallback path.
+ */
+type ForkInfo = {
+  nodeId: NodeId;
+  childIds: NodeId[];
+  chosenChildId: NodeId | null;
+};
+
+function SegmentRenderer({
+  segments,
+  chatflow,
+  selectedNodeId,
+  forkAt,
+  onSelectNode,
+  onPickBranch,
+}: {
+  segments: InboundContextSegment[];
+  chatflow: ChatFlow;
+  selectedNodeId: NodeId | null;
+  forkAt: Map<NodeId, ForkInfo>;
+  onSelectNode: (id: NodeId) => void;
+  onPickBranch: (forkId: NodeId, childId: NodeId) => void;
+}) {
+  // Sticky segments appear bunched in a single amber-framed group at
+  // the latest non-current position — matches the local-fallback
+  // layout and the backend's tail placement of recall pairs.
+  // We collapse contiguous sticky_restored into one block.
+  const out: React.ReactNode[] = [];
+  let stickyBuffer: InboundContextSegment[] = [];
+  const flushSticky = (key: string) => {
+    if (stickyBuffer.length === 0) return;
+    out.push(
+      <StickyRestoredBlock key={`sticky-${key}`} segments={stickyBuffer} />,
+    );
+    stickyBuffer = [];
+  };
+
+  segments.forEach((seg, idx) => {
+    if (seg.kind === "sticky_restored") {
+      stickyBuffer.push(seg);
+      return;
+    }
+    flushSticky(`pre-${idx}`);
+
+    const sourceId = seg.source_node_id;
+    const node = sourceId ? chatflow.nodes[sourceId] : null;
+    const isSelected = sourceId !== null && sourceId === selectedNodeId;
+    const select = sourceId ? () => onSelectNode(sourceId) : () => {};
+    const fork = sourceId ? forkAt.get(sourceId) : undefined;
+
+    if (seg.kind === "summary_preamble" && node) {
+      out.push(
+        <div key={`seg-${idx}`}>
+          <CompactMessageBubble
+            node={node}
+            isSelected={isSelected}
+            onSelect={select}
+            cbiBullets={seg.cbi_entries ?? undefined}
+          />
+        </div>,
+      );
+      return;
+    }
+    if (seg.kind === "pack_summary" && node) {
+      out.push(
+        <div key={`seg-${idx}`}>
+          <PackMessageBubble
+            node={node}
+            isSelected={isSelected}
+            onSelect={select}
+          />
+        </div>,
+      );
+      return;
+    }
+    if (seg.kind === "preserved") {
+      out.push(
+        <PreservedSegment key={`seg-${idx}`} messages={seg.messages} />,
+      );
+      return;
+    }
+    // ancestor + current_turn share the regular bubble shape; the
+    // local ChatFlowNode (compact/merge dispatch is handled by
+    // ChatMessageBubble itself).
+    if (node) {
+      out.push(
+        <div key={`seg-${idx}`}>
+          <ChatMessageBubble
+            node={node}
+            isSelected={isSelected}
+            onSelect={select}
+          />
+          {fork && (
+            <BranchSelector
+              chatflowNodes={chatflow.nodes}
+              fork={fork}
+              onPick={(childId) => onPickBranch(fork.nodeId, childId)}
+            />
+          )}
+        </div>,
+      );
+    }
+  });
+
+  flushSticky("tail");
+  return <>{out}</>;
+}
+
+
+/** Mid-chain pack ChatNode summary — the user-initiated companion to
+ * compact. Rose accent (matches the canvas card) + "📦 已打包 N" badge
+ * so it reads as an explicit topic-package, distinct from compact's
+ * implicit prefix collapse. The backend substitutes the pack summary
+ * for every ChatNode in ``pack_snapshot.packed_range`` when downstream
+ * builds the LLM context, so showing the pack node in place of its
+ * range members keeps panel === LLM-prompt parity.
+ */
+function PackMessageBubble({
+  node,
+  isSelected,
+  onSelect,
+}: {
+  node: ChatFlowNode;
+  isSelected: boolean;
+  onSelect: () => void;
+}) {
+  const { t } = useTranslation();
+  const showNodeId = usePreferencesStore((s) => s.showNodeId);
+  const summary = node.agent_response.text || node.pack_snapshot?.summary || "";
+  const rangeSize = node.pack_snapshot?.packed_range?.length ?? 0;
+  return (
+    <div
+      data-testid={`conversation-node-${node.id}-pack`}
+      onClick={onSelect}
+      className={[
+        "group relative cursor-pointer rounded-md border border-rose-200 bg-rose-50/50 pl-3 pr-3 py-2 transition-colors",
+        isSelected ? "ring-2 ring-rose-300" : "hover:border-rose-300",
+      ].join(" ")}
+    >
+      <div className="mb-1 flex items-center gap-2 text-[11px] font-semibold text-rose-700">
+        <span aria-hidden>📦</span>
+        <span>
+          {t("conversation.pack_label", { count: rangeSize })}
+        </span>
+      </div>
+      <div className="prose prose-sm max-w-none text-[13px] leading-relaxed text-gray-700 break-words">
+        <Markdown>{summary}</Markdown>
+      </div>
+      <MetaFooter
+        nodeId={showNodeId ? node.id : null}
+        usage={aggregateWorkflowUsage(node)}
+        startedAt={node.started_at}
+        finishedAt={node.finished_at}
+        copyText={summary || null}
+      />
+    </div>
+  );
+}
+
+
+/** Render the compact's ``preserved_messages`` tail (or pack's, in
+ * principle) — verbatim user/assistant pairs that were kept past the
+ * cutoff. Rendered as muted gray rows with a small "preserved" header
+ * so they read as "kept history" rather than "live turns". Used only
+ * in segments-driven mode; the local-fallback path doesn't surface
+ * preserved messages because they're already in the ChatFlowNode's
+ * ``compact_snapshot`` and the local renderer just shows the compact
+ * bubble for the entire prefix.
+ */
+function PreservedSegment({ messages }: { messages: WireMessage[] }) {
+  const { t } = useTranslation();
+  if (messages.length === 0) return null;
+  return (
+    <div
+      data-testid="conversation-preserved"
+      className="rounded-md border border-gray-200 bg-gray-50/60 px-3 py-2"
+    >
+      <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-gray-400">
+        {t("conversation.preserved_label")}
+      </div>
+      <div className="space-y-1.5">
+        {messages.map((m, i) => (
+          <div
+            key={i}
+            className="text-[12px] leading-snug text-gray-600 break-words"
+          >
+            <span className="mr-1 font-mono text-[10px] text-gray-400">
+              [{m.role}]
+            </span>
+            <span className="prose prose-sm max-w-none inline">
+              <Markdown>{m.content || ""}</Markdown>
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 
 function ChatMessageBubble({
   node,

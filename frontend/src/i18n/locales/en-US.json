@@ -176,7 +176,9 @@
     "merge_summary_label": "Merged context",
     "merge_summary_pending": "(merge worker still running…)",
     "merge_instruction_label": "Merge instruction",
-    "merge_sources_label": "Sources"
+    "merge_sources_label": "Sources",
+    "pack_label": "Packed {{count}} ChatNodes",
+    "preserved_label": "Preserved tail (not compacted)"
   },
   "compact_dialog": {
     "button_label": "Compact",

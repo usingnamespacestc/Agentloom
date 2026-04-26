@@ -7,11 +7,12 @@
  * switching the active branch through the store.
  */
 
-import { render, screen, fireEvent } from "@testing-library/react";
-import { describe, it, expect, beforeEach } from "vitest";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 
 import { ConversationView } from "./ConversationView";
 import { useChatFlowStore } from "@/store/chatflowStore";
+import { api } from "@/lib/api";
 import type { ChatFlow, ChatFlowNode } from "@/types/schema";
 
 function node(
@@ -85,6 +86,15 @@ function twoBranchFlow(): ChatFlow {
 describe("ConversationView", () => {
   beforeEach(() => {
     useChatFlowStore.getState().reset();
+    // Tests that toggle view-state write to localStorage via the
+    // store subscription; clear it so a prior test's saved
+    // ``selectedNodeId`` doesn't surface as a "stale" hydration when
+    // the next test's setChatFlow fires.
+    try {
+      localStorage.clear();
+    } catch {
+      /* happy-dom may not expose localStorage in some configs */
+    }
   });
 
   it("shows the select-chatflow empty state when no chatflow is loaded", () => {
@@ -135,6 +145,109 @@ describe("ConversationView", () => {
     // The branch selector at the terminal fork is still rendered,
     // so the user can click into a branch.
     expect(screen.getByTestId("branch-selector-a")).toBeInTheDocument();
+  });
+
+  it("renders a pack_summary segment as a distinct pack bubble (segments-driven path)", async () => {
+    // Three-turn chain a → b → p where p is a pack ChatNode whose
+    // packed_range collapses [a, b]. With the backend feeding the
+    // segments-driven render path, the panel renders only the pack
+    // summary in p's place — the per-turn bubbles for a and b must
+    // NOT appear because the LLM context replaces them with the pack
+    // summary, and panel === LLM-prompt parity is the design goal.
+    const cf: ChatFlow = {
+      id: "cf-pack",
+      title: null,
+      description: null,
+      tags: [],
+      draft_model: null,
+      default_judge_model: null,
+      default_tool_call_model: null,
+      brief_model: null,
+      default_execution_mode: "native_react",
+      judge_retry_budget: 3,
+      min_ground_ratio: null,
+      ground_ratio_grace_nodes: 20,
+      disabled_tool_names: [],
+      compact_trigger_pct: 0.7,
+      compact_target_pct: 0.5,
+      compact_keep_recent_count: 3,
+      compact_preserve_mode: "by_count",
+      recalled_context_sticky_turns: 3,
+      compact_model: null,
+      compact_require_confirmation: true,
+      chatnode_compact_trigger_pct: 0.6,
+      chatnode_compact_target_pct: 0.4,
+      root_ids: ["a"],
+      nodes: {
+        a: node("a", [], "topic 1 user", "topic 1 agent", 0),
+        b: node("b", ["a"], "topic 1 follow-up", "topic 1 reply", 1),
+        p: {
+          ...node("p", ["b"], "", "PACK_SUMMARY_TEXT", 2),
+          pack_snapshot: {
+            summary: "PACK_SUMMARY_TEXT",
+            packed_range: ["a", "b"],
+            use_detailed_index: true,
+            preserve_last_n: 0,
+            preserved_messages: [],
+          },
+        },
+      },
+      created_at: "2026-04-10T00:00:00Z",
+    };
+
+    // Stub the inbound_context endpoint to deliver one pack_summary
+    // segment for ``p``. SegmentRenderer should pick this up and
+    // render a single pack bubble for p — and only p.
+    const stub = vi.spyOn(api, "getInboundContext").mockResolvedValue({
+      segments: [
+        {
+          kind: "pack_summary",
+          source_node_id: "p",
+          synthetic: true,
+          messages: [],
+          cbi_entries: null,
+        },
+      ],
+    });
+    try {
+      useChatFlowStore.getState().setChatFlow(cf);
+      render(<ConversationView />);
+
+      // The pack bubble appears (data-testid signals the pack variant).
+      await waitFor(() =>
+        expect(
+          screen.getByTestId("conversation-node-p-pack"),
+        ).toBeInTheDocument(),
+      );
+      // The packed range members must NOT render — segments-driven path
+      // suppresses them in favor of the pack summary.
+      expect(screen.queryByTestId("conversation-node-a")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("conversation-node-b")).not.toBeInTheDocument();
+      // Pack summary text from agent_response is rendered.
+      expect(screen.getByText(/PACK_SUMMARY_TEXT/)).toBeInTheDocument();
+    } finally {
+      stub.mockRestore();
+    }
+  });
+
+  it("falls back to visiblePath rendering when /inbound_context returns nothing", async () => {
+    // Backend may be unreachable or return an empty segments list
+    // (e.g. tests, offline, fresh chatflow). The panel must still
+    // render the chain via the local visiblePath path so the user
+    // sees their conversation rather than a blank panel.
+    const stub = vi.spyOn(api, "getInboundContext").mockResolvedValue({
+      segments: [],
+    });
+    try {
+      useChatFlowStore.getState().setChatFlow(twoBranchFlow());
+      render(<ConversationView />);
+
+      // visiblePath path renders the local node bubbles as before.
+      expect(screen.getByTestId("conversation-node-a")).toBeInTheDocument();
+      expect(screen.getByTestId("conversation-node-c")).toBeInTheDocument();
+    } finally {
+      stub.mockRestore();
+    }
   });
 
   it("truncates at a compact node and renders a distinct compact bubble", () => {

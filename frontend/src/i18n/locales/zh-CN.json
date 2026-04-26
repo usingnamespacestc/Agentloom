@@ -176,7 +176,9 @@
     "merge_summary_label": "合并后的上下文",
     "merge_summary_pending": "（合并 worker 仍在运行…）",
     "merge_instruction_label": "合并指令",
-    "merge_sources_label": "来源"
+    "merge_sources_label": "来源",
+    "pack_label": "已打包 {{count}} 个 ChatNode",
+    "preserved_label": "保留的对话尾段（未压缩）"
   },
   "compact_dialog": {
     "button_label": "压缩",
