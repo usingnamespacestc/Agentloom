@@ -60,6 +60,7 @@ _LIST_FIELDS = (
     "issues",
     "redo_targets",
     "capability_escalation",
+    "recon_plan",
 )
 
 
@@ -191,6 +192,25 @@ _VARIANT_SCHEMAS: dict[JudgeVariant, dict[str, Any]] = {
                     "WorkFlow's planner is permitted to authorize for "
                     "subtasks. Pick verbatim from the catalog block in "
                     "the judge_pre prompt."
+                ),
+            },
+            "recon_plan": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "args": {"type": "object"},
+                    },
+                    "required": ["name"],
+                },
+                "description": (
+                    "M7.5 PR 7 cognitive ReAct DAG: read-only tool "
+                    "calls the engine should run before judge_pre's "
+                    "verdict is final. Use only when feasibility "
+                    "genuinely depends on what those tools would "
+                    "find — leave empty when you can decide from the "
+                    "transcript alone."
                 ),
             },
         },

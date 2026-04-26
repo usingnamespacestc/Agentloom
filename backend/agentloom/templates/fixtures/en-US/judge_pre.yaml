@@ -171,6 +171,22 @@ plan:
                 This is a **hard rule** that overrides the red-team
                 critic's default-skepticism tilt.
 
+            (4) **Optional cognitive ReAct DAG (recon_plan)**: when
+                feasibility genuinely depends on what a read-only
+                tool would find — e.g. you'd say ``infeasible`` only
+                because the user mentioned a file you can't currently
+                see — you may emit ``recon_plan`` as an array of
+                ``{"name": str, "args": object}`` entries instead of
+                committing to a verdict. The engine will run those
+                tool calls, then re-call you with the results in
+                context. **Use sparingly**: this only fires if the
+                chatflow opted in (``cognitive_react_enabled=True``);
+                otherwise the engine ignores the field. Leave the
+                array empty when the transcript already has enough.
+                Recon names must come from the same available-tools
+                catalog above; the engine drops unknown / disabled
+                ones with a warning.
+
             Return JSON:
               {"extracted_description": str,
                "extracted_inputs": str,
@@ -179,7 +195,8 @@ plan:
                "extracted_inheritable_tools": [str, ...],
                "feasibility": "ok"|"risky"|"infeasible",
                "blockers": [str, ...],
-               "missing_inputs": [str, ...]}
+               "missing_inputs": [str, ...],
+               "recon_plan": [{"name": str, "args": object}, ...]}
             No other prose.
         - role: user
           content: |

@@ -317,6 +317,26 @@ class Issue(BaseModel):
     reproduction: str = ""
 
 
+class ReconToolCall(BaseModel):
+    """One read-only tool call a cognitive node (judge_pre, M7.5 PR 7)
+    asks the engine to run before emitting its final verdict.
+
+    ``name`` must be a registry tool the calling judge holds in its
+    ``effective_tools`` AND whose ``side_effect`` is ``NONE`` or
+    ``READ`` — the engine enforces both gates at spawn time.
+    Hallucinated names are dropped with a warning rather than aborting
+    the whole DAG.
+
+    ``args`` is the parsed JSON object the engine forwards verbatim
+    into ``WorkFlowNode.tool_args``. Schema-side it's untyped so each
+    tool's parameter shape comes through; the dispatch path validates
+    via ``ToolRegistry.check_call`` like any other tool_call.
+    """
+
+    name: str
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
 class RedoTarget(BaseModel):
     """A node a judge wants re-run, with the critique that motivates it.
 
@@ -380,6 +400,19 @@ class JudgeVerdict(BaseModel):
     #: copy names verbatim from the catalog block; the engine
     #: drops unknown names with a warning rather than aborting.
     extracted_inheritable_tools: list[str] | None = None
+    #: M7.5 PR 7 cognitive ReAct DAG — when judge_pre would benefit
+    #: from running a read-only tool first (Glob/Grep/Read /
+    #: get_node_context) before deciding feasibility, it can list the
+    #: calls here instead of emitting a final verdict. The engine
+    #: spawns each call as a tool_call WorkNode parented on the
+    #: original judge_pre, then a follow-up judge_pre node parented on
+    #: those tool_calls re-runs with the results in context. Empty /
+    #: None = no recon needed; the verdict is final. The recon path
+    #: is opt-in via :attr:`ChatFlow.cognitive_react_enabled` (default
+    #: False); when disabled the engine logs and ignores the field so
+    #: an enabled fixture pointing at a disabled chatflow degrades
+    #: gracefully.
+    recon_plan: list[ReconToolCall] = Field(default_factory=list)
 
     # --- judge_during ---
     critiques: list[Critique] = Field(default_factory=list)

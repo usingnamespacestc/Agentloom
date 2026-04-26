@@ -137,6 +137,18 @@ plan:
                 是它本职工作的一部分。这是**强制规则**，优先级
                 高于红队批评者的"默认怀疑一切"倾向。
 
+            (4) **可选的 cognitive ReAct DAG (recon_plan)**：当
+                feasibility 的判断真正依赖于某个只读工具会查到的
+                东西时——例如你只是因为用户提到了一份你此刻看不到
+                的文件就准备判 ``infeasible``——你可以输出
+                ``recon_plan`` 数组（``{"name": str, "args": object}``
+                元素），先不下最终结论。引擎会跑完这些 tool_call，
+                再带着结果回调你。**慎用**：仅当 chatflow 开启了
+                ``cognitive_react_enabled=True`` 时引擎才会照做，
+                否则忽略此字段。对话已经够判断时请保持空数组。
+                recon 用到的工具名必须来自上方"可用工具目录"；
+                未知 / 已禁用的工具会被引擎丢弃并打 warning。
+
             返回 JSON：
               {"extracted_description": str,
                "extracted_inputs": str,
@@ -145,7 +157,8 @@ plan:
                "extracted_inheritable_tools": [str, ...],
                "feasibility": "ok"|"risky"|"infeasible",
                "blockers": [str, ...],
-               "missing_inputs": [str, ...]}
+               "missing_inputs": [str, ...],
+               "recon_plan": [{"name": str, "args": object}, ...]}
             不要输出任何其他散文。
         - role: user
           content: |

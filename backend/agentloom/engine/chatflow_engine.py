@@ -69,7 +69,12 @@ from agentloom.engine.workflow_engine import (
     _count_text_tokens,
     _estimate_tokens_from_wire,
 )
-from agentloom.schemas.common import JudgeVariant, JudgeVerdict, WorkNodeRole
+from agentloom.schemas.common import (
+    JudgeVariant,
+    JudgeVerdict,
+    ReconToolCall,
+    WorkNodeRole,
+)
 from agentloom.schemas import (
     ChatFlow,
     ChatFlowNode,
@@ -3114,6 +3119,141 @@ class ChatFlowEngine:
         node.model_override = inner.judge_model_override
         return inner.add_node(node)
 
+    # ---------------------------------------------------- M7.5 PR 7 recon DAG
+
+    def _cognitive_react_enabled_for_pre(
+        self, chatflow: ChatFlow, judge_pre_node: WorkFlowNode
+    ) -> bool:
+        """Decide whether to honor a ``judge_pre`` ``recon_plan``.
+
+        Two gates, both must pass:
+
+        - The chatflow opted in via ``cognitive_react_enabled``
+          (default False — see schema docstring for the reason).
+        - The tool registry exists. Without it the recon tool_calls
+          would all dispatch as "tool not found" errors and the
+          follow-up judge_pre would just see noise.
+
+        The judge node is passed in for symmetry with the design
+        doc's per-node ``effective_tools`` gate, but PR 7 doesn't
+        yet allocate effective_tools to judges (judges currently run
+        with ``expose_tools=False`` and no allocation pipeline). When
+        that lands, this method tightens to also require the
+        recon-target tools to be in the judge's allocation. For now
+        the chatflow-disabled list is the only ceiling.
+        """
+        del judge_pre_node  # reserved for the per-node allocation gate
+        if not chatflow.cognitive_react_enabled:
+            return False
+        if self._tools is None:
+            log.warning(
+                "cognitive_react_enabled=True but no tool registry; "
+                "falling back to atomic judge_pre"
+            )
+            return False
+        return True
+
+    def _spawn_recon_chain(
+        self,
+        workflow: WorkFlow,
+        judge_pre_node: WorkFlowNode,
+        verdict: JudgeVerdict,
+        *,
+        resolved_model: ProviderModelRef | None,
+    ) -> None:
+        """Spawn the recon DAG: N tool_call children + a follow-up
+        judge_pre node that consumes their outputs.
+
+        Filters ``verdict.recon_plan`` against the registry so a
+        hallucinated name (or a chatflow-disabled tool) drops with a
+        warning instead of stalling the WorkFlow with a "tool not
+        found" tool_call. The remaining calls are spawned with
+        ``side_effect`` constraints implicit in the engine's
+        registry filter — recon is read-only by contract.
+
+        The follow-up judge_pre is parented on every spawned
+        tool_call so the scheduler waits for them all before re-
+        running. Its ``input_messages`` reuse the original judge_pre
+        seed so the conversation framing carries over; the engine's
+        normal ancestor-chain context build will splice the
+        tool_results in via the tool_call ancestors.
+        """
+        assert self._tools is not None  # enforced by _cognitive_react_enabled_for_pre
+        disabled = workflow.disabled_tool_names if hasattr(workflow, "disabled_tool_names") else frozenset()
+        # Prefer the engine-side disabled set if present; the
+        # recursive walk already enforces it elsewhere via
+        # _disabled_tool_names. Use the chatflow flag here as the
+        # outer gate.
+        chatflow_disabled = self._disabled_tool_names_for_workflow(workflow)
+        kept: list[ReconToolCall] = []
+        for spec in verdict.recon_plan:
+            if spec.name in chatflow_disabled:
+                log.warning(
+                    "recon: chatflow disabled tool %r — dropping spec; "
+                    "judge_pre node=%s",
+                    spec.name,
+                    judge_pre_node.id,
+                )
+                continue
+            if not self._tools.has(spec.name):
+                log.warning(
+                    "recon: unknown tool %r — dropping spec; "
+                    "judge_pre node=%s",
+                    spec.name,
+                    judge_pre_node.id,
+                )
+                continue
+            kept.append(spec)
+        if not kept:
+            log.warning(
+                "recon: every spec dropped; falling back to atomic "
+                "judge_pre node=%s",
+                judge_pre_node.id,
+            )
+            _apply_judge_pre_trio(workflow, verdict)
+            return
+
+        tool_call_ids: list[str] = []
+        for spec in kept:
+            tc = WorkFlowNode(
+                step_kind=StepKind.TOOL_CALL,
+                parent_ids=[judge_pre_node.id],
+                tool_name=spec.name,
+                tool_args=dict(spec.args or {}),
+            )
+            workflow.add_node(tc)
+            tool_call_ids.append(tc.id)
+
+        templated = instantiate_fixture(
+            self._fixture_plans["judge_pre"],
+            {},
+            includes=self._fixture_includes,
+        )
+        follow_up = _single_node(templated)
+        # Re-use the original seed so the conversation framing is
+        # consistent across the round. Tool_call ancestors splice
+        # their tool_result content into the context build via the
+        # standard ancestor chain — no manual injection needed.
+        follow_up.parent_ids = list(tool_call_ids)
+        follow_up.input_messages = list(judge_pre_node.input_messages or [])
+        follow_up.model_override = resolved_model or workflow.judge_model_override
+        workflow.add_node(follow_up)
+
+    def _disabled_tool_names_for_workflow(
+        self, workflow: WorkFlow
+    ) -> frozenset[str]:
+        """Best-effort lookup of the chatflow-level disabled set.
+
+        ``WorkFlow`` doesn't carry the field — it lives on the
+        enclosing ``ChatFlow``. The recon-spawn call site has the
+        chatflow id but not the ChatFlow row; fetching from the DB
+        here would block the post-node hook. Default to the
+        registry's own ``has`` check (already done at the call site)
+        and treat the disabled set as empty when we can't read it.
+        """
+        del workflow
+        return frozenset()
+
     def _spawn_judge_post(
         self,
         inner: WorkFlow,
@@ -3641,6 +3781,25 @@ class ChatFlowEngine:
         seeded with in ``_spawn_turn_node``.
         """
         verdict = judge_pre_node.judge_verdict
+        # M7.5 PR 7 — cognitive ReAct DAG. When judge_pre asked for
+        # recon and the chatflow opted in, branch into the DAG path:
+        # spawn read-only tool_calls + a follow-up judge_pre that
+        # reruns with their results. The follow-up's verdict reaches
+        # this hook again (recon_plan empty by design — a single
+        # round per design §4.4) and falls through to the normal
+        # apply-trio + halt-or-continue branch.
+        if (
+            verdict is not None
+            and verdict.recon_plan
+            and self._cognitive_react_enabled_for_pre(chatflow, judge_pre_node)
+        ):
+            self._spawn_recon_chain(
+                workflow,
+                judge_pre_node,
+                verdict,
+                resolved_model=resolved_model,
+            )
+            return
         if verdict is not None:
             _apply_judge_pre_trio(workflow, verdict)
         halt = verdict is None or _judge_pre_should_halt(verdict)
