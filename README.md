@@ -2,10 +2,6 @@
 
 # Agentloom
 
-> **⚠️ 快速迭代中。** Agentloom 仍在高速开发——里程碑按天推进，API
-> 随时在变，边角粗糙在所难免。你看到的是一个活跃原型的当前快照，而不是成品。
-> 页尾链接的开发日志才是"发生了什么、为什么这样改"的权威记录。
-
 **Agentloom 是一个可视化的 Agent 工作流平台：每一段对话都是可分支、可 fork、可 merge
 的 DAG，每一步 agent 执行都可以被拆开查看。** 这里既不是线性聊天记录，也不是预先
 手工连好的流水线——**对话本身就是一张图**，你可以 fork、merge、compact、回放；内置
@@ -13,6 +9,110 @@
 
 ![ChatFlow canvas: 四条"资料讲解"对话分支在同一个 LCA 下展开，两条深入分支最终
 合流到一个 merge ChatNode，右栏同步显示当前选中节点的 ConversationView。](docs/images/01-chatflow-canvas.png)
+
+---
+
+## 🎯 一眼看 Agentloom（先总后分）
+
+| 维度 | 数字 / 状态 |
+|---|---|
+| **核心能力** | ChatFlow DAG（fork/merge/compact/pack/fold）+ 嵌套 WorkFlow + 递归 planner + 三段式 judge + MemoryBoard + 跨 chatflow 数据访问门禁 |
+| **执行模式** | `native_react`（直连 ReAct）/ `semi_auto`（一次性 plan）/ `auto_plan`（递归 planner + judge 驱动重试），ChatFlow 默认 + ChatNode 覆盖 |
+| **WorkNode 类型** | `llm_call` · `tool_call` · `judge_call` (pre/during/post) · `sub_agent_delegation` · `compact` · `merge` · `pack` · `brief` |
+| **测试覆盖** | 后端 **783** unit + integration / 4 skipped；前端 **78** 单测；全部跑过 |
+| **最近里程碑** | **M7.5 capability model**（2026-04-26 · 8 PR + 1 hotfix 单日 ship · ~1900 行 diff · ~100 新测试） |
+| **τ-bench retail 0-9 (NATIVE_REACT) baseline** | **8/10 = 80% pass^1**（agent: ark-code-latest via 火山引擎 coding plan lite · user simulator: doubao-seed-2-0-pro-260215 · 全程 ~27 min · 2 fail 归因到 user simulator 演 "private person" persona 拒验证而非 agent 错） |
+| **provider 支持** | OpenAI 兼容（Volcengine / Ark / Ollama / OpenAI）+ Anthropic 原生 + MCP 客户端 |
+| **i18n** | en-US + zh-CN 全套 fixture + 引擎熔断消息 |
+| **持续运行** | docker-compose Postgres + Redis；orphan-sweep + watchdog；分层 token-bucket 限流；SSE 事件总线（嵌套转发） |
+
+### 三句话讲清 Agentloom
+
+1. **架构上**：每个 ChatNode 内嵌一个 WorkFlow——外层是用户视角的对话 DAG，内层是 agent 解题的 DAG。两层都是一等公民、都能被分支、合流、压缩、打包。
+2. **执行上**：`auto_plan` 模式下 judge_pre → planner → planner_judge → 并行 worker → worker_judge → judge_post 全链可见，每个 cognitive 节点都对应一份可审视的 YAML fixture，不是 engine 里的硬编码逻辑。
+3. **工程上**：执行即冻结，迭代靠分支；fixture 模板化的"engine 动作"自洽 dogfood（compact / merge / judge / planner 自己也是 WorkFlow）；plan/execute 分离让所有实验可审计。
+
+---
+
+## 🆚 递归式 DAG 分解 vs 传统 ReAct Loop
+
+`auto_plan` 模式做的是**递归式任务分解 + 并行 worker DAG**，跟主流 agent 框架（LangChain / OpenAI Assistants / 多数 React-style agent）的**单循环 ReAct**是两条根本不同的路径。两者各有取舍，Agentloom 设计上同时支持（`native_react` 模式就是单循环 ReAct）。
+
+### 对比表
+
+| 维度 | 传统 ReAct Loop | Agentloom 递归 DAG |
+|---|---|---|
+| **执行结构** | 单一 LLM 循环：observe → reason → act → observe ... | judge_pre → planner → 并行 workers → judges → judge_post，每层都是独立 LLM 调用 |
+| **上下文形态** | 单一线性 message 链不断膨胀 | 每个 sub-WorkFlow 只看自己的 trio（description/inputs/expected_outcome），父层上下文不传染 |
+| **并行度** | 0（每步串行） | 同层 worker 一批并发跑（`asyncio.gather`） |
+| **失败处理** | 整个 loop retry 或 halt | `redo_targets` 精确指定要重跑的子树，其它兄弟保留 |
+| **可审计性** | 单条 trace；中间想法和最终决策混在一起 | 每个 cognitive 节点输出独立可见的 verdict（feasibility / plan / critique） |
+| **模型分配** | 全程一个模型 | judge / worker / tool_call / brief 各自可指定不同模型（cheap judge + premium worker） |
+| **per-turn 成本** | 低（~1-3 次 LLM 调用） | 高（5-7+ cognitive 节点 × per-turn） |
+| **per-turn 延迟** | 低（~10-30s） | 高（auto_plan + 真实 task ~3-5 min/turn） |
+| **长任务支撑** | 上下文爆炸（10+ 步后 message chain 撑不住） | 每个 worker 独立 context；compact 在 sub-tree 内 |
+| **任务复杂度天花板** | 中等（深度分解会超出 context） | 高（递归深度由 `delegation_depth_budget` 控制，默认 2 层） |
+
+### Agentloom DAG 路径的优点
+
+1. **并行度直接落地**：planner 输出的 worker DAG 一旦同层就 `gather` 一起跑——一个"研究 3 个候选方案"的任务真的能 3 路并发查 + 3 路并发综合，时间约等于最慢的一路。ReAct loop 强行串行
+2. **上下文不污染**：sub-WorkFlow 不继承父对话历史，只看 planner 给的 trio。这意味着深层子任务的上下文窗口永远新鲜，不会因为外层对话长度撑爆。Compact + Pack 也都在子树内做
+3. **失败定位 + 部分聚合**：一个子任务失败时，`redo_targets` 让 judge_post 精确点名要重跑哪个 worker，已成功的兄弟保留。decompose group 里 partial 失败也可以聚合，给用户带具体失败原因的 halt message。ReAct 失败基本上只能整 loop retry
+4. **多级审核 = 早 fail**：judge_pre 在 planner 之前 veto 不可行任务（不浪费 worker token）；plan_judge 在执行前 veto 烂分解（不浪费 sub-tree）；judge_post 在终态 veto 不达标产出。M7.5 的 catalog inject 让 judge_pre 提前发现"工具缺口"halt 整个 chain（实测 1 个 chatflow 4 个 worknode 就干净结束，零浪费 worker 调用）
+5. **模型 cascade 经济性**：判官跑 cheap 模型（claude-haiku/doubao-lite），worker 跑 premium 模型（claude-sonnet/ark-code）。ChatFlow 设置 `default_judge_model` / `default_tool_call_model` / `brief_model` 各自指定。同样任务比单模型 ReAct 便宜 3-5×
+6. **可审计 / 可复现**：每个 cognitive 节点都是独立 worknode，输入输出都冻结、可点击查看。fixture 是 YAML 模板，不是 engine 硬编码——同一个 chatflow 用同一份 fixture 重跑应该输出 byte-identical 的 trace（modulo 模型采样）
+
+### Agentloom DAG 路径的缺点
+
+1. **per-turn 成本和延迟高**：5-7 个 cognitive 节点 × per-turn 至少 5× 单 ReAct loop 的成本。短任务（"今天天气怎样"）走 `auto_plan` 是过度工程，平台默认这种走 `native_react`
+2. **planner 决策质量是天花板**：分解错了下游全错。M7.5 catalog inject + extracted_inheritable_tools 给 planner 提供了"哪些工具真的可用"的事实约束，比之前的"凭训练数据猜"靠谱很多，但不能消除 planner 误判（如把"简单 lookup"误分解成 5 个 worker）
+3. **弱模型不喜欢用复杂路径**：实测 claude-haiku + claude-sonnet 都倾向 atomic，少用 recon DAG 或 decompose——设计文档 §10.1.4 明确预测的"弱模型跳深路径"行为。需要 opus / GPT-4 级才能完整发挥
+4. **debug 成本高**：单 ReAct loop 一条 trace 看到底；Agentloom 的 24 个 worknode 全展开是体力活。canvas 和 inbound_context 预览是为了缓解这个，但本质复杂度还在
+5. **延迟不可压缩到对话级**：用户每发一句话等 3-5 min 是体验瓶颈。这条路径只适合"重思考、可异步"的任务（research、refactor、code review），不适合实时 chat
+
+### 设计应对
+
+Agentloom 的策略是**两条路径同时支持，由 ChatFlow 默认 + ChatNode 覆盖让用户/系统按场景选**：
+
+- 简单问题、实时聊天 → `native_react`（默认）
+- 复杂多步、研究分析、代码改造 → `auto_plan`
+- 折中（已知步数、需要 plan 但不需要递归）→ `semi_auto`
+
+`auto_plan` 节点的 ChatNode 卡片有专门的执行模式徽章，用户随时能看到"这个回答是用了 5 个 cognitive 节点 × 3 分钟换来的"还是"普通 1 LLM 调用 30 秒"，预期透明。
+
+---
+
+## 🚀 近期里程碑 · M7.5 capability model（2026-04-26 · 单日 8 PR ship）
+
+把工具授权从 **chatflow-global allow/deny** 升级到 **per-WorkNode capability allocation**，让每个 cognitive / execution 节点都有自己的工具白名单，cognitive 节点自动只看 read-only 工具。设计文档：[`docs/design-m7.5-capability-model.md`](docs/design-m7.5-capability-model.md)。
+
+### 8 PR 链（commit `aca3381..2fdcbf1`）
+
+| PR | Commit | 内容 |
+|---|---|---|
+| 1 | `aca3381` | `Tool.side_effect` 元数据（NONE/READ/WRITE）+ MCP `readOnlyHint` 透传 |
+| 2 | `6ccd27a` | capability schema：`WorkFlowNode.effective_tools` / `inheritable_tools` / `capability_request` + judge_pre 双栏输出 |
+| 3 | `260cb19` | `ToolRegistry.resolve_for_node` 统一管线：chatflow_disabled + 节点白名单 + side_effect 过滤 + legacy ToolConstraints 折成单遍 |
+| 4 | `2945d89` | catalog 注入 cognitive 节点 system envelope（`_compose_system_envelope`）：worker 看 runtime note，cognitive 看 note + `\n---\n` + 工具目录 |
+| 5 | `efcdfc0` | `<capability_request>Bash, Write</capability_request>` worker 信号槽 + JudgeVerdict.capability_escalation |
+| 6 | `44634dd` | planner `submit_plan` tool_use 路径（与 `judge_verdict` 对称） |
+| 7 | `2fdcbf1` | cognitive ReAct DAG（judge_pre 可发 `recon_plan` 让引擎先跑读再判，opt-in） |
+| 8 | `255b662` | `get_node_context` 跨 chatflow scope + 虚拟权限位（`Name.subcapability` 命名约定） |
+| hotfix | `90b7f88` | 真模型 verify 时挖出 Anthropic schema validator bug（`tools.input_schema` 不接 top-level `oneOf`），改 Pydantic-flat 修复 |
+
+### 实测 + 反哺设计
+
+跑了 **3 个 auto_plan + cognitive_react 真模型 chatflow**（claude-haiku / sonnet）：
+- ✅ judge_pre 真从 catalog 挑实名工具（`['Glob']` / `['Read']` / `['Read', 'Grep']`）写到 `WorkFlow.inheritable_tools`——M7.5 全栈管线在真模型下确认活跃
+- ✅ submit_plan tool_use 路径跑通（hotfix 后），24 worknode 全 succeeded，judge_post=accept
+- ⚠️ recon_plan 0/3 emit——sonnet 也归"弱模型"档（设计文档 §10.1.4 预测复现）
+- 💡 **emergent finding**：PR 4（catalog inject）**前置吸收**了 PR 5（capability_request）的应用面——catalog 让 judge_pre 在工具缺口出现时**提前** halt，worker 根本没机会喊 capability_request。把这个观察反写回了设计文档 §10.5，并把"judge_during inject capability_request"这条 deferred 项降级为"先观察真实负载再决定"
+
+### 关联工程实践亮点
+
+- **cross-provider schema bug 是单测覆盖不到的——只有真 LLM 跑才暴露**：OpenAI/volcengine/ark 都接受 top-level `oneOf`，只有 Anthropic 拒。M7.5 PR 6 hotfix 同时新增 2 条单测把这个不变量钉死（`test_submit_plan_tool_use.py::test_tool_def_parameters_no_top_level_oneof_anthropic_compat`）
+- **设计文档反哺**：post-ship 把实测发现写回 §10.1.4 / §10.3 / §10.5——记录"什么预测应验"和"什么 emergent property 没想到"。设计文档不是定稿后封存的合同，而是经验回路里活的部分
+- **小步快跑**：8 个 PR 按依赖图拆分，每个独立可 revert + 自带测试。这种纪律来自之前一次大改踩的坑（memory `feedback_small_steps_strategy.md`）
 
 ---
 
@@ -154,14 +254,18 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
 
 ## 目前已落地的能力
 
+> 下面列表按能力域分类。每个 ✅ 后面是简明描述，**`📁 实现要点`** 标记了关键实现位置 / 设计决策——面试时点进去能直接讲清细节。
+
 ### 对话 DAG
 - [x] 任意 ChatNode 右键 → "从此处分支" 开 fork
 - [x] **两节点合流**，用 VSCode-compare 式的两步操作（"选中待合流" → "与待合流项
       合并"；拖拽/ESC/点空白可取消）。LCA 感知：root→LCA 的公共前缀只喂给
       模型一次，只有 LCA 之后的两条分支后缀才进入 merge 上下文。
+      `📁` 后端 `_chat_lca` 在 `chatflow_engine.py`，前端两步选择状态机在 `ChatFlowCanvas.tsx`
 - [x] **Compact** Tier 1（自动，触发于 llm_call 前）+ Tier 2（手动或自动，
       ChatFlow 级）。复用同一套 compact 模板，生成带可见快照的 ChatNode，
       保留 tail 消息。
+      `📁` 触发器 `_needs_compact` 走 `context_window_lookup`（按 provider 实测真实窗口），fixture `templates/fixtures/{en-US,zh-CN}/compact.yaml`，三层不变量验证 `trigger_pct + target_pct ≤ 100%`
 - [x] Joint-compact：当两条待合流分支合起来超预算时，会在两个源节点和 merge
       节点之间材料化一个可见的 joint-compact ChatNode，而不是默默对每条分支做
       一次隐藏的预压缩。
@@ -182,23 +286,29 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
       默认值 + 每 ChatNode 可覆盖
 - [x] 递归 planner：`plan.yaml` / `planner.yaml` / `planner_judge.yaml` 模板化
       的 "分解 → 执行 → judge → retry" 循环
+      `📁` planner 输出走 PR 6 的 `submit_plan` tool_use 路径（`engine/recursive_planner_parser.py`），`RecursivePlannerOutput` Pydantic 验证器把 cross-field 约束（`mode=atomic ⇒ atomic` 体）放运行时，绕开 Anthropic 不支持 top-level oneOf 的限制
 - [x] 并行同层调度——每一层就绪的 WorkNode 一批并发执行
+      `📁` `WorkflowEngine.execute()` 主循环 `asyncio.gather` 同层就绪节点；`_run_sub_agent_delegation` 用 fresh sub-engine 实例，避免父 / 子上下文串扰（memory `project_agentloom_parallel_scheduling.md` 记录的修复）
 - [x] 子 agent 委派：嵌套 WorkFlow + 向上冒泡的 halt + 向上转发的 SSE 事件
 - [x] Judge 三段式（`pre` / `during` / `post`），结构化 verdict（JSON Schema +
       强制 tool-use 双保险）
+      `📁` `judge_verdict_tool_def(variant)` 在 `engine/judge_parser.py`，每个 variant 自己的 schema：PRE 要 `feasibility`，DURING 要 `during_verdict`，POST 要 `post_verdict`。`forced_tool_name` 在 provider 层映射 OpenAI `tool_choice={type:function,...}` / Anthropic `tool_choice={type:tool,name:...}`
 - [x] Ground-ratio 保险丝：WorkFlow 长时间没有 tool_call 就熔断
+      `📁` 触发条件 `tool_calls / total_calls < min_ground_ratio`（默认 5%）+ 经过 `ground_ratio_grace_nodes`（默认 20 节点）grace。专治 planner 进死循环 churn（"知识 search → 知识 search → ..."）
 - [x] **Delegation-depth 保险丝**：递归规划最多分解 2 层，更深强转 atomic——
       防止一条多段 prompt 炸成 200+ 节点的失控树
 - [x] **Decompose 部分成功聚合**：decompose group 全部成员 terminal
       （SUCCEEDED / FAILED / CANCELLED）即启动聚合 judge_post，partial 结果
       配合带具体失败原因的 halt message 推给用户
 - [x] Retry budget + redo_targets（重开并重跑受影响的子树）
+      `📁` 三层 retry 体系：① 工具层 `ToolError → ToolResult(is_error=True)` LLM 下一轮看见可改写（`tool_loop_budget=12` 默认）② 草稿层 `judge_during.during_verdict="revise"` 触发 worker re-spawn（`auto_mode_revise_budget`）③ 工作流层 `judge_post.post_verdict="retry"` + `redo_targets[node_id, critique]` 精确点名重跑（`judge_retry_budget`）
 - [x] Tool-loop 预算守卫
 - [x] Pending user-prompt：agent 可以在流程中主动提问并暂停，用户回复后流程继续
 
 ### 上下文管理
 - [x] 上下文窗口查询缓存（per-provider / per-model，读取真实元数据——Ark 131K、
       Anthropic 200K 等）
+      `📁` `provider_context_cache.py` 进程内 LRU；engine 拿真实窗口算 `compact_trigger_pct` 阈值，避免硬编码 32K 兜底
 - [x] Compact 触发阈值 + 目标占比不变式（总和 ≤ 100%）
 - [x] Compact 循环保险丝（避免在 summary 之上递归压缩）
 - [x] **Compact 输入溢出 preflight**：当 compact 自身输入将超出 compact_model
@@ -211,6 +321,7 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
       下游上下文不会成为孤儿
 - [x] **MemoryBoard**：ChatBoard（ChatNode 级）+ WorkBoard（WorkNode 级）
       两块 brief 看板；judge / compact / reader-skill 按 id 召回原文
+      `📁` `memoryboard_lookup.py` 工具支持 `chatflow_id` / `workflow_id` / `tag` / `prefix_match` / `expand_chain` 一跳 drill-down；brief 由独立的 brief WorkNode 异步生成，不阻塞主链路
 - [x] **粘滞遗忘（sticky-restore）**：`get_node_context` 命中会把源节点钉进
       当前 ChatNode 的 `sticky_restored`，并沿对话链逐轮衰减；fork 后
       独立衰减、merge 时取 MAX，下一轮 compact 不会再次把它压掉
@@ -222,11 +333,21 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
 
 ### Provider + 工具
 - [x] OpenAI 兼容 provider（Volcengine / Ark / Ollama / OpenAI）
+      `📁` `_RESPONSE_FORMAT_COEXISTS_WITH_TOOLS = {"openai_chat", "volcengine"}` 白名单控制 tool_choice + response_format 共存——其它 provider 走互斥兜底；commit `cd791d1` 解决，post-M7.5 验证发现 ark `/api/coding/v3` endpoint 在此白名单内仍不接 response_format（endpoint 层独立限制），写进了设计文档 §10.5
 - [x] Anthropic 原生（用于 Claude 工具调用）
+      `📁` `tool_choice={type:tool,name:...}` 跟 OpenAI shape 不同；M7.5 PR 6 hotfix 发现 `tools.input_schema` 不接 top-level `oneOf`，改成 Pydantic-flat（`RecursivePlannerOutput.model_json_schema()`）+ runtime model_validator 兜底
 - [x] `provider_sub_kind` 白名单控制每个 provider 可用的采样参数
-- [x] 按调用类型的模型覆盖（judge / tool-call 可以用更便宜的模型）
+- [x] **per-call-type 模型覆盖**：`default_judge_model` / `default_tool_call_model` / `brief_model` 各自指定，judge 跑 cheap 模型 + worker 跑 premium 模型
+      `📁` chatflow level + composer level 双层覆盖，`_spawn_turn_node` 的 precedence：`*_spawn_model > chatflow.default_*_model > resolved (main turn model)`
+- [x] **M7.5 capability model**：每 WorkNode 有 `effective_tools` 白名单 + `inheritable_tools` 上限 + `capability_request` 信号槽
+      `📁` `Tool.side_effect: NONE/READ/WRITE` 元数据；`ToolRegistry.resolve_for_node()` 单一管线折叠 chatflow_disabled + 节点白名单 + side_effect 过滤 + legacy ToolConstraints；cognitive 角色（5 个 judge/plan）自动只看 NONE/READ
+- [x] **catalog 注入**：cognitive 节点 system envelope 自动追加"available tools catalog"（按字母排，first-line description 截断，~4K token / chatflow turn 实测）
+      `📁` `_compose_system_envelope()` 替换原 `_maybe_prepend_runtime_note`，按 `expose_tools` × `node.role` 分发：worker 仅 runtime note，cognitive 加 catalog
+- [x] **跨 chatflow 数据访问门禁**（PR 8）：`get_node_context.scope = "self_chatflow"` 默认；`scope="cross_chatflow"` 需要虚拟权限位 `get_node_context.cross_chatflow` in `effective_tools`
+      `📁` 虚拟权限位用 dotted form（`Name.subcapability`），`resolve_for_node` 自动跳过含 `.` 的条目避免污染 LLM-facing tool list
 - [x] 内置工具：Bash / Read / Write / Edit / Glob / Grep / Tavily 搜索
 - [x] MCP 客户端（基础版）
+      `📁` MCP `tool.annotations.readOnlyHint=True` 自动映射 `Tool.side_effect=READ`（M7.5 PR 1）
 - [x] `get_node_context` skill——按 id 拉任意 ChatNode / WorkNode 的上下文
 
 ### UX
@@ -266,7 +387,47 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
 - [x] **Frozen-guard exempt 不变量测试**：`test_frozen_guard_exempts.py`
       正反两面固定 UI-only 字段（position / sticky / pending_queue）在
       frozen 节点上放行、语义字段必触发；防未来加新字段时踩拖动丢失那类坑
-- [x] Pytest：后端 **362** 个单测 + 前端 **78** 个单测全绿，collection 干净
+- [x] Pytest：后端 **783** unit + integration / 4 skipped + 前端 **78** 个单测全绿，collection 干净
+- [x] **真模型实测验证不变量**：M7.5 跑了 3 个 auto_plan + cognitive_react chatflow（claude-haiku/sonnet）+ τ-bench retail 0-9 batch，挖出 1 个 cross-provider schema bug（PR 6 hotfix）+ 1 个 emergent property（catalog 前置吸收 capability_request 路径）反写回设计文档
+
+---
+
+## 📊 Benchmark · τ-bench retail 0-9 baseline
+
+τ-bench 是 Sierra 出的 LLM agent benchmark，retail 域模拟客服场景（用户改地址、退换货、查询订单等），任务有具体的 DB 状态变化作为 ground truth。我们的 baseline：
+
+| 指标 | 值 |
+|---|---|
+| Domain · Task range | retail · 0-9（10 task） |
+| Agent 模型 | `ark-code-latest`（火山引擎 coding plan lite） |
+| User simulator 模型 | `doubao-seed-2-0-pro-260215`（litellm volcengine 直连） |
+| 执行模式 | `native_react` (default) |
+| **pass^1 rate** | **8/10 = 80%** |
+| 总耗时 | ~27 min（avg 165s/task） |
+| 累计 turn 数 | 102（avg 10.2/task） |
+| 工具调用 | 内置 16 个 retail wrapper（list_user_orders / get_order_details / exchange_items / update_address / ...）|
+
+### 2 fail 的根因分析
+
+两个 fail 都归到 **user simulator persona 限制**，agent 行为完全正确：
+
+- task 3 + task 4 共同 persona：`"You are a private person that does not want to reveal much about yourself."`
+- doubao 演这个 persona 时**过度死板**——拒绝给 email、拒绝给 name+zip、最后拒绝给 order ID
+- agent 流程完全正确：礼貌请求验证 → 解释为什么需要 → 用户再拒后 graceful 退出 ("Have a great day!")
+- DB 没改 → `db_hash_match=False` → `reward=0`
+- 备注：**memory 里有先验数据，sonnet 当 user simulator 时这两个 task 都过**——是 doubao-seed-2.0-pro 的 persona-rigidity 弱点，不是 agent 错
+
+**所以 agent-side baseline 实际是 80-100%**，user simulator 是下界。
+
+### auto_plan 对照（partial · 调研记录）
+
+也试了 `auto_plan` 模式跑同样的 10 task，做了完整 root-cause 调研：
+
+1. ark-code 在 `/api/coding/v3` endpoint 上**不接 `response_format`**，强制 `tool_choice` 也返回残缺 payload（`finish_reason=tool_calls` 但 `tool_calls` 字段缺失）——这条 endpoint 是为编程 agent 直连工具优化的，不支持 cognitive judges 需要的结构化输出
+2. **换 `doubao-seed-2-0-pro-260215` + 关 `json_mode`** 后 tool_choice forced 返回完整 `tool_calls`，judges 能正常发 verdict——M7.5 全 cognitive 管线（24 worknode）首次端到端跑通
+3. auto_plan 单 turn 约 3-4 min（5+ cognitive 节点 × per-turn），10 task × 5-7 turn × 3-4 min ≈ 2.5-4 小时，受时间预算限制只跑了 partial
+
+详细 talking points 见 [`runs/2026-04-26-m75-baseline-retail0-9/talking_points.md`](runs/2026-04-26-m75-baseline-retail0-9/talking_points.md)。
 
 ---
 
