@@ -1453,8 +1453,22 @@ class WorkflowEngine:
             ],
             extras=dict(assistant.extras) if assistant.extras else {},
         )
-        if node.input_messages is None:
-            node.input_messages = _provider_to_wire(messages)
+        # Always save the post-envelope wire version. Previously this
+        # only fired when ``node.input_messages is None`` so fixture-
+        # provided seeds (judge / planner / brief) kept their pre-
+        # envelope version on the node — meaning the canvas / inbound_context
+        # preview / debug scripts couldn't see what the LLM actually
+        # received (catalog inject + runtime note). The envelope is
+        # added inside ``_compose_system_envelope`` so saving the wire
+        # roundtrip here is the single source of truth: what's saved =
+        # what was sent.
+        #
+        # Safe under ancestor-chain context build: descendant DRAFT
+        # nodes use the most-recent DRAFT ancestor's input_messages as
+        # seed; if that already starts with an envelope SystemMessage,
+        # ``_compose_system_envelope`` dedups via the messages[0]
+        # equality check and skips the duplicate prepend.
+        node.input_messages = _provider_to_wire(messages)
         node.usage = TokenUsage(**response.usage.model_dump()) if response.usage else None
 
     async def _run_llm_call(self, workflow: WorkFlow, node: WorkFlowNode) -> None:
