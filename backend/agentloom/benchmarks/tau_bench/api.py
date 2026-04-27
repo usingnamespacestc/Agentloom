@@ -57,6 +57,15 @@ class CreateSessionRequest(BaseModel):
         "update baggage). Set lower if you specifically want to "
         "stress-test the budget guard.",
     )
+    execution_mode: str | None = Field(
+        None,
+        description="ChatFlow execution mode override. ``None`` = use the "
+        "default (NATIVE_REACT — direct mode, agent loops tool_use until "
+        "stop). ``auto_plan`` = full cognitive pipeline (judge_pre → "
+        "planner → planner_judge → worker → worker_judge → judge_post). "
+        "``semi_auto`` = plan + judges, no auto-decompose. Used for "
+        "M7.5+ benchmarking that exercises the cognitive layer.",
+    )
 
 
 class CreateSessionResponse(BaseModel):
@@ -148,9 +157,27 @@ async def create_session(
     chat = make_chatflow(title=title)
     if body.agent_model is not None:
         chat.draft_model = body.agent_model
+        # In auto_plan mode the cognitive nodes (judge_pre / planner /
+        # worker_judge / judge_post) all default to draft_model. Setting
+        # them explicitly here keeps the model surface uniform across
+        # the run and makes the benchmark trace easy to attribute.
+        chat.default_judge_model = body.agent_model
+        chat.default_tool_call_model = body.agent_model
+        chat.brief_model = body.agent_model
     # Match the per-call-type override pattern: judge / tool_call / brief
     # all default to draft_model unless overridden later.
     chat.tool_loop_budget = body.tool_loop_budget
+    if body.execution_mode is not None:
+        from agentloom.schemas.common import ExecutionMode
+
+        try:
+            chat.default_execution_mode = ExecutionMode(body.execution_mode)
+        except ValueError as exc:
+            raise HTTPException(
+                400,
+                f"unknown execution_mode {body.execution_mode!r}; "
+                f"valid: {[m.value for m in ExecutionMode]}",
+            ) from exc
 
     session_id = chat.id  # 1:1 mapping
     try:
