@@ -251,6 +251,23 @@ function WorkFlowCanvasInner({ workflow, outerChatNodeId, subPath }: WorkFlowCan
     };
   }, [chatflowId, outerChatNodeId, subPath]);
 
+  // Flush on canvas unmount. Mirrors ChatFlowCanvas's cleanup-time
+  // flush — pagehide / beforeunload only fire on full-tab unload, but
+  // most drag-loss happens on **in-app navigation** (leaving the
+  // WorkFlow back to ChatFlow, switching the inner sub_workflow drill
+  // path). React unmounts the canvas synchronously without firing any
+  // page-level event, so the 500ms debounce is GC'd along with the
+  // component refs. Run flushPositions one more time on cleanup.
+  useEffect(() => {
+    return () => {
+      if (saveTimer.current) {
+        clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      flushPositions();
+    };
+  }, [chatflowId, outerChatNodeId, subPath, flushPositions]);
+
   useEffect(() => {
     if (isDragging.current) return;
     if (workflow?.id !== lastWorkflowId.current) {

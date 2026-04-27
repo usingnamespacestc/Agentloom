@@ -343,6 +343,32 @@ function ChatFlowCanvasInner({ chatflow }: ChatFlowCanvasProps) {
     }
   }, [chatflow]);
 
+  // Flush on canvas unmount. The pagehide / beforeunload listeners
+  // below cover whole-tab unloads, but the most common drag-loss case
+  // is **in-app navigation**: user drags a node, then within the
+  // 500ms debounce window clicks ⤢ to drill into a WorkFlow (or
+  // switches to a different ChatFlow). React routes the view change
+  // synchronously and ChatFlowCanvas unmounts — no page-level event
+  // fires, so the debounce timer is GC'd along with the component
+  // and the PATCH never goes out. Cleanup-time flush + clear the
+  // pending timer to make sure every drag persists regardless of
+  // how the canvas leaves the screen.
+  //
+  // Why ``chatflow.id`` (not the whole ``chatflow`` object) in deps:
+  // ``chatflow`` is a fresh reference every store update; we only
+  // want the cleanup to re-bind when the actual chatflow id changes
+  // (i.e. when user switches between chatflows entirely), not on
+  // every SSE refresh.
+  useEffect(() => {
+    return () => {
+      if (saveTimer.current) {
+        clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      flushPositions();
+    };
+  }, [chatflow?.id, flushPositions]);
+
   // Emergency sync flush for pagehide / tab switch: the 500ms debounce
   // above batches drags nicely during interactive use, but if the user
   // reloads the tab (or hits browser back) inside that window, the PATCH
