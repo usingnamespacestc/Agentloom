@@ -26,6 +26,16 @@ params_schema:
   round_budget:
     type: string
     required: true
+  worker_capability_request:
+    type: string
+    required: false
+    description: >
+      worker 草稿里通过
+      ``<capability_request>...</capability_request>`` 标记发出的工具
+      请求列表（registry tool 名）的预渲染字符串。worker 没请求时为
+      空串。判官读它来填 ``capability_escalation``，触发引擎扩展
+      ``WorkFlow.inheritable_tools`` 并重 spawn planner，让 worker 下
+      一轮拿到这些工具。
 plan:
   description:
     text: "worker_judge —— 评审 worker 草稿"
@@ -56,16 +66,37 @@ plan:
               缺少 planner 本应提供的输入）。升交到 post_judge。
 
             硬性规则：
-            - 将产出与 expected_outcome 具体比对——而不是按你对"好回
-              答"的直觉来判。
+            - 将产出与 expected_outcome 具体比对——而不是按你对好回答
+              的直觉来判。
             - 收敛压力：本轮是第 {{ round }} 轮，最多 {{ round_budget }}
-              轮。到了后期，只要产出不是"明显错的"就该接受；nit 不
-              算阻塞。
+              轮。到了后期，只要产出不是明显错的就该接受；nit 不算
+              阻塞。
+
+            **能力升级（capability escalation）**：
+            worker 可能发出了 ``<capability_request>`` 标记，提示
+            它发现自己缺一个工具。已被预先抽取到下面字段：
+
+                worker_capability_request: {{ worker_capability_request }}
+
+            如果该列表非空：
+            - 设 ``during_verdict: "revise"``。
+            - 把请求的工具名原样填进 ``capability_escalation``（引擎
+              读这个字段去扩展 ``WorkFlow.inheritable_tools`` 并重
+              spawn planner，下一轮 worker 就拿得到这些工具）。
+            - 在 ``critiques`` 里加一条 severity ``concern`` 的条目，
+              简述能力缺口（如 "worker 需要 ``Write`` 来落盘文件
+              但 effective_tools 里没有"）。
+            - 不要同时报 "halt"；halt 是给不可救 brief 的，能力缺口
+              通过升级路径**可救**。
+
+            如果列表为空，``capability_escalation`` 留 ``[]``，按
+            正常方式判草稿质量。
 
             返回 JSON：
               {"during_verdict": "continue"|"revise"|"halt",
                "critiques": [{"issue": str, "severity": "blocker"|"concern"|"nit",
-                              "evidence": str}, ...]}
+                              "evidence": str}, ...],
+               "capability_escalation": [str, ...]}
             不要输出其他散文。
         - role: user
           content: |

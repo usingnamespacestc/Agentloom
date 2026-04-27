@@ -3705,6 +3705,14 @@ class ChatFlowEngine:
         worker_brief_desc = (
             worker_node.description.text if worker_node.description else ""
         )
+        # M7.5 (C) capability_request feedback loop: pre-render the
+        # worker's emitted capability_request list as a string so the
+        # judge fixture can drop it into the prompt. ``[]`` (empty
+        # list) renders as "[]" so the LLM can see the empty marker
+        # without ambiguity. Non-empty lists render as
+        # ``["X", "Y"]``-style JSON for unambiguous copying.
+        cap_req = worker_node.capability_request or []
+        cap_req_str = json.dumps(cap_req, ensure_ascii=False)
         templated = instantiate_fixture(
             self._fixture_plans["worker_judge"],
             {
@@ -3724,6 +3732,7 @@ class ChatFlowEngine:
                 ),
                 "round": str(round_index),
                 "round_budget": str(inner.debate_round_budget),
+                "worker_capability_request": cap_req_str,
             },
             includes=self._fixture_includes,
         )
@@ -4304,6 +4313,67 @@ class ChatFlowEngine:
                 worknode_catalog=(
                     f"{worker_node.id}: worker draft accepted by worker_judge"
                 ),
+            )
+            return
+
+        # M7.5 (C) capability_request feedback loop. If the worker_judge
+        # filled ``capability_escalation`` (because the worker emitted
+        # ``<capability_request>`` markers), don't spawn a fresh worker
+        # under the same plan — the worker is correctly stuck without
+        # those tools. Instead:
+        # 1. Widen ``WorkFlow.inheritable_tools`` to include the
+        #    escalated names (union, not replace). Subsequent planner
+        #    decompositions allocate ``effective_tools`` to children
+        #    from this widened set.
+        # 2. Spawn a fresh planner with handoff_notes citing the
+        #    escalation + the prior worker's critique. The new plan
+        #    can re-decompose with the now-available tools.
+        # 3. The existing post-node hook chain (planner → planner_judge
+        #    → worker → worker_judge) takes over; the new worker has
+        #    access to the escalated tools because it sees the widened
+        #    catalog through ``inheritable_tools``.
+        # Cross-checked against ``_apply_judge_pre_trio`` — that helper
+        # writes ``inheritable_tools`` from judge_pre's first-turn
+        # extraction; widening here is the multi-turn / mid-execution
+        # complement (the design doc §10.5 emergent finding called this
+        # out as the missing follow-up; here it is).
+        if (
+            verdict is not None
+            and verdict.capability_escalation
+            and worker_node is not None
+            and _round_index_for(workflow, worker_node) < workflow.debate_round_budget
+        ):
+            escalated = list(verdict.capability_escalation)
+            existing = set(workflow.inheritable_tools or [])
+            workflow.inheritable_tools = sorted(existing | set(escalated))
+            log.info(
+                "capability_escalation: widened workflow=%s inheritable_tools "
+                "by %d new tool(s) — escalated=%r, total now=%d",
+                workflow.id,
+                len(set(escalated) - existing),
+                escalated,
+                len(workflow.inheritable_tools),
+            )
+            handoff = (
+                f"Prior worker (id={worker_node.id}) emitted a "
+                f"capability_request for tool(s): {', '.join(escalated)}. "
+                "The engine has widened this WorkFlow's inheritable_tools "
+                "to include those names. Re-plan with the widened set in "
+                "mind — the new worker should use the requested tools to "
+                "complete what the prior worker couldn't."
+            )
+            critique_text = _render_critiques(verdict)
+            self._spawn_planner(
+                workflow,
+                worker_judge_node,
+                resolved_model=resolved_model,
+                prior_plan=(
+                    worker_node.output_message.content
+                    if worker_node.output_message
+                    else ""
+                ),
+                critique=critique_text,
+                handoff_notes=handoff,
             )
             return
 

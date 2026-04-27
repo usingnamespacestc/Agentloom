@@ -28,6 +28,16 @@ params_schema:
   round_budget:
     type: string
     required: true
+  worker_capability_request:
+    type: string
+    required: false
+    description: >
+      Pre-rendered list of registry tool names the worker emitted via
+      ``<capability_request>...</capability_request>`` markers in its
+      draft. Empty string when the worker requested nothing. The judge
+      uses this to populate ``capability_escalation`` and trigger an
+      escalation flow (engine widens ``WorkFlow.inheritable_tools``
+      and re-runs the planner).
 plan:
   description:
     text: "worker_judge — review the worker's draft"
@@ -66,10 +76,36 @@ plan:
               most {{ round_budget }}. Late rounds should accept any
               output that is not actively wrong; nits are not blockers.
 
+            **Capability escalation**:
+            The worker may have emitted a ``<capability_request>`` marker
+            indicating it discovered a missing tool. Pre-extracted into
+            the field below:
+
+                worker_capability_request: {{ worker_capability_request }}
+
+            If that list is non-empty:
+            - Set ``during_verdict: "revise"``.
+            - Copy the requested tool names verbatim into
+              ``capability_escalation`` (the engine reads this field to
+              widen ``WorkFlow.inheritable_tools`` and respawn the
+              planner so the worker's next round has access to those
+              tools).
+            - In ``critiques``, add one entry of severity ``concern``
+              that summarizes the capability gap (e.g. "worker requires
+              ``Write`` to materialize file but it wasn't in
+              effective_tools").
+            - Do NOT also emit "halt"; halt is for unrecoverable
+              briefs. Capability gaps ARE recoverable through the
+              escalation path.
+
+            If the list is empty, leave ``capability_escalation`` as
+            ``[]`` and judge the draft on its own merits as usual.
+
             Return JSON:
               {"during_verdict": "continue"|"revise"|"halt",
                "critiques": [{"issue": str, "severity": "blocker"|"concern"|"nit",
-                              "evidence": str}, ...]}
+                              "evidence": str}, ...],
+               "capability_escalation": [str, ...]}
             No other prose.
         - role: user
           content: |
