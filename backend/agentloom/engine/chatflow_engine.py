@@ -1635,6 +1635,7 @@ class ChatFlowEngine:
         effective_disabled = (
             frozenset(chatflow.disabled_tool_names)
             | frozenset(ws_settings.globally_disabled())
+            | self._foreign_tau_tools(chatflow.id)
         )
         try:
             await self._inner.execute(
@@ -1864,7 +1865,9 @@ class ChatFlowEngine:
         runtime_error: str | None = None
         ws_settings = tenancy_runtime.get_settings(self._inner._tool_ctx.workspace_id)
         effective_disabled = (
-            frozenset(chatflow.disabled_tool_names) | frozenset(ws_settings.globally_disabled())
+            frozenset(chatflow.disabled_tool_names)
+            | frozenset(ws_settings.globally_disabled())
+            | self._foreign_tau_tools(chatflow.id)
         )
         try:
             await self._inner.execute(
@@ -2452,7 +2455,9 @@ class ChatFlowEngine:
         runtime_error: str | None = None
         ws_settings = tenancy_runtime.get_settings(self._inner._tool_ctx.workspace_id)
         effective_disabled = (
-            frozenset(chatflow.disabled_tool_names) | frozenset(ws_settings.globally_disabled())
+            frozenset(chatflow.disabled_tool_names)
+            | frozenset(ws_settings.globally_disabled())
+            | self._foreign_tau_tools(chatflow.id)
         )
         try:
             await self._inner.execute(
@@ -3326,6 +3331,34 @@ class ChatFlowEngine:
         names = sorted(t.name for t in self._tools.all())
         return ", ".join(names) if names else "(empty)"
 
+    def _foreign_tau_tools(self, chatflow_id: str) -> frozenset[str]:
+        """Return tool names registered by *other* tau-bench sessions.
+
+        τ-bench wrappers register into the global ToolRegistry under
+        ``tau_<session_id[-6:]>_<name>`` per
+        ``benchmarks/tau_bench/tool_source.py``. The shared registry
+        means a regular (non-tau) chatflow's catalog/effective set
+        would otherwise see every concurrent tau session's tools —
+        observed 2026-04-26 night when M7.5 showcase chatflows had
+        ``tau_*`` entries leaking in mid-batch and judge_pre tried to
+        allocate them as inheritable_tools.
+
+        Filter logic: any registered tool whose name starts with
+        ``tau_`` and whose embedded prefix does NOT correspond to the
+        current chatflow's id is "foreign" — exclude it. Caller
+        unions this with chatflow.disabled_tool_names + workspace
+        globally_disabled before resolving catalog / effective set.
+        """
+        if self._tools is None:
+            return frozenset()
+        own_prefix = f"tau_{chatflow_id[-6:]}_"
+        foreign = {
+            t.name
+            for t in self._tools.all()
+            if t.name.startswith("tau_") and not t.name.startswith(own_prefix)
+        }
+        return frozenset(foreign)
+
     def _resolve_tool_catalog(self, chatflow: ChatFlow) -> str:
         """Render the M7.5 inheritable-tool catalog injected before
         every cognitive (judge / planner) LLM call.
@@ -3360,7 +3393,10 @@ class ChatFlowEngine:
         """
         if self._tools is None:
             return ""
-        disabled = chatflow.disabled_tool_names or frozenset()
+        disabled = (
+            frozenset(chatflow.disabled_tool_names or ())
+            | self._foreign_tau_tools(chatflow.id)
+        )
         rows: list[str] = []
         for tool in sorted(self._tools.all(), key=lambda t: t.name):
             if tool.name in disabled:
@@ -4850,7 +4886,9 @@ class ChatFlowEngine:
         # gets a single frozenset to refuse against.
         ws_settings = tenancy_runtime.get_settings(self._inner._tool_ctx.workspace_id)
         effective_disabled = (
-            frozenset(chatflow.disabled_tool_names) | frozenset(ws_settings.globally_disabled())
+            frozenset(chatflow.disabled_tool_names)
+            | frozenset(ws_settings.globally_disabled())
+            | self._foreign_tau_tools(chatflow.id)
         )
         # Compact ChatNodes (auto-inserted by the dual-track trigger OR
         # queued by an explicit user compact) run the single-shot compact
