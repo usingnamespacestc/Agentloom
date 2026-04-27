@@ -15,7 +15,7 @@
  */
 
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import Markdown from "react-markdown";
+import MarkdownView from "../../components/MarkdownView";
 import { useTranslation } from "react-i18next";
 
 import { StatusBadge } from "./StatusBadge";
@@ -320,7 +320,7 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
           <div className="text-[10px] text-teal-700 mb-0.5">{t("chatflow.compact_summary")}</div>
           <div className="prose prose-sm max-w-none text-xs text-gray-900 break-words leading-snug">
             {node.agent_response.text ? (
-              <Markdown>{truncate(node.agent_response.text)}</Markdown>
+              <MarkdownView>{truncate(node.agent_response.text)}</MarkdownView>
             ) : node.status === "running" ? (
               <span className="inline-flex items-center gap-1 text-teal-600">
                 <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-teal-400" />
@@ -336,7 +336,7 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
           <div className="text-[10px] text-rose-700 mb-0.5">{t("chatflow.pack_summary")}</div>
           <div className="prose prose-sm max-w-none text-xs text-gray-900 break-words leading-snug">
             {node.agent_response.text ? (
-              <Markdown>{truncate(node.agent_response.text)}</Markdown>
+              <MarkdownView>{truncate(node.agent_response.text)}</MarkdownView>
             ) : node.status === "running" ? (
               <span className="inline-flex items-center gap-1 text-rose-600">
                 <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-rose-400" />
@@ -352,7 +352,7 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
           <div className="text-[10px] text-gray-500 mb-0.5">{t("chatflow.agent")}</div>
           <div className="prose prose-sm max-w-none text-xs text-gray-900 break-words leading-snug">
             {node.agent_response.text ? (
-              <Markdown>{truncate(node.agent_response.text)}</Markdown>
+              <MarkdownView>{truncate(node.agent_response.text)}</MarkdownView>
             ) : (
               <span className="italic text-gray-400">—</span>
             )}
@@ -364,7 +364,7 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
             <div className="text-[10px] text-gray-500 mb-0.5">{t("chatflow.user")}</div>
             <div className="prose prose-sm max-w-none text-xs text-gray-900 break-words leading-snug">
               {node.user_message?.text ? (
-                <Markdown>{truncate(node.user_message.text)}</Markdown>
+                <MarkdownView>{truncate(node.user_message.text)}</MarkdownView>
               ) : (
                 <span className="italic text-gray-400">—</span>
               )}
@@ -377,7 +377,7 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
               {node.status === "running" ? (
                 livePreview ? (
                   <div data-testid="chatflow-streaming-preview" className="text-gray-700">
-                    <Markdown>{truncate(livePreview)}</Markdown>
+                    <MarkdownView>{truncate(livePreview)}</MarkdownView>
                     <span className="inline-block w-1 h-3 align-middle bg-yellow-400 animate-pulse ml-0.5" />
                   </div>
                 ) : (
@@ -387,7 +387,7 @@ export function ChatFlowNodeCard({ data }: NodeProps) {
                   </span>
                 )
               ) : node.agent_response.text ? (
-                <Markdown>{truncate(node.agent_response.text)}</Markdown>
+                <MarkdownView>{truncate(node.agent_response.text)}</MarkdownView>
               ) : (
                 <span className="italic text-gray-400">—</span>
               )}

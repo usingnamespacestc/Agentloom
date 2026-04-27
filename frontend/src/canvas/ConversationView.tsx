@@ -26,7 +26,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as RPointerEvent } from "react";
-import Markdown from "react-markdown";
+import MarkdownView from "../components/MarkdownView";
 import { useTranslation } from "react-i18next";
 
 import { resolvePath } from "./pathUtils";
@@ -911,7 +911,7 @@ function ThinkingBlock({ text, label }: { text: string; label: string }) {
       </button>
       {open && (
         <div className="prose prose-sm mt-1 max-w-none rounded border border-gray-100 bg-gray-50 px-3 py-2 text-[12px] text-gray-500 break-words">
-          <Markdown>{text}</Markdown>
+          <MarkdownView>{text}</MarkdownView>
         </div>
       )}
     </div>
@@ -1103,7 +1103,7 @@ function PackMessageBubble({
         </span>
       </div>
       <div className="prose prose-sm max-w-none text-[13px] leading-relaxed text-gray-700 break-words">
-        <Markdown>{summary}</Markdown>
+        <MarkdownView>{summary}</MarkdownView>
       </div>
       <MetaFooter
         nodeId={showNodeId ? node.id : null}
@@ -1147,7 +1147,7 @@ function PreservedSegment({ messages }: { messages: WireMessage[] }) {
               [{m.role}]
             </span>
             <span className="prose prose-sm max-w-none inline">
-              <Markdown>{m.content || ""}</Markdown>
+              <MarkdownView>{m.content || ""}</MarkdownView>
             </span>
           </div>
         ))}
@@ -1214,7 +1214,7 @@ function ChatMessageBubble({
         <div className="mb-2 flex items-end justify-end gap-1">
           <CopyTextButton text={userText} />
           <div className="prose prose-sm prose-invert max-w-[85%] rounded-2xl bg-blue-500 px-3 py-2 text-[13px] text-white break-words">
-            <Markdown>{userText}</Markdown>
+            <MarkdownView>{userText}</MarkdownView>
           </div>
         </div>
       )}
@@ -1226,7 +1226,7 @@ function ChatMessageBubble({
           "prose prose-sm max-w-none text-[13px] leading-relaxed break-words",
           isFailed ? "text-red-600" : "text-gray-800",
         ].join(" ")}>
-          <Markdown>{agentText}</Markdown>
+          <MarkdownView>{agentText}</MarkdownView>
         </div>
       )}
       {isRunning && !agentText && (
@@ -1329,7 +1329,7 @@ function PreservedWireBubble({ msg }: { msg: WireMessage }) {
       <div className="mb-2 flex items-end justify-end gap-1">
         <CopyTextButton text={msg.content} />
         <div className="prose prose-sm prose-invert max-w-[85%] rounded-2xl bg-blue-500 px-3 py-2 text-[13px] text-white break-words">
-          <Markdown>{msg.content}</Markdown>
+          <MarkdownView>{msg.content}</MarkdownView>
         </div>
       </div>
     );
@@ -1337,7 +1337,7 @@ function PreservedWireBubble({ msg }: { msg: WireMessage }) {
   if (msg.role === "assistant") {
     return (
       <div className="mb-2 prose prose-sm max-w-none text-[13px] leading-relaxed text-gray-800 break-words">
-        <Markdown>{msg.content}</Markdown>
+        <MarkdownView>{msg.content}</MarkdownView>
       </div>
     );
   }
@@ -1385,7 +1385,7 @@ function CompactMessageBubble({
       </div>
       {summary ? (
         <div className="prose prose-sm max-w-none text-[13px] leading-relaxed text-gray-800 break-words">
-          <Markdown>{summary}</Markdown>
+          <MarkdownView>{summary}</MarkdownView>
         </div>
       ) : isRunning ? (
         <div className="flex items-center gap-1.5 text-[12px] text-teal-600">
@@ -1525,7 +1525,7 @@ function MergeMessageBubble({
         )}
         {merged ? (
           <div className="prose prose-sm max-w-none text-[13px] leading-relaxed text-gray-800 break-words">
-            <Markdown>{merged}</Markdown>
+            <MarkdownView>{merged}</MarkdownView>
           </div>
         ) : isRunning ? (
           <div className="flex items-center gap-1.5 text-[12px] text-violet-600">
@@ -1867,7 +1867,7 @@ function WorkFlowIOBubble({
                 isFailed ? "text-red-600" : "text-gray-800",
               ].join(" ")}
             >
-              <Markdown>{node.output_message.content}</Markdown>
+              <MarkdownView>{node.output_message.content}</MarkdownView>
             </div>
           ) : isRunning ? (
             streamingDelta ? (
@@ -2007,7 +2007,7 @@ function JudgeBubbleBody({
 
       {verdict?.user_message && (
         <div className="prose prose-sm mb-1 max-w-none text-[13px] leading-relaxed text-gray-800 break-words">
-          <Markdown>{verdict.user_message}</Markdown>
+          <MarkdownView>{verdict.user_message}</MarkdownView>
         </div>
       )}
 
@@ -2047,14 +2047,14 @@ function JudgeBubbleBody({
             merged response
           </div>
           <div className="prose prose-sm max-w-none text-[13px] leading-relaxed break-words text-gray-700">
-            <Markdown>{verdict.merged_response}</Markdown>
+            <MarkdownView>{verdict.merged_response}</MarkdownView>
           </div>
         </div>
       )}
 
       {node.output_message?.content && (
         <div className="prose prose-sm max-w-none text-[13px] leading-relaxed break-words text-gray-700">
-          <Markdown>{node.output_message.content}</Markdown>
+          <MarkdownView>{node.output_message.content}</MarkdownView>
         </div>
       )}
 
@@ -2371,7 +2371,7 @@ function MessageRow({ message }: { message: WireMessage }) {
         <div className="border-t border-gray-100 px-1.5 py-1">
           {hasContent && (
             <div className="prose prose-sm max-w-none whitespace-pre-wrap break-words text-[11px] text-gray-800">
-              <Markdown>{message.content}</Markdown>
+              <MarkdownView>{message.content}</MarkdownView>
             </div>
           )}
           {hasToolUses && (

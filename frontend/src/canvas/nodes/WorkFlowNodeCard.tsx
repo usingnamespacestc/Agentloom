@@ -11,7 +11,7 @@
 
 import { useState } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import Markdown from "react-markdown";
+import MarkdownView from "../../components/MarkdownView";
 import { useTranslation } from "react-i18next";
 
 import { StatusBadge } from "./StatusBadge";
@@ -141,11 +141,11 @@ function LlmCallBody({ node, maxCtx }: { node: WorkFlowNode; maxCtx: number | nu
       <div className="prose prose-sm max-w-none text-[11px] text-gray-800 break-words">
         {live ? (
           <div data-testid="streaming-preview">
-            <Markdown>{truncate(streamingDelta)}</Markdown>
+            <MarkdownView>{truncate(streamingDelta)}</MarkdownView>
             <span className="inline-block w-1 h-3 align-middle bg-sky-400 animate-pulse ml-0.5" />
           </div>
         ) : output ? (
-          <Markdown>{truncate(output)}</Markdown>
+          <MarkdownView>{truncate(output)}</MarkdownView>
         ) : (
           <span className="italic text-gray-400">—</span>
         )}
@@ -249,13 +249,13 @@ function JudgeCallBody({ node, maxCtx }: { node: WorkFlowNode; maxCtx: number | 
           data-testid="streaming-preview"
           className="prose prose-sm max-w-none text-[11px] text-gray-500 italic break-words"
         >
-          <Markdown>{truncate(streamingDelta, 80)}</Markdown>
+          <MarkdownView>{truncate(streamingDelta, 80)}</MarkdownView>
           <span className="inline-block w-1 h-3 align-middle bg-amber-500 animate-pulse ml-0.5" />
         </div>
       )}
       {!live && node.output_message?.content && !verdict && (
         <div className="prose prose-sm max-w-none text-[11px] text-gray-500 italic break-words">
-          <Markdown>{truncate(node.output_message.content, 80)}</Markdown>
+          <MarkdownView>{truncate(node.output_message.content, 80)}</MarkdownView>
         </div>
       )}
       {node.usage && node.usage.total_tokens > 0 && (
@@ -331,7 +331,7 @@ function ToolCallBody({ node }: { node: WorkFlowNode }) {
               result.is_error ? "text-red-700" : "text-gray-800",
             ].join(" ")}
           >
-            <Markdown>{truncate(result.content)}</Markdown>
+            <MarkdownView>{truncate(result.content)}</MarkdownView>
           </div>
         </div>
       )}
