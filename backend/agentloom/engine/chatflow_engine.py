@@ -590,6 +590,75 @@ _DEFAULT_RUNTIME_NOTE_EN = (
 )
 
 
+_DRILL_DOWN_NUDGE_ZH = (
+    "[历史回查提示]\n"
+    "本对话存在 compact / pack 节点（早期内容已被压缩或打包成摘要）。"
+    "当用户询问被压缩/打包内容里的**具体细节**——确切数字、特定名称、"
+    "原话引用、参数设置、之前提到过的事实——**请调用 ``get_node_context``"
+    " 工具按节点 id 取回原文**。pack/compact 摘要里以 ``[node:xxx]`` "
+    "或 ``(节点: xxx)`` 形式注明的就是源节点 id，把它当作 ``node_id``"
+    " 参数传入。\n"
+    "- 不要凭对摘要的记忆作答——摘要是 lossy 的，可能丢失你需要回答的"
+    "具体细节。\n"
+    "- 不要因为节点 id 看起来像内部技术细节就回避使用——这是引擎为你"
+    "提供的合法检索手段。\n"
+    "- 一次取回单个节点；如果不确定哪个节点含答案，先按 summary 提到的"
+    "节点 id 取回最相关那个，再决定是否需要更多。"
+)
+
+_DRILL_DOWN_NUDGE_EN = (
+    "[Historical retrieval hint]\n"
+    "This conversation contains compact / pack ChatNodes — earlier "
+    "content has been condensed into summaries. When the user asks "
+    "about **specific details** within the compacted/packed range — "
+    "exact numbers, specific names, verbatim quotes, parameter "
+    "settings, facts mentioned earlier — **call ``get_node_context`` "
+    "with the source node id**. The pack/compact summary cites source "
+    "ids in the form ``[node:xxx]`` or ``(nodes: xxx)``; pass that id "
+    "verbatim as the ``node_id`` argument.\n"
+    "- Do NOT answer from your memory of the summary alone — summaries "
+    "are lossy and may drop the specific detail the user is asking for.\n"
+    "- Do NOT avoid using node ids because they look like internal "
+    "implementation details — they are the engine's intended retrieval "
+    "handle for your use.\n"
+    "- Fetch one node at a time; if you're unsure which node holds the "
+    "answer, retrieve the most relevant one cited in the summary first, "
+    "then decide if you need more."
+)
+
+
+def _drill_down_nudge_if_needed(chatflow, language: str | None) -> str:
+    """Return the drill-down recall nudge IFF this chatflow has at
+    least one compact / pack ChatNode. Skips silently otherwise so we
+    don't bloat every chatflow's system prompt with irrelevant
+    instructions.
+
+    Why a separate hint vs cramming into the default runtime note:
+    most chatflows will never accumulate enough turns to trigger
+    compact/pack — adding the recall nudge unconditionally wastes
+    ~150 tokens on every LLM call across the workflow. Keying it on
+    "has compact/pack ancestor in the chat-layer DAG" makes it pay
+    its own way: appears only when the situation it addresses
+    actually exists.
+
+    Trigger: any ChatNode with non-null ``compact_snapshot`` or
+    ``pack_snapshot``. Independent of whether the *current* turn is
+    a child of one — even if the user happens to be on a sibling
+    branch right now, switching back to the compacted branch later
+    in the conversation should keep the hint active.
+    """
+    if not chatflow:
+        return ""
+    has_compact_or_pack = any(
+        n.compact_snapshot is not None or n.pack_snapshot is not None
+        for n in chatflow.nodes.values()
+    )
+    if not has_compact_or_pack:
+        return ""
+    is_zh = (language or "").lower().startswith("zh")
+    return _DRILL_DOWN_NUDGE_ZH if is_zh else _DRILL_DOWN_NUDGE_EN
+
+
 def _render_runtime_system_info(
     language: str,
     disabled_tool_names: list[str] | frozenset[str],
@@ -893,7 +962,17 @@ class ChatFlowEngine:
             static = _DEFAULT_RUNTIME_NOTE_ZH if is_zh else _DEFAULT_RUNTIME_NOTE_EN
         static = (static or "").strip()
         sysinfo = _render_runtime_system_info(lang, chatflow.disabled_tool_names)
-        parts = [p for p in (static, sysinfo) if p]
+        # Drill-down nudge: when this chatflow already has compact / pack
+        # ChatNodes in it, downstream turns may need to retrieve verbatim
+        # content from the compacted/packed ranges. Without an explicit
+        # instruction, weak models tend to answer from the summary alone
+        # (observed 2026-04-26 night: qwen36 in pack demo gave 0
+        # ``get_node_context`` calls when asked for an earlier specific
+        # detail). Inject the prescriptive hint only when the trigger
+        # condition is met — we don't want to bloat every chatflow's
+        # system prompt unconditionally.
+        drill_hint = _drill_down_nudge_if_needed(chatflow, lang)
+        parts = [p for p in (static, sysinfo, drill_hint) if p]
         return "\n\n".join(parts)
 
     # ------------------------------------------------------------------ registry
