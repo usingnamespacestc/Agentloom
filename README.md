@@ -19,8 +19,8 @@
 | **核心能力** | ChatFlow DAG（fork/merge/compact/pack/fold）+ 嵌套 WorkFlow + 递归 planner + 三段式 judge + MemoryBoard + 跨 chatflow 数据访问门禁 |
 | **执行模式** | `native_react`（直连 ReAct）/ `semi_auto`（一次性 plan）/ `auto_plan`（递归 planner + judge 驱动重试），ChatFlow 默认 + ChatNode 覆盖 |
 | **WorkNode 类型** | `llm_call` · `tool_call` · `judge_call` (pre/during/post) · `sub_agent_delegation` · `compact` · `merge` · `pack` · `brief` |
-| **测试覆盖** | 后端 **783** unit + integration / 4 skipped；前端 **78** 单测；全部跑过 |
-| **最近里程碑** | **M7.5 capability model**（2026-04-26 · 8 PR + 1 hotfix 单日 ship · ~1900 行 diff · ~100 新测试） |
+| **测试覆盖** | 后端 **797** unit + integration（其中 **607** unit）/ 4 skipped；前端 **78** 单测；全部跑过 |
+| **最近里程碑** | **M7.5 capability model**（2026-04-26 · 8 PR + 1 hotfix 单日 ship · ~1900 行 diff · ~100 新测试）+ **post-ship 修复 8 commit**（2026-04-26 night → 2026-04-27：auto_plan 死锁修复 / capability_request 反馈闭环履约 / drill-down nudge / 跨 chatflow 工具污染 fix / etc.） |
 | **τ-bench retail 0-9 (NATIVE_REACT) baseline** | **8/10 = 80% pass^1**（agent: ark-code-latest via 火山引擎 coding plan lite · user simulator: doubao-seed-2-0-pro-260215 · 全程 ~27 min · 2 fail 归因到 user simulator 演 "private person" persona 拒验证而非 agent 错） |
 | **provider 支持** | OpenAI 兼容（Volcengine / Ark / Ollama / OpenAI）+ Anthropic 原生 + MCP 客户端 |
 | **i18n** | en-US + zh-CN 全套 fixture + 引擎熔断消息 |
@@ -113,6 +113,33 @@ Agentloom 的策略是**两条路径同时支持，由 ChatFlow 默认 + ChatNod
 - **cross-provider schema bug 是单测覆盖不到的——只有真 LLM 跑才暴露**：OpenAI/volcengine/ark 都接受 top-level `oneOf`，只有 Anthropic 拒。M7.5 PR 6 hotfix 同时新增 2 条单测把这个不变量钉死（`test_submit_plan_tool_use.py::test_tool_def_parameters_no_top_level_oneof_anthropic_compat`）
 - **设计文档反哺**：post-ship 把实测发现写回 §10.1.4 / §10.3 / §10.5——记录"什么预测应验"和"什么 emergent property 没想到"。设计文档不是定稿后封存的合同，而是经验回路里活的部分
 - **小步快跑**：8 个 PR 按依赖图拆分，每个独立可 revert + 自带测试。这种纪律来自之前一次大改踩的坑（memory `feedback_small_steps_strategy.md`）
+
+---
+
+## 🔧 Post-ship 修复 + 履约（commit `305b04a..fdfb1f2`）
+
+M7.5 主链 ship 后跑实负载暴露了一批**问题域** + **设计文档承诺但没履约的 follow-up**，按 audit 优先级逐项闭环：
+
+| Commit | 类别 | 修了什么 |
+|---|---|---|
+| `fdfb1f2` | 🔴 auto_plan 死锁 | **`submit_plan` leak 修复**：`_spawn_tool_loop_children` 不再把引擎合成的 `submit_plan`/`judge_verdict` 当真工具 spawn tool_call WorkNode。之前 auto_plan 每个 turn 都因这个 bug halt 在 planner 阶段，agent 误报"调用了不存在的工具" |
+| `2f9998f` | 🟠 履约 PR 5 | **capability_request 完整反馈闭环**：worker emit → worker_judge 读 `worker.capability_request` 写 `JudgeVerdict.capability_escalation` → 引擎 widen `inheritable_tools` + spawn 新 planner。PR 5 commit msg 自己写了"consumers (re-plan / planner reset) land in a follow-up PR"，这次补完 |
+| `458e5ee` | 🟡 drill-down 可靠性 | **系统层 nudge**：`get_node_context.description` 改 prescriptive；`_drill_down_nudge_if_needed` 在 chatflow 含 compact/pack 时自动注入 recall hint。弱模型 drill-down 触发率提升 |
+| `bdedbdd` | 🟠 工具污染 | **foreign tau-bench tool filter**：`_foreign_tau_tools` 排除其它 session 的 `tau_*` 进自己的 catalog/disabled。M7.5 showcase chatflow 跑时被并发 tau session 工具污染的 bug 闭环 |
+| `d3dd77a` | 🟡 可观测性 | **`input_messages = LLM 实际看到的内容`**：之前 fixture 预设 `input_messages` 的节点（judge / planner / brief）saved 是 pre-envelope 干净版，跟 wire 实际发送的不一致。canvas / inbound_context preview 现在跟 LLM 视角对齐 |
+| `264ad2d` | 🟡 UX | **markdown GFM tables + inline HTML**：之前 `react-markdown` 默认只支持 CommonMark，模型常用的 `\| col \| col \|` 表格 + `<br>` 内嵌 HTML 不渲染。装 `remark-gfm + rehype-raw + rehype-sanitize` 一处统一配 |
+| `ff72eec` | 🟡 UX | **拖动位置 in-app navigation 持久化**：之前只在 pagehide/beforeunload 时 flush。React 内 unmount（drag → ⤢ 进 WorkFlow → 回来）不触发任何 page 事件 → debounce timer 跟着 GC → PATCH 永远发不出。加 unmount cleanup flush |
+| `305b04a` | 🟢 benchmark infra | **τ-bench API + CLI 加 `execution_mode` + agent_model 同步覆盖**：让外部 benchmark 也能跑 auto_plan，不只是 native_react |
+
+### 还在 backlog 的（已识别但未履约）
+
+后续审计还发现几条"半截功能"，按优先级排在 [`memory/`](.) 各个 backlog memo 里：
+
+- 🟠 `get_node_context.cross_chatflow` 虚拟 cap 定义了但**从未被授予过** → PR 8 跨 chatflow 路径在生产代码里实际是 deadcode
+- 🟡 判官节点自己的 `effective_tools` 分配（design §4.1 deferred）→ PR 7 recon DAG 的真正 gate 永远过不了
+- 🟡 `cognitive_react_enabled = False` 默认 + 仅 `pre` 一类 spawn 路径 → 整条 ReAct DAG 在生产里 dormant
+- 🟢 τ-bench 工具 first-class 化（当前 mitigation `bdedbdd` 通了，根本架构 hack 等长期决策）
+- 🟡 inheritable_tools 跨 turn 不累积（multi-turn auto_plan 每 turn 独立 fresh extract，丢前一 turn 工具）
 
 ---
 
