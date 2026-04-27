@@ -1556,7 +1556,7 @@ class WorkflowEngine:
         # will pick up the newly-planned children on its next pass.
         if self._tools is not None and node.output_message.tool_uses:
             _assert_tool_loop_budget(workflow, node, self._effective_budget)
-            _spawn_tool_loop_children(workflow, node)
+            _spawn_tool_loop_children(workflow, node, self._tools)
 
     # --------------------------------------------------------------- compact
 
@@ -2620,7 +2620,11 @@ def _effective_tool_loop_budget(
     return chatflow_budget
 
 
-def _spawn_tool_loop_children(workflow: WorkFlow, parent_llm: WorkFlowNode) -> None:
+def _spawn_tool_loop_children(
+    workflow: WorkFlow,
+    parent_llm: WorkFlowNode,
+    registry: ToolRegistry | None = None,
+) -> None:
     """Given an llm_call that just emitted tool_uses, append:
 
     1. One ``tool_call`` WorkFlowNode per tool_use, all as children of
@@ -2632,10 +2636,45 @@ def _spawn_tool_loop_children(workflow: WorkFlow, parent_llm: WorkFlowNode) -> N
 
     Nothing here runs the children — the outer execute() loop picks
     them up on the next iteration.
+
+    **Engine-synthetic tool_uses are skipped**: M7.5 PR 6 introduced
+    ``submit_plan`` (planner ``forced_tool_name``) and reused
+    ``judge_verdict`` (judge ``override_tools``) as schema-shaped
+    sentinels that drive parsing in ``_after_planner`` /
+    ``_run_judge_call``. They are NOT registered in the tool registry
+    and must NOT be dispatched as real tool_calls — doing so used to
+    spawn a ``tool_call`` WorkNode whose ``_run_tool_call`` failed
+    with "unknown tool", caching ``ToolResult(is_error=True)``,
+    looping the worker until the tool-loop budget exhausted, finally
+    halting with the user-visible message
+    "调用了不存在的工具`submit_plan`". Observed end-to-end on
+    chatflow ``019dcca4`` 2026-04-26 night across all 6 turns of an
+    auto_plan demo run.
+
+    Filter: keep only tool_uses whose name is in the registry. When
+    the registry is ``None`` (bare tests / pre-M3 callers) all
+    tool_uses are kept — preserves legacy behavior.
+
+    When EVERY tool_use is synthetic (typical for planner: only one
+    ``submit_plan`` call), spawn nothing — no tool_call children, no
+    follow-up llm_call. The engine's ``_after_planner`` hook handles
+    the planner's tool_use directly via ``parse_planner_from_tool_args``.
     """
     assert parent_llm.output_message is not None
+    real_tool_uses = [
+        tu
+        for tu in parent_llm.output_message.tool_uses
+        if registry is None or registry.has(tu.name)
+    ]
+    if not real_tool_uses:
+        # All tool_uses are engine-synthetic (submit_plan / judge_verdict).
+        # No registry dispatch; no follow-up llm_call. Engine's own
+        # ``_after_*`` hooks consume the args directly from the parent's
+        # output_message.
+        return
+
     tool_call_ids: list[str] = []
-    for tu in parent_llm.output_message.tool_uses:
+    for tu in real_tool_uses:
         tc = WorkFlowNode(
             step_kind=StepKind.TOOL_CALL,
             parent_ids=[parent_llm.id],
