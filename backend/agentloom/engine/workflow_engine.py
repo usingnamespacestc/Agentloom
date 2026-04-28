@@ -942,6 +942,14 @@ class WorkflowEngine:
         #: context still produces a sensible brief.
         self._effective_max_produced_tags: int = 10
         self._effective_max_consumed_tags: int = 8
+        #: M7.5 PR 8 — workspace-grant virtual capabilities unioned into
+        #: every tool call's ``caller_effective_tools``. Plumbed in via
+        #: ``execute(chatflow_extra_capabilities=...)`` from
+        #: ChatFlowEngine, which derives it from ``WorkspaceSettings``
+        #: (today: ``allow_cross_chatflow_lookup`` toggles
+        #: ``get_node_context.cross_chatflow``). Empty default keeps
+        #: bare-engine tests at the pre-M7.5 boundary.
+        self._effective_extra_capabilities: frozenset[str] = frozenset()
 
     async def execute(
         self,
@@ -963,6 +971,7 @@ class WorkflowEngine:
         chatflow_id: str | None = None,
         post_node_hook: PostNodeHook | None = None,
         disabled_tool_names: frozenset[str] | None = None,
+        chatflow_extra_capabilities: frozenset[str] | None = None,
     ) -> WorkFlow:
         """Run every planned node in topological order. Mutates and
         returns the workflow.
@@ -1036,6 +1045,9 @@ class WorkflowEngine:
         self._revise_count = 0
         self._post_node_hook = post_node_hook
         self._disabled_tool_names = disabled_tool_names or frozenset()
+        self._effective_extra_capabilities = (
+            chatflow_extra_capabilities or frozenset()
+        )
         self._chatflow_id = chatflow_id
         broken: set[str] = set()
         done: set[str] = set()
@@ -2169,6 +2181,7 @@ class WorkflowEngine:
                 chatflow_id=self._chatflow_id,
                 post_node_hook=self._post_node_hook,
                 disabled_tool_names=self._disabled_tool_names,
+                chatflow_extra_capabilities=self._effective_extra_capabilities,
             )
         finally:
             # execute() itself publishes ``workflow.completed`` on
@@ -2238,8 +2251,16 @@ class WorkflowEngine:
         prior_caller_effective_tools = self._tool_ctx.caller_effective_tools
         try:
             self._tool_ctx.caller_chatflow_id = self._chatflow_id
+            # Union per-node allocation with workspace-granted virtual
+            # capabilities (e.g. ``get_node_context.cross_chatflow``)
+            # so a workspace-level trust toggle can authorize gates
+            # that no production path writes onto ``effective_tools``
+            # yet. The whitelist filter in ``resolve_for_node`` already
+            # strips dotted virtual entries, so unioning them in here
+            # cannot accidentally widen real-tool visibility.
             self._tool_ctx.caller_effective_tools = (
                 _resolve_caller_effective_tools(workflow, node)
+                | self._effective_extra_capabilities
             )
             result = await self._tools.execute(
                 node.tool_name,

@@ -81,6 +81,20 @@ class WorkspaceSettings(BaseModel):
     #: timing/speed, WorkNode model badges) via the global Settings →
     #: Canvas tab.
     canvas_prefs: CanvasPrefs = Field(default_factory=CanvasPrefs)
+    #: Workspace-wide trust toggle for the M7.5 PR 8 cross-chatflow
+    #: read scope. ``get_node_context(scope='cross_chatflow')`` is
+    #: gated by the virtual capability ``get_node_context.cross_chatflow``
+    #: on the calling WorkNode's effective_tools — but no production
+    #: path writes that cap. This setting is the production grant
+    #: path: when ``True`` the engine adds the virtual cap to every
+    #: tool call's caller context within the workspace, so
+    #: ``get_node_context`` honors cross-chatflow lookups. Default
+    #: ``False`` keeps the pre-PR-8 boundary (a chatflow's agents
+    #: can only read inside their own chatflow). The toggle is
+    #: workspace-scoped because the trust boundary is the tenant —
+    #: per-task gating belongs to the not-yet-activated effective_tools
+    #: whitelist instead.
+    allow_cross_chatflow_lookup: bool = False
 
     def state_for(self, tool_name: str) -> ToolState:
         """Return the stored state, falling back to the built-in

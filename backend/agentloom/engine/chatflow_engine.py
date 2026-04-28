@@ -106,6 +106,7 @@ from agentloom.schemas.workflow import WireMessage
 from agentloom.templates.instantiate import instantiate_fixture
 from agentloom.templates.loader import fragments_as_texts, load_fixtures
 from agentloom.tools.base import ToolContext, ToolRegistry, accessed_scope
+from agentloom.tools.node_context import CROSS_CHATFLOW_CAPABILITY
 
 log = logging.getLogger(__name__)
 
@@ -1732,6 +1733,7 @@ class ChatFlowEngine:
                 chatflow_max_consumed_tags=chatflow.max_consumed_tags,
                 chatflow_id=chatflow.id,
                 disabled_tool_names=effective_disabled,
+                chatflow_extra_capabilities=self._resolve_extra_capabilities(),
             )
         except Exception as exc:  # noqa: BLE001 — engine boundary
             log.exception("pack ChatNode %s inner workflow raised", pack_id)
@@ -1967,6 +1969,7 @@ class ChatFlowEngine:
                 chatflow_max_consumed_tags=chatflow.max_consumed_tags,
                 chatflow_id=chatflow.id,
                 disabled_tool_names=effective_disabled,
+                chatflow_extra_capabilities=self._resolve_extra_capabilities(),
             )
         except Exception as exc:  # noqa: BLE001 — engine boundary
             log.exception("compact ChatNode %s inner workflow raised", compact_id)
@@ -2086,6 +2089,7 @@ class ChatFlowEngine:
             # No Tier 1 recursion — we're already the pre-compact step.
             chatflow_compact_trigger_pct=None,
             disabled_tool_names=disabled_tool_names,
+            chatflow_extra_capabilities=self._resolve_extra_capabilities(),
         )
         summary = (
             (inner.output_message.content or "").strip()
@@ -2315,6 +2319,7 @@ class ChatFlowEngine:
                 chatflow_ground_ratio_grace_nodes=20,
                 chatflow_compact_trigger_pct=None,
                 disabled_tool_names=effective_disabled,
+                chatflow_extra_capabilities=self._resolve_extra_capabilities(),
             )
             joint_raw = (
                 (joint_inner.output_message.content or "").strip()
@@ -2558,6 +2563,7 @@ class ChatFlowEngine:
                 chatflow_max_consumed_tags=chatflow.max_consumed_tags,
                 chatflow_id=chatflow.id,
                 disabled_tool_names=effective_disabled,
+                chatflow_extra_capabilities=self._resolve_extra_capabilities(),
             )
         except Exception as exc:  # noqa: BLE001 — engine boundary
             log.exception("merge ChatNode %s inner workflow raised", merge_id)
@@ -3437,6 +3443,27 @@ class ChatFlowEngine:
             if t.name.startswith("tau_") and not t.name.startswith(own_prefix)
         }
         return frozenset(foreign)
+
+    def _resolve_extra_capabilities(self) -> frozenset[str]:
+        """Translate workspace settings into the virtual-capability set
+        the engine unions into every tool call's caller context.
+
+        Today the only entry is the M7.5 PR 8 cross-chatflow read
+        scope: when ``WorkspaceSettings.allow_cross_chatflow_lookup``
+        is ``True`` the engine grants ``get_node_context.cross_chatflow``
+        to every WorkNode in the workspace, so ``get_node_context``
+        with ``scope='cross_chatflow'`` is admitted (otherwise that
+        scope is permanently denied because no production path writes
+        the cap onto a node's ``effective_tools``). Default ``False``
+        keeps the pre-PR-8 boundary.
+        """
+        ws_settings = tenancy_runtime.get_settings(
+            self._inner._tool_ctx.workspace_id
+        )
+        caps: set[str] = set()
+        if ws_settings.allow_cross_chatflow_lookup:
+            caps.add(CROSS_CHATFLOW_CAPABILITY)
+        return frozenset(caps)
 
     def _resolve_tool_catalog(self, chatflow: ChatFlow) -> str:
         """Render the M7.5 inheritable-tool catalog injected before
@@ -5078,6 +5105,7 @@ class ChatFlowEngine:
                     else self._build_post_node_hook(chat_node, chatflow)
                 ),
                 disabled_tool_names=effective_disabled,
+                chatflow_extra_capabilities=self._resolve_extra_capabilities(),
             )
         except Exception as exc:  # noqa: BLE001 — engine boundary
             log.exception("chat node %s inner workflow raised", node_id)
@@ -5125,6 +5153,7 @@ class ChatFlowEngine:
                 chatflow_max_consumed_tags=chatflow.max_consumed_tags,
                         chatflow_id=chatflow.id,
                         disabled_tool_names=effective_disabled,
+                        chatflow_extra_capabilities=self._resolve_extra_capabilities(),
                     )
                 except Exception as exc:  # noqa: BLE001 — engine boundary
                     log.exception(
