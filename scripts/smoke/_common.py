@@ -165,14 +165,21 @@ def _model_ref() -> dict[str, str]:
 
 
 @asynccontextmanager
-async def backend_client(timeout: float = 600.0):
+async def backend_client(timeout: float = 1800.0):
     """Async httpx client preconfigured for the smoke backend.
 
-    Default timeout 600s because auto_plan turns with recon DAG +
-    drill-down legitimately take 3-7 minutes on volcengine free tier
-    (combo pipeline has been observed at ~7 min to phase 3, then
-    another auto_plan turn for phase 4). Per-script overrides allow
-    quick scripts to keep tighter bounds.
+    Default timeout 1800s (30 min) — sized for the slowest realistic
+    smoke turn. Volcengine free tier was ~600s for auto_plan + recon
+    + drill-down (combo phase 4 ~454s); local llama.cpp qwen36-27b
+    q4km observations from the 2026-04-29 batch put a single
+    auto_plan turn at 17 min in the worst case (combo phase 4 over
+    a compacted ancestor). Issue #2 was caught when the prior
+    600s default tripped on qwen36; bumping to 1800s leaves
+    headroom for slower models without changing the volcengine path
+    (whose 7-min worst case is still well inside).
+
+    Per-script overrides via ``backend_client(timeout=...)`` for
+    quick scripts that want tighter bounds.
     """
     async with httpx.AsyncClient(
         base_url=BACKEND_URL, timeout=timeout

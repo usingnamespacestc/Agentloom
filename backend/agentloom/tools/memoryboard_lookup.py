@@ -201,10 +201,27 @@ class MemoryBoardLookupTool(Tool):
         expand_chain = bool(args.get("expand_chain", False))
         since_str = _str_or_none(args, "since")
 
+        # Auto-fill chatflow_id from caller context when the LLM didn't
+        # supply it. Issue #3 from the 2026-04-29 qwen36 batch: workers
+        # spawned inside sub-WorkFlows have no way to know the enclosing
+        # chatflow's id (it's an engine concern, not user-visible), so
+        # without this fallback every sub-WF lookup either errored
+        # ("at least one of 'chatflow_id' or 'workflow_id' must be
+        # provided") or the worker invented a description-style
+        # placeholder. The engine already plumbs the top-level
+        # chatflow id into ``ctx.caller_chatflow_id`` (workflow_engine
+        # ``_run_tool_call``), so this fallback is the natural
+        # default — workers can omit the arg and lookup just works.
+        if not chatflow_id and not workflow_id:
+            inferred = ctx.caller_chatflow_id
+            if inferred:
+                chatflow_id = inferred
+
         if not chatflow_id and not workflow_id:
             raise ToolError(
                 "memoryboard_lookup: at least one of 'chatflow_id' or "
-                "'workflow_id' must be provided"
+                "'workflow_id' must be provided (and no caller context "
+                "was available to infer it)"
             )
 
         if scope is not None and scope not in _VALID_SCOPES:

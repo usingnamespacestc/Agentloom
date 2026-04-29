@@ -75,6 +75,22 @@ plan:
                   note like "call ``get_node_context(node_id=<id>)``
                   to retrieve the full text of this node." Listing
                   multiple ids is fine.
+                - **Node ids must be the real UUID-style strings**
+                  (e.g. ``019dda21-b350-7863-94cb-05f5d0894299``).
+                  Description-style placeholders are forbidden:
+                    ✗ ``(nodes: the node containing the ecosystem
+                       analysis)`` — this is a description, not an
+                       id. The worker will pass that string to the
+                       tool verbatim and the lookup will never
+                       resolve.
+                    ✗ ``(节点: the earlier one about X)`` — same.
+                    ✓ ``(节点: 019dda21-...)`` — real id,
+                       retrievable.
+                  If the summary doesn't give you a concrete id,
+                  **do not invent a description in its place**;
+                  prefer writing ``missing_inputs: ["needs node id
+                  for prior X"]`` with ``feasibility: risky`` so
+                  the downstream worker knows the chain is broken.
                 - Do **NOT** mark ``feasibility: "infeasible"`` just
                   because the full text of a cited material isn't
                   visible in the current transcript, and do **NOT**
