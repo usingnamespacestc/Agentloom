@@ -48,7 +48,9 @@
       "worker": "执行",
       "worker_judge": "执行评判",
       "post_judge": "后置评判"
-    }
+    },
+    "recon_label": "勘察",
+    "recon_hint": "认知 ReAct DAG（PR 7）：本节点属于判官发起的只读勘察链路——要么是判官在下结论前为核实状态而 dispatch 的 tool_call，要么是消费完勘察结果后重跑的 follow-up judge。跟常规 worker 的 tool_call 在视觉上区分。"
   },
   "chatflow": {
     "new": "新建对话",

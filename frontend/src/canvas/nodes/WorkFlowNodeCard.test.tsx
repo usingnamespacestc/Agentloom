@@ -45,13 +45,17 @@ function buildWorkNode(overrides: Partial<WorkFlowNode> = {}): WorkFlowNode {
   } as WorkFlowNode;
 }
 
-function renderCard(node: WorkFlowNode) {
+function renderCard(
+  node: WorkFlowNode,
+  extras: Partial<WorkFlowNodeData> = {},
+) {
   const data: WorkFlowNodeData = {
     node,
     isSelected: false,
     isRoot: true,
     isLeaf: true,
     maxContextTokens: null,
+    ...extras,
   };
   // WorkFlowNodeCard uses @xyflow/react's <Handle>, which needs a
   // ReactFlowProvider somewhere in the tree to avoid a store error.
@@ -102,6 +106,37 @@ describe("WorkFlowNodeCard role styling", () => {
     expect(card.className).toContain("bg-sky-50");
     // No role badge is rendered for null-role nodes.
     expect(screen.queryByTestId(/^role-badge-/)).toBeNull();
+  });
+});
+
+describe("WorkFlowNodeCard recon badge", () => {
+  it("renders the recon badge when isRecon is true", () => {
+    // Visual signal for the M7.5 PR 7 cognitive ReAct DAG path —
+    // a tool_call dispatched by a judge for state verification, or
+    // the follow-up judge that re-runs with the recon results in
+    // context. Detection happens in WorkFlowCanvas's layout pass
+    // (parent step_kind walk); the card just paints the flag.
+    renderCard(
+      buildWorkNode({ id: "n-recon", step_kind: "tool_call" }),
+      { isRecon: true },
+    );
+    expect(screen.getByTestId("recon-badge-n-recon")).toBeInTheDocument();
+  });
+
+  it("does not render the recon badge for regular tool_calls", () => {
+    renderCard(
+      buildWorkNode({ id: "n-regular", step_kind: "tool_call" }),
+      { isRecon: false },
+    );
+    expect(screen.queryByTestId(/^recon-badge-/)).toBeNull();
+  });
+
+  it("treats undefined isRecon as not-recon (backward compat)", () => {
+    // Existing call sites that don't yet pass isRecon must keep
+    // working — the badge defaults to off. Otherwise legacy data
+    // / pre-PR-7 chatflows would all paint as recon.
+    renderCard(buildWorkNode({ id: "n-undef", step_kind: "tool_call" }));
+    expect(screen.queryByTestId(/^recon-badge-/)).toBeNull();
   });
 });
 

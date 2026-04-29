@@ -554,6 +554,37 @@ export function buildWorkflowGraph(
     if (briefIds.has(n.id)) continue;
     for (const pid of n.parent_ids) hasChild.add(pid);
   }
+  // M7.5 PR 7 cognitive ReAct DAG visual signal. A WorkNode is
+  // "recon-related" when it sits on a recon spawn lineage:
+  // - a TOOL_CALL parented on a JUDGE_CALL is the recon's tool
+  //   invocation (workers' tool_calls always parent on a DRAFT,
+  //   so this detection is reliable structural evidence);
+  // - a JUDGE_CALL whose parent_ids contain any TOOL_CALL is the
+  //   recon follow-up (matches the recursion-fuse signal in
+  //   ``_cognitive_react_enabled_for_post`` — if it walks like
+  //   a follow-up, it is one).
+  // Computed once at layout time so the per-node card doesn't
+  // need to re-walk the DAG.
+  const reconIds = new Set<string>();
+  for (const n of Object.values(graphNodes)) {
+    if (n.step_kind === "tool_call") {
+      for (const pid of n.parent_ids) {
+        const parent = graphNodes[pid];
+        if (parent && parent.step_kind === "judge_call") {
+          reconIds.add(n.id);
+          break;
+        }
+      }
+    } else if (n.step_kind === "judge_call") {
+      for (const pid of n.parent_ids) {
+        const parent = graphNodes[pid];
+        if (parent && parent.step_kind === "tool_call") {
+          reconIds.add(n.id);
+          break;
+        }
+      }
+    }
+  }
   const rfNodes: Node<WorkFlowNodeData>[] = laidOut.map(({ node, position }) => {
     const isBrief = briefIds.has(node.id);
     // Brief positions are always derived from their source; skip any
@@ -573,6 +604,7 @@ export function buildWorkflowGraph(
         isSelected: node.id === selectedNodeId,
         isRoot: rootSet.has(node.id),
         isLeaf: !hasChild.has(node.id),
+        isRecon: reconIds.has(node.id),
         maxContextTokens: contextWindowByModel[ctxKey] ?? null,
       },
       selectable: false,

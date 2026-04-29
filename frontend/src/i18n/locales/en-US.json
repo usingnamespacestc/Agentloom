@@ -48,7 +48,9 @@
       "worker": "worker",
       "worker_judge": "work judge",
       "post_judge": "post-judge"
-    }
+    },
+    "recon_label": "recon",
+    "recon_hint": "Cognitive ReAct DAG (PR 7): this node is part of a judge's read-only recon — either a tool_call the judge dispatched to verify state before issuing a verdict, or the follow-up judge that consumed the recon results. Distinct from regular worker tool_calls."
   },
   "chatflow": {
     "new": "New chat",

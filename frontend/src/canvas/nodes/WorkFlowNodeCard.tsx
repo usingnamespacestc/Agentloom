@@ -27,6 +27,14 @@ export interface WorkFlowNodeData extends Record<string, unknown> {
   isSelected: boolean;
   isRoot: boolean;
   isLeaf: boolean;
+  /** M7.5 PR 7 — true when the node sits on a cognitive ReAct DAG
+   * recon lineage: either a TOOL_CALL whose parent is a JUDGE_CALL
+   * (recon spec dispatch) or a JUDGE_CALL whose parent is a
+   * TOOL_CALL (recon follow-up). Computed in WorkFlowCanvas's
+   * layout pass; used here to render a small "🔍 recon" badge so
+   * the recon path is visually distinct from regular worker
+   * tool_calls / judges. */
+  isRecon?: boolean;
   maxContextTokens: number | null;
 }
 
@@ -45,7 +53,7 @@ function truncate(text: string, n = 140): string {
 
 export function WorkFlowNodeCard({ data }: NodeProps) {
   const { t } = useTranslation();
-  const { node, isSelected, isRoot, isLeaf, maxContextTokens } =
+  const { node, isSelected, isRoot, isLeaf, isRecon, maxContextTokens } =
     data as WorkFlowNodeData;
   const isBrief = node.step_kind === "brief";
   // Role-based styling takes precedence over step_kind — see roleStyles.ts.
@@ -78,6 +86,15 @@ export function WorkFlowNodeCard({ data }: NodeProps) {
         <span className="font-semibold text-gray-700">
           {t(`node.kind.${node.step_kind}`)}
         </span>
+        {isRecon && (
+          <span
+            data-testid={`recon-badge-${node.id}`}
+            title={t("node.recon_hint")}
+            className="inline-flex items-center rounded bg-indigo-100 px-1 py-0.5 text-[9px] font-medium leading-none text-indigo-700"
+          >
+            {t("node.recon_label")}
+          </span>
+        )}
         {node.role && roleStyle && (
           <span
             data-testid={`role-badge-${node.role}`}
