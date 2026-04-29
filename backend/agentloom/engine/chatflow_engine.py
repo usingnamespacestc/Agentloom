@@ -3241,12 +3241,29 @@ class ChatFlowEngine:
         # M7.5 §4.1: snapshot the read-only allocation onto the judge so
         # ``_spawn_recon_chain`` (and any future per-judge
         # ``resolve_for_node`` consumer) has an authoritative ceiling.
-        # ``chatflow=None`` is the bare-engine fallback — leaves
-        # effective_tools as ``None`` (legacy fallthrough), preserving
-        # pre-allocation behavior for tests that drive the spawner
-        # without a ChatFlow context.
+        #
+        # Two source paths for the disabled set (mirrors
+        # ``_spawn_judge_post``):
+        # - chatflow passed explicitly (top-level turn spawn —
+        #   ``_spawn_turn_node``): derive from chatflow.disabled +
+        #   foreign-tau filter.
+        # - chatflow=None (sub-WorkFlow spawn —
+        #   ``_build_sub_workflow_for_subtask`` doesn't have chatflow
+        #   in scope; bare-engine tests; etc.): fall back to the
+        #   engine's per-execute ``_disabled_tool_names`` which
+        #   already unions workspace + chatflow + foreign-tau at
+        #   execute time. Same effective filter; sub-WorkFlow
+        #   judge_pre now gets a real allocation instead of legacy
+        #   None — closes the only remaining gap in the cognitive
+        #   ReAct DAG production path.
         if chatflow is not None:
             node.effective_tools = self._judge_pre_effective_tools(chatflow)
+        else:
+            node.effective_tools = (
+                self._cognitive_judge_effective_tools_from_disabled(
+                    self._inner._disabled_tool_names
+                )
+            )
         return inner.add_node(node)
 
     # ---------------------------------------------------- M7.5 PR 7 recon DAG
@@ -3270,11 +3287,12 @@ class ChatFlowEngine:
         each ``recon_plan`` spec name to live on that list. Allocation
         excludes WRITE side-effect tools and chatflow-disabled tools,
         so a hallucinated ``Bash`` recon spec drops at spawn even if
-        the judge_pre prompt accidentally let it through. Top-level
-        turns get the allocation; nested sub-WorkFlow judge_pre nodes
-        currently fall through to ``effective_tools=None`` (legacy)
-        — recon at deeper depths is rare and the gate at sub-level
-        is a future tightening.
+        the judge_pre prompt accidentally let it through. Both
+        top-level turns and sub-WorkFlow judge_pre nodes get the
+        allocation now (the latter via the engine-state fallback in
+        ``_spawn_judge_pre`` when chatflow isn't passed —
+        ``_inner._disabled_tool_names`` is the same union the
+        explicit chatflow path would compute).
         """
         del judge_pre_node  # gate enforced inside _spawn_recon_chain
         if not chatflow.cognitive_react_enabled:
