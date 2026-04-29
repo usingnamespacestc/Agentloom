@@ -375,17 +375,27 @@ class ChatFlow(BaseModel):
     #: to override (e.g. for models that need a different framing). See
     #: ``_compose_system_envelope`` in the engine for the wire-up.
     runtime_environment_note: str | None = None
-    #: M7.5 PR 7 — opt-in cognitive ReAct DAG for ``judge_pre``. When
-    #: enabled, judge_pre's verdict may carry a ``recon_plan`` listing
-    #: read-only tool calls (Glob/Grep/Read/get_node_context) that the
-    #: engine runs before the verdict is final. After the recon
-    #: tool_calls complete, a follow-up judge_pre node consumes their
-    #: results and emits the actual feasibility / trio. Default False
-    #: keeps the pre-PR-7 behavior — judges that emit recon_plan get
-    #: a warning and the field is ignored. Other cognitive roles
-    #: (plan_judge, worker_judge, post_judge) stay on the atomic path
-    #: regardless of this flag (see design §4.4).
-    cognitive_react_enabled: bool = False
+    #: M7.5 PR 7 — cognitive ReAct DAG for ``judge_pre``. When enabled,
+    #: judge_pre's verdict may carry a ``recon_plan`` listing read-only
+    #: tool calls (Glob/Grep/Read/get_node_context) that the engine
+    #: runs before the verdict is final. After the recon tool_calls
+    #: complete, a follow-up judge_pre node consumes their results
+    #: and emits the actual feasibility / trio.
+    #:
+    #: Default flipped to True (2026-04-29) after the gate in commit
+    #: 8f3288c populated ``judge_pre.effective_tools`` so a hallucinated
+    #: WRITE recon spec drops at spawn rather than dispatching. The
+    #: per-chatflow API toggle (``PatchChatFlowRequest.cognitive_react_enabled``,
+    #: shipped 2026-04-29) lets users opt out for a specific chatflow
+    #: when the extra latency / cost isn't worth the feasibility-
+    #: verification benefit. Existing chatflows whose payload predates
+    #: this default keep their stored value (Pydantic doesn't rewrite
+    #: payload-loaded rows).
+    #:
+    #: Other cognitive roles (plan_judge, worker_judge, post_judge)
+    #: stay on the atomic path regardless of this flag (see design §4.4
+    #: and sub-task 3 of the productionization rollout).
+    cognitive_react_enabled: bool = True
     #: Tier 1 pre-llm_call auto-compact threshold. When the estimated
     #: ancestor-context footprint of a pending llm_call crosses
     #: ``compact_trigger_pct`` of the target model's context window,
