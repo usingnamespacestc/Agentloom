@@ -2944,11 +2944,58 @@ class ChatFlowEngine:
             )
             return
 
+        leaf = chatflow.get(leaf_id)
+
+        # Failed-leaf auto-fork (2026-04-30 hotfix for issue #4 from the
+        # qwen36 test batch). When the latest leaf is FAILED we cannot
+        # let the pending turn sit on its queue: ``_try_consume`` early-
+        # returns on non-SUCCEEDED nodes (failed nodes never consume —
+        # their queue is owned by retry / delete), so the caller's
+        # ``await future`` would hang indefinitely and the API
+        # ``submit_lock`` it's holding never releases. Result observed
+        # in production: turn 5 fails on post_judge, every subsequent
+        # POST /turns 60s timeouts, the chatflow is permanently un-
+        # submittable until backend restart or DELETE.
+        #
+        # Fix: treat a no-parent_id submit on a failed leaf as a fork
+        # off the failed leaf's primary parent — semantically a fresh
+        # sibling, exactly what retry_failed_node would do, and matches
+        # the broader "submit must never silently hang" invariant
+        # alongside the fork-semantics rule. Failed root (no parents)
+        # falls back to the empty-chatflow path further up the file
+        # by re-bootstrapping a fresh root.
+        if leaf.status == NodeStatus.FAILED:
+            target_parent_ids = list(leaf.parent_ids)
+            log.warning(
+                "submit on failed leaf %s — auto-forking from %s "
+                "(retry semantics) instead of queueing on dead branch",
+                leaf_id,
+                target_parent_ids or "<root>",
+            )
+            node = await self._spawn_turn_node(
+                runtime,
+                parent_ids=target_parent_ids,
+                user_message_text=pending.text,
+                pending_queue=[],
+                spawn_model=pending.spawn_model,
+                judge_spawn_model=pending.judge_spawn_model,
+                tool_call_spawn_model=pending.tool_call_spawn_model,
+                originating_pending=pending,
+            )
+            await self._publish_node_created(runtime, node.id)
+            self._launch_execute(
+                runtime,
+                node.id,
+                consumed_pending_id=None
+                if node.compact_snapshot is not None
+                else pending.id,
+            )
+            return
+
         # Non-empty: drop the pending turn on the live tip. If the
         # tip is already idle, _try_consume will pop it right back
         # off and launch the child; otherwise the walk-down logic
         # will pick it up on the next transition.
-        leaf = chatflow.get(leaf_id)
         leaf.pending_queue.append(pending)
         await self._publish_queue_updated(runtime, leaf_id)
         await self._try_consume(runtime, leaf_id)
