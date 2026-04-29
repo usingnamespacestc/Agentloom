@@ -5681,11 +5681,33 @@ class ChatFlowEngine:
                 chat_node.status = NodeStatus.FAILED
                 chat_node.error = judge_crash_error
             elif terminal is None:
-                chat_node.status = NodeStatus.FAILED
-                chat_node.error = (
-                    "inner workflow had no terminal llm_call — "
-                    + _summarize_workflow_for_error(chat_node.workflow)
+                # Defensive fallback (issue #1, 2026-04-29 qwen36
+                # batch): a non-accept post_judge verdict with a
+                # populated ``user_message`` is the next-best thing
+                # to a real reply when the rest of the path silently
+                # failed. Surfacing the judge's diagnostic gives the
+                # user something actionable instead of the opaque
+                # engine error.
+                fallback = _last_judge_post_user_message(
+                    chat_node.workflow
                 )
+                if fallback:
+                    chat_node.agent_response = EditableText.by_agent(
+                        fallback
+                    )
+                    chat_node.status = NodeStatus.SUCCEEDED
+                    log.warning(
+                        "chat_node %s had no terminal llm_call; "
+                        "fell back to last post_judge user_message "
+                        "(retry/fail flow likely lost its hook spawn)",
+                        chat_node.id,
+                    )
+                else:
+                    chat_node.status = NodeStatus.FAILED
+                    chat_node.error = (
+                        "inner workflow had no terminal llm_call — "
+                        + _summarize_workflow_for_error(chat_node.workflow)
+                    )
             elif (
                 terminal.status == NodeStatus.SUCCEEDED
                 and terminal.output_message is not None
@@ -6970,6 +6992,45 @@ def _judge_post_response_text(workflow: WorkFlow) -> str | None:
             # the caller uses that instead.
             return None
         return v.merged_response or v.user_message or None
+    return None
+
+
+def _last_judge_post_user_message(workflow: WorkFlow) -> str | None:
+    """Defensive fallback used by chat finalization when the normal
+    response-derivation paths all returned None and there's no
+    terminal llm_call to fall back on (decompose-mode workflow whose
+    aggregator hook silently failed to spawn redo clones, or any
+    other path where the post_judge ran cleanly but neither
+    ``_judge_post_response_text`` nor ``pending_user_prompt`` got
+    populated).
+
+    Issue #1 from the 2026-04-29 qwen36 batch (chatflow
+    019dd8b9-ca89..., turn 2): post_judge produced verdict
+    ``post_verdict=retry`` with ``redo_targets=[failed_delegate]``
+    and a perfectly serviceable ``user_message`` ("国航数据已收集，
+    东航查询失败，将重新尝试..."), but the hook never spawned the
+    redo clone (silent crash or skip), the workflow ended without a
+    terminal llm_call, and the user got the opaque "inner workflow
+    had no terminal llm_call" error instead of the judge's
+    diagnostic. This helper surfaces that diagnostic as a last-
+    resort agent_response — strictly better than the engine error
+    leaking to the user.
+
+    Returns the most recent post_judge verdict's ``user_message``
+    (any verdict, not just accept), or ``None`` if no post_judge
+    has run or none of them have a user_message. Skips empty
+    strings.
+    """
+    for n in reversed(list(workflow.nodes.values())):
+        if (
+            n.step_kind != StepKind.JUDGE_CALL
+            or n.judge_variant != JudgeVariant.POST
+            or n.judge_verdict is None
+        ):
+            continue
+        msg = (n.judge_verdict.user_message or "").strip()
+        if msg:
+            return msg
     return None
 
 
