@@ -19,7 +19,7 @@
 | **核心能力** | ChatFlow DAG（fork/merge/compact/pack/fold）+ 嵌套 WorkFlow + 递归 planner + 三段式 judge + MemoryBoard + 跨 chatflow 数据访问门禁 |
 | **执行模式** | `native_react`（直连 ReAct）/ `semi_auto`（一次性 plan）/ `auto_plan`（递归 planner + judge 驱动重试），ChatFlow 默认 + ChatNode 覆盖 |
 | **WorkNode 类型** | `llm_call` · `tool_call` · `judge_call` (pre/during/post) · `sub_agent_delegation` · `compact` · `merge` · `pack` · `brief` |
-| **测试覆盖** | 后端 **825** unit + integration（其中 **640** unit）/ 4 skipped；前端 **78** 单测；全部跑过 |
+| **测试覆盖** | 后端 **839** unit + integration（其中 **651** unit）/ 4 skipped；前端 **88** 单测；全部跑过 |
 | **最近里程碑** | **M7.5 capability model**（2026-04-26 · 8 PR + 1 hotfix 单日 ship · ~1900 行 diff · ~100 新测试）+ **post-ship 修复 8 commit**（2026-04-26 night → 2026-04-27：auto_plan 死锁修复 / capability_request 反馈闭环履约 / drill-down nudge / 跨 chatflow 工具污染 fix / etc.） |
 | **τ-bench retail 0-9 (NATIVE_REACT) baseline** | **8/10 = 80% pass^1**（agent: ark-code-latest via 火山引擎 coding plan lite · user simulator: doubao-seed-2-0-pro-260215 · 全程 ~27 min · 2 fail 归因到 user simulator 演 "private person" persona 拒验证而非 agent 错） |
 | **provider 支持** | OpenAI 兼容（Volcengine / Ark / Ollama / OpenAI）+ Anthropic 原生 + MCP 客户端 |
@@ -152,14 +152,46 @@ M7.5 主链 ship 后跑实负载暴露了一批**问题域** + **设计文档承
 - **PR 6 的 tool_use 改造留下了多个隐藏 leak**：每处读 `output_message.content` 都要重新审视；3 个 site 用相同模式的不同变体写出，每个都看似合理。这次提取了 `_render_planner_output_for_prompt` 当 single source of truth
 - **判官 effective_tools 这种"design §4.1 deferred"的字段，dormant 时无害，激活时是关键**：M7.5 PR 7 commit message 明说 gate 没接，没接的副作用是幻觉 WRITE 工具会真 dispatch
 
+---
+
+## 🧠 第三轮：cognitive ReAct DAG 端到端激活（commit `be4e7e9..c58d730`）
+
+第二轮把 PR 7 的 recon gate 接通后，整条 cognitive ReAct DAG 还是 dormant—— `cognitive_react_enabled` 默认 `False`，且 recon spawn 只覆盖 `judge_pre`。这一轮 3 个 commit 把它真正激活到生产，**直接针对 retail batch 显示的 `outputs_match=True / db_hash_match=False` 症状**（agent 嘴上说改了，DB 里没改）：
+
+| Commit | Sub-task | 改了什么 |
+|---|---|---|
+| `be4e7e9` | 1/3 暴露 toggle | `PatchChatFlowRequest.cognitive_react_enabled` 接通 API/store/ChatFlowSettings UI；用户能 per-chatflow 勾选启用 recon DAG，不用改源码 |
+| `ee9c8c3` | 2/3 翻 default | Schema `False → True`：新建 chatflow 默认开。已有 chatflow 的 payload 里存的旧值不被覆盖，opt-out 路径已通 |
+| `c58d730` | 3/3 judge_post recon | judge_post 也接通 recon。提取 `_filter_recon_plan` 给 pre/post 共享；`_spawn_recon_chain_for_post` 加结构化递归 fuse（parent 是 TOOL_CALL → 已是 follow-up，禁止再 recon）；`_spawn_judge_post` 用两条来源自动 allocate `effective_tools`（chatflow 有就用，否则 fallback 到 `engine._disabled_tool_names`）。判 post fixture（en + zh）+ POST variant tool_use schema 都补完 |
+
+### 设计要点
+
+- **单一 filter**：`_filter_recon_plan` 是 pre/post 共享的纯函数（chatflow_disabled + registry-presence + per-judge effective_tools 三层 gate）
+- **结构化递归 fuse**：判断"已经是 recon follow-up"不靠 metadata 字段，看 parent_ids 里有没有 TOOL_CALL 节点—— 一目了然，不用维护额外状态
+- **双路径 effective_tools 分配**：`_spawn_judge_post` 在 7 处不同 spawn site 被调用，每处都要传 chatflow 太重；做成"显式 chatflow 就用，否则从 engine 状态拿 disabled set"——同一个 union 集合不同入口
+- **fixture 双语同步**：判 pre 的 `(4) Optional cognitive ReAct DAG (recon_plan)` 段在判 post 里有对应版本，明说"只允许一轮"+"读—only ceiling"
+
+### 现在 retail 跑 auto_plan 走的路径
+
+```
+turn N:
+  judge_pre (可能 recon: get_order_details → re-judge)
+  → planner → planner_judge (gate 通了，不会再误判 plan 为空)
+  → worker (跑工具，可能 capability_request)
+  → worker_judge (capability_escalation 反馈循环)
+  → judge_post (可能 recon: get_order_details 验证 worker 真改了 → 不真改就 retry)
+  → user-facing reply
+```
+
+每条 PR 6/PR 7/PR 8 设计的路径**首次端到端激活**。
+
 ### 还在 backlog 的（已识别但未履约）
 
-经过这一轮已经把几条最大的 deadcode/leak 都闭环了，剩下的：
+经过这三轮已经把所有可识别的 deadcode/leak 都闭环了，剩下的都是渐进式优化，无关 correctness：
 
-- 🟡 `cognitive_react_enabled = False` 默认 + 仅 `pre` 一类 spawn 路径 → 整条 ReAct DAG 在生产里仍 dormant（gate 已通，只缺 default 和 dispatch 路径补全）
-- 🟡 (B) judge_pre prompt 加前瞻指令（fixture 改）—— 当前 (A) 跨 turn 累积 + (C) cap_request 反馈循环 都是 reactive；(B) 是预防层
+- 🟡 (B) judge_pre prompt 加前瞻指令（fixture 改）—— 当前 (A) 跨 turn 累积 + (C) cap_request 反馈循环 + recon DAG 都是 reactive 路径；(B) 是预防层，等真负载数据再决定 ROI
 - 🟢 τ-bench 工具 first-class 化（当前 mitigation `bdedbdd` 通了，根本架构 hack 等长期决策）
-- 🟡 其他 judge 节点（plan_judge / worker_judge / judge_post）的 `effective_tools` 分配 —— 它们不 spawn recon，ROI 偏低
+- 🟡 plan_judge / worker_judge 也加 recon —— judge_post 的同样路线，但这俩不出 user reply，ROI 小
 
 ---
 
@@ -434,7 +466,7 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
 - [x] **Frozen-guard exempt 不变量测试**：`test_frozen_guard_exempts.py`
       正反两面固定 UI-only 字段（position / sticky / pending_queue）在
       frozen 节点上放行、语义字段必触发；防未来加新字段时踩拖动丢失那类坑
-- [x] Pytest：后端 **825** unit + integration / 4 skipped + 前端 **78** 个单测全绿，collection 干净
+- [x] Pytest：后端 **839** unit + integration / 4 skipped + 前端 **88** 个单测全绿，collection 干净
 - [x] **真模型实测验证不变量**：M7.5 跑了 3 个 auto_plan + cognitive_react chatflow（claude-haiku/sonnet）+ τ-bench retail 0-9 batch，挖出 1 个 cross-provider schema bug（PR 6 hotfix）+ 1 个 emergent property（catalog 前置吸收 capability_request 路径）反写回设计文档
 
 ---
