@@ -4598,6 +4598,21 @@ class ChatFlowEngine:
             )
             return
 
+        # Surface the planner's reasoning at INFO. The schema field's
+        # main purpose is to nudge json_schema-enforced models to
+        # "think first" via the field-order trick, but historically
+        # the parsed value was discarded — operators couldn't see the
+        # planner's framing without re-reading raw output_message.
+        # Logging here keeps it debuggable without coupling to UI.
+        if plan.reasoning:
+            log.info(
+                "planner reasoning: workflow=%s planner=%s mode=%s — %s",
+                workflow.id,
+                planner_node.id,
+                plan.mode,
+                plan.reasoning,
+            )
+
         # Continue + atomic: materialize the worker.
         if decision == "continue" and plan.mode == "atomic" and plan.atomic is not None:
             # Hard-block phantom tool names. If the planner picked

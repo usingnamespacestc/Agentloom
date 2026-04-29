@@ -81,12 +81,17 @@ class RecursivePlannerOutput(BaseModel):
     the LLM is prompted to emit.
 
     ``reasoning`` is listed first so json_schema-enforced models are
-    nudged to think before committing to a mode. It's optional — thinking-
-    channel models (Claude extended thinking, o-series, Qwen3 reasoning)
-    may leave it null because their reasoning is carried on a private
-    channel; direct-output models tend to populate it. Either way the
-    field gives us a parseable, user-visible trace of the decomposition
-    rationale that's otherwise lost.
+    nudged to think before committing to a mode — its **presence** in
+    the schema is what does the work. It's optional — thinking-channel
+    models (Claude extended thinking, o-series, Qwen3 reasoning) may
+    leave it null because their reasoning is carried on a private
+    channel; direct-output models tend to populate it.
+
+    The engine doesn't currently surface the value anywhere user-visible
+    (the schema docstring used to claim a "user-visible trace" but no
+    consumer ever read the field). It IS logged at INFO when present
+    so operators can see the planner's framing in the backend logs;
+    a future canvas-side surface for this is on the backlog.
     """
 
     reasoning: str | None = None
