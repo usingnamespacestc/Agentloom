@@ -117,7 +117,10 @@ class InboundContextSegment(BaseModel):
 
     ``synthetic=True`` flags segments whose messages were *constructed*
     rather than lifted verbatim — the sticky header, the summary
-    preamble, etc. The frontend uses this to switch to muted styling.
+    preamble, etc. The backend populates the flag (see writer sites in
+    ``chatflow_engine``); a styling consumer in the frontend was
+    intended but is not implemented yet, so today the flag is purely
+    advisory metadata available on the API response.
 
     ``cbi_entries`` is populated only on ``summary_preamble`` segments
     when pre-compact ancestors had ChatBoard descriptions — each entry
@@ -159,9 +162,14 @@ class PendingTurn(BaseModel):
 
     ``source`` captures which channel submitted the turn so the
     scheduler can apply channel-specific failure policies (e.g. discard
-    vs. continue on upstream failure). ``source_metadata`` carries
-    per-channel meta such as discord user id / thread id — opaque to
-    the engine.
+    vs. continue on upstream failure). ``source_metadata`` is a
+    write-only schema slot today: the engine populates it from
+    ``ExternalTurn.metadata`` on submit but no consumer reads it back
+    — the channel adapters (web / discord / cli) currently make
+    failure-policy decisions purely from ``source`` + ``on_upstream_failure``.
+    The dict is preserved on persisted payloads so a future
+    channel-aware retry path can reach the original meta without
+    a schema migration.
     """
 
     id: NodeId = Field(default_factory=generate_node_id)

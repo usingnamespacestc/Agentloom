@@ -7,8 +7,10 @@ honor three invariants:
 1. **Locked trio preserved** — any keyframe with
    ``is_keyframe_locked=True`` must reappear in the plan with its
    exact trio (description / inputs / expected_outcome). Unlocked
-   keyframes accept planner edits but keep ``keyframe_origin_trio``
-   for diff/restore (handled elsewhere).
+   keyframes accept planner edits silently. (The schema has a
+   ``keyframe_origin_trio`` slot for a future "show diff / restore
+   original" UI feature, but neither writer nor reader exists today
+   — see the field's docstring.)
 
 2. **User-placed edges preserved** — every edge between two keyframes
    in the original WorkFlow must exist verbatim in the plan.

@@ -165,9 +165,16 @@ class WorkFlowNode(NodeBase):
     # --- Keyframe flags (§3.4.2 / §4.9) — meaningful only while dashed ---
     is_keyframe: bool = False
     is_keyframe_locked: bool = False
-    #: Snapshot of the user's original trio for unlocked keyframes, so the
-    #: planner's edits can be diffed/restored. None for non-keyframe nodes
-    #: and for nodes whose trio the planner has not yet touched.
+    #: Schema slot for the unlocked-keyframe diff/restore feature: when
+    #: the planner edits an unlocked keyframe's trio, the original was
+    #: meant to be saved here so the canvas could show "restore to
+    #: original" + diff. **Currently neither written nor read** — the
+    #: feature was never wired up. Field is preserved (instead of
+    #: removed) so a future implementation has a stable JSON key on
+    #: persisted payloads. Keyframe LOCK enforcement (the
+    #: ``is_keyframe_locked=True`` invariant) is implemented and lives
+    #: in :mod:`agentloom.engine.keyframe_validator` — that path does
+    #: not use this field.
     keyframe_origin_trio: dict[str, Any] | None = None
 
     # --- llm_call fields ---
