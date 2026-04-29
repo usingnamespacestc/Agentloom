@@ -69,21 +69,38 @@ curl -s http://localhost:8001/v1/models 2>&1 | head -c 300
   --grammar-mode strict
 ```
 
-### 0.4 验证 Agentloom 后端能调到 qwen36
+### 0.4 验证 Agentloom 后端能调到 qwen36 + 把 provider id 存到 env file
 
 ```bash
-curl -s http://localhost:8000/api/providers | python3 -c "
+# 抓 provider id 并存到一个 env 文件，后续每个 shell `source` 一下就有变量
+PROVIDER_ID=$(curl -s http://localhost:8000/api/providers | python3 -c "
+import json, sys
+for p in json.load(sys.stdin):
+    if 'localhost:8001' in (p.get('base_url') or ''):
+        print(p['id']); break
+")
+echo "export PROVIDER_ID=$PROVIDER_ID"  | tee /tmp/agentloom-test-env.sh
+# 验证：
+curl -s "http://localhost:8000/api/providers/$PROVIDER_ID" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
-for p in data:
-    if 'localhost:8001' in (p.get('base_url') or ''):
-        print('provider id:', p['id'])
-        for m in p['available_models']:
-            print('  model:', m['id'], 'json_mode:', m['json_mode'], 'ctx:', m['context_window'])
+for m in data.get('available_models', []):
+    print('  model:', m['id'], '| json_mode:', m['json_mode'], '| ctx:', m['context_window'])
 "
 ```
 
-记下这个 **provider id**（形如 `019db691-...`），后面创建 chatflow 时要用。
+后面每个新 terminal 开始前先 `source /tmp/agentloom-test-env.sh`，省得重复抓 + 减少手填占位符出错的概率。下面凡是 `$PROVIDER_ID` 都假设你已经 source 过这个 env file（别再手填）。
+
+### 0.4.1 不要手填 provider id 到 python 字符串里
+
+下面 0.5 节有个 python heredoc 里写着 `PROVIDER_ID = "<填 provider id>"`。**那是 python 代码里的字符串字面量，不会读 shell 变量**。每次跑那段 heredoc 之前，把 `<填 provider id>` 替换成你 0.4 抓到的真实 id。或者改用 `os.environ['PROVIDER_ID']` 直接读 shell：
+
+```python
+import os
+PROVIDER_ID = os.environ["PROVIDER_ID"]  # 替代上面的硬编码
+```
+
+（推荐改成读 env，省得来回手填。）
 
 ### 0.5 确认 qwen36 model 上的采样参数
 
@@ -793,6 +810,181 @@ done
 
 ---
 
+---
+
+## 常见 footgun + 操作模板（出问题前看一眼）
+
+### F1. 前端跑测试前要先 npm install
+
+`npx tsc` / `npx vitest` 第一次跑要 `node_modules`：
+
+```bash
+cd /home/usingnamespacestc/Agentloom/frontend
+[ -d node_modules ] || npm install
+```
+
+省得 1.2 节卡在依赖。
+
+### F2. nohup 起的 batch 怎么"等"它跑完再起下一个
+
+Task 4 的 4 个 batch 必须**串行**（共享 GPU）。`nohup ... &` 立即返回 pid，不会自动等。等的标准操作：
+
+```bash
+# 起 batch 后记下 pid
+nohup agentloom-bench ... > runs/.../run.log 2>&1 &
+BATCH_PID=$!
+disown $BATCH_PID
+echo "batch pid: $BATCH_PID"
+
+# 等它结束（每 60s 检查一次；过程中不要起其它 GPU 任务）
+while kill -0 $BATCH_PID 2>/dev/null; do
+  sleep 60
+  echo "[$(date +%H:%M)] still running, last log line:"
+  tail -1 runs/.../run.log
+done
+echo "batch finished"
+```
+
+### F3. 怎么找"中段非 leaf ChatNode" 给 fork 用
+
+Task 2 / task 3 / combo 都需要 fork。从 chatflow JSON 里挑一个有 child 的 ChatNode：
+
+```bash
+CF_ID="<chatflow id>"
+curl -s "http://localhost:8000/api/chatflows/$CF_ID" | python3 << 'EOF'
+import json, sys
+cf = json.load(sys.stdin)
+nodes = cf.get("nodes") or {}
+# 谁是别人的 parent
+parent_ids = set()
+for n in nodes.values():
+    for pid in n.get("parent_ids") or []:
+        parent_ids.add(pid)
+# 既是某 user-turn ChatNode 又是别人的 parent → 中段非 leaf
+for nid, n in nodes.items():
+    user_text = (n.get("user_message") or {}).get("text") or ""
+    if user_text and nid in parent_ids:
+        print(f"{nid}\t{user_text[:60]}")
+EOF
+```
+
+挑任一行的第一列作 `parent_id` 给 0.9.4 的 fork POST。
+
+### F4. POST /turns 拿到 status=failed 时怎么办
+
+任一 turn 的响应可能是：
+
+```json
+{"node_id": "...", "status": "failed", "agent_response": "..."}
+```
+
+或者 `status="succeeded"` 但 `agent_response` 是 halt-template 文案（"无法处理 ..." 之类）。
+
+**处理原则**：
+- **不要重试**——失败本身是测试数据，要保留
+- 把响应原样存 `turn-NN.json`
+- summary 里标 "turn N 失败 / halted"，写明 status / agent_response 摘要
+- **继续下一 turn**——后续 turn 可能在新分支或同分支恢复正常
+
+如果连续 3 turn 都 failed，停下来检查（可能是 backend 挂了 / llama-server OOM / 上下文爆了）。
+
+### F5. turn-NN.json 推荐格式
+
+每个 turn 提交完，存这样一个 JSON 方便后续 drill-in：
+
+```json
+{
+  "turn_index": 1,
+  "submitted_at": "2026-MM-DDTHH:MM:SSZ",
+  "duration_seconds": 384.2,
+  "user_text": "...",
+  "parent_id": null,
+  "response": {
+    "node_id": "019dd...",
+    "status": "succeeded",
+    "agent_response": "..."
+  }
+}
+```
+
+### F6. 验证 chatflow 真的用 qwen36（防默认模型回退）
+
+创建 + PATCH 后查一下确认：
+
+```bash
+curl -s "http://localhost:8000/api/chatflows/$CF_ID" | python3 -c "
+import json, sys
+cf = json.load(sys.stdin)
+for k in ('draft_model', 'default_judge_model', 'default_tool_call_model', 'brief_model'):
+    v = cf.get(k) or {}
+    print(f'{k}: provider={v.get(\"provider_id\", \"\")[-12:]} model={v.get(\"model_id\")}')
+"
+```
+
+4 个 model 都应该是 qwen36-27b-q4km。如果有任一是空 / 别的模型，PATCH 不到位，turn 会 fallback 到默认（可能不是你想要的）。
+
+### F7. UI 文件夹重名
+
+POST `/api/folders` 不会拒绝同名（每次新建会拿到不同 id）。**每个 task 开始前**先看有没有同名残留：
+
+```bash
+curl -s http://localhost:8000/api/folders | python3 -c "
+import json, sys
+for f in json.load(sys.stdin):
+    print(f['id'], '|', f.get('name'))
+"
+```
+
+如果"批量测试" / "典型测试" / "tau-bench" 已经存在，**直接复用现有 id**（不要再创一个），把 chatflow 移进去就行——名字一样的两个 folder 在 UI 里看不出区别，乱。
+
+### F8. 不知道就说不知道（task 3 特别注意）
+
+opencode 没本地源码，task 3 的 Agentloom + qwen36 也不一定有 opencode 的 training 知识。Agentloom 内置工具里**没有 WebFetch / WebSearch**——这意味着 agent 实际上"上网查"做不到。
+
+如果让 agent 比较 opencode，agent 应该：
+- 能从 training 知识答出来 → 答
+- 不知道 → **直接说"不熟悉这个工具"**，不要瞎编 feature
+
+执行 AI（你）也注意：跑完 task 3 看 transcript 时，如果 Agentloom 给出明显幻觉的描述（比如说 opencode "支持 X 功能" 但训练数据里大概率没这个事实），在 summary 里**标为幻觉**——这是 q4km 量化模型的真实表现观察。
+
+### F9. reward 数字怎么从 task_*.json 抓（task 4 summary 用）
+
+```bash
+for d in retail-native-react retail-auto-plan airline-native-react airline-auto-plan; do
+  out="/home/usingnamespacestc/Agentloom/runs/tau-bench/$d"
+  [ -d "$out" ] || continue
+  python3 << EOF
+import json, glob, statistics
+files = sorted(glob.glob("$out/task_*.json"))
+rewards = []
+durations = []
+for f in files:
+    with open(f) as fh: t = json.load(fh)
+    rewards.append(t.get("reward") or 0)
+    durations.append(t.get("total_duration_seconds") or 0)
+ones = sum(1 for r in rewards if r >= 1.0)
+zeros = sum(1 for r in rewards if r == 0)
+print(f"{$out!r:<60} N={len(files)} reward1={ones} reward0={zeros} avg_dur={(sum(durations)/max(len(durations),1)):.0f}s")
+EOF
+done
+```
+
+把每个目录跑出来的一行直接抄进 summary 表格。
+
+### F10. 磁盘 / DB 检查
+
+跑前看一眼：
+
+```bash
+df -h /home/usingnamespacestc | tail -1
+# postgres 占用
+docker exec $(docker-compose -f /home/usingnamespacestc/Agentloom/docker-compose.yml ps -q postgres 2>/dev/null) psql -U agentloom -d agentloom -c "SELECT pg_size_pretty(pg_database_size('agentloom'));" 2>/dev/null
+```
+
+如果磁盘 < 5GB / DB > 5GB，task 4 跑完很可能爆。提前清理或换盘。
+
+---
+
 ## 给执行 AI 的最后提示
 
 1. **跑顺序**：建议 task 1 → task 2 → task 3 → task 4。task 1 验证整套测试基础工作，前面没跑通后面别开始。
@@ -801,5 +993,6 @@ done
 4. **遇到 backend 异常 / qwen36 OOM / GPU 卡死**：先记录症状到当前 task 的 summary，然后判断是否能继续（重启 llama-server / 缩小 ctx-size 等）。
 5. **GPU 监控**：`nvidia-smi -l 5` 在另一个 terminal 跑着，task 4 期间留一个 GB 的 headroom，否则 decode 速度掉 15×。
 6. **不要清理！** 所有 chatflow / 测试输出 / log 都保留。我会回来 drill-in。
+7. **时间预算**：task 1 ~2-3h；task 2 ~1.5-3h（8-10 turn × 5-15min）；task 3 ~1-2h（6 turn）；task 4 ~10-20h。**整套预计 15-30 小时**——qwen36 + json_mode 慢是常态，不要因为"看着没动"就 kill。
 
 完事请把每个 task 的 `summary.md` 路径列在最终回报里。
