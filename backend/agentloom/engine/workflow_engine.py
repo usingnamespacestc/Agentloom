@@ -2741,10 +2741,24 @@ _CAPABILITY_REQUEST_TAG_RE = re.compile(
     r"<capability_request>\s*(?P<body>.*?)\s*</capability_request>",
     re.DOTALL | re.IGNORECASE,
 )
+#: JSON-key form: ``"capability_request": [...]`` anywhere in the
+#: text. Pre-2026-04-29 this required the key to sit immediately
+#: after an opening ``{`` (i.e. only worked for a *standalone*
+#: ``{"capability_request": [...]}`` segment), which missed the
+#: realistic case where the worker is in JSON-output mode and emits
+#: a structured object like ``{"thinking": ..., "capability_request":
+#: [...]}``. Now we anchor on the key itself; the bracket content
+#: still uses ``[^\]]*`` to stay non-greedy on ill-formed inputs.
 _CAPABILITY_REQUEST_JSON_RE = re.compile(
-    r'\{\s*"capability_request"\s*:\s*\[(?P<body>[^\]]*)\]\s*\}',
+    r'"capability_request"\s*:\s*\[(?P<body>[^\]]*)\]',
     re.DOTALL,
 )
+#: Splits a tag body into name tokens. Workers vary the separator —
+#: comma is canonical (the worker fixture says so) but models also
+#: emit one-per-line, comma+newline, or comma-and-space. All three
+#: drop into the same delimiter set. Empty tokens are filtered by
+#: ``_emit``.
+_CAPABILITY_REQUEST_TAG_SPLIT_RE = re.compile(r"[,\n]+")
 
 
 def _extract_capability_request(text: str) -> list[str]:
@@ -2752,13 +2766,19 @@ def _extract_capability_request(text: str) -> list[str]:
 
     Returns the ordered, de-duplicated list of names found across
     every recognized marker form (tag and JSON segment). Empty list
-    on no match. Whitespace-only tokens drop out; quoted JSON
-    strings get their surrounding quotes stripped.
+    on no match. Whitespace-only tokens drop out; surrounding
+    quotes / backticks / square-brackets are stripped per token so
+    the worker can emit names markdown-style (``\\`Bash\\``) or
+    JSON-quoted without polluting the persisted name.
 
     Defensive against multiple markers in one draft (a worker that
     discovers two missing capabilities in different sections of its
     output) — every match contributes; ordering follows the source
     text so the persisted ``capability_request`` reads top-to-bottom.
+
+    Tag bodies split on commas AND newlines so workers that
+    list one-per-line (a natural way to render in markdown) don't
+    have their list collapse into a single garbled token.
     """
     if not text:
         return []
@@ -2766,15 +2786,25 @@ def _extract_capability_request(text: str) -> list[str]:
     seen: set[str] = set()
 
     def _emit(token: str) -> None:
-        cleaned = token.strip().strip('"').strip("'").strip()
+        # Strip quotes / backticks / brackets in pairs until stable;
+        # a model that emits `\`"Bash"\`` should resolve to `Bash`.
+        cleaned = token.strip()
+        for _ in range(4):
+            stripped = cleaned.strip().strip('"').strip("'").strip("`").strip()
+            if stripped == cleaned:
+                break
+            cleaned = stripped
         if cleaned and cleaned not in seen:
             seen.add(cleaned)
             found.append(cleaned)
 
     for m in _CAPABILITY_REQUEST_TAG_RE.finditer(text):
-        for token in m.group("body").split(","):
+        for token in _CAPABILITY_REQUEST_TAG_SPLIT_RE.split(m.group("body")):
             _emit(token)
     for m in _CAPABILITY_REQUEST_JSON_RE.finditer(text):
+        # JSON arrays are comma-separated by spec; treating newlines
+        # as separators here would break ``["foo,\nbar"]`` style
+        # quoted entries. Stick with comma split.
         for token in m.group("body").split(","):
             _emit(token)
     return found
