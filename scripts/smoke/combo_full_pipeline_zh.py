@@ -1,21 +1,29 @@
-"""Combo: 中文 12 轮 full chatflow life-cycle smoke (doubao-targeted).
+"""Combo: 中文 12 轮 full chatflow life-cycle smoke (doubao + auto_plan).
 
 Mirrors ``combo_full_pipeline.py`` but with:
 - All user turns in Chinese, exercising the engine on non-English
   conversation (fixtures + provider param paths handle UTF-8
   symmetrically with English on doubao, but the prior smoke didn't
   pin that — this one does).
+- ``auto_plan`` as the chatflow's default execution mode for **every
+  turn**, not just the final drill. Pre-fix the English variant
+  saved doubao quota by running phase 1+2 in ``native_react`` and
+  flipping to ``auto_plan`` only for the drill turn; this run
+  exercises the full cognitive pipeline (judge_pre → planner →
+  planner_judge → worker / atomic-tool_call → judge_post) on every
+  one of the 12 turns, so any auto_plan-only regression that the
+  English combo would mask surfaces here.
 - 10+ phase-1 turns to stress the compact preserve_recent_turns +
   ancestor-walk pathway with a longer chain than the 3-turn shape
   the English variant uses.
-- Same final auto_plan + recon + drill assertions so the
-  "system actually works on Chinese" signal is end-to-end and
-  comparable against the English run.
 
-Designed to run on the smoke default model (volcengine doubao
-``doubao-seed-2-0-pro-260215`` free tier). Total wall-clock ~7-10
-min on the free tier — phase 1 is direct mode (<10s/turn), phase
-4 auto_plan + recon + drill is the slow tail (~5-7 min).
+Wall-clock budget: roughly 30-60 min on the volcengine doubao free
+tier. Each auto_plan turn fires 4-6 LLM calls (judge_pre +
+planner + planner_judge + worker/tool + post_judge ± recon DAG),
+so 12 turns is markedly slower than a native_react chain. The
+smoke client's per-turn timeout is already 1800s (30 min) — sized
+for the slowest realistic single turn — so individual turns won't
+time out, but the operator should expect to wait.
 """
 from __future__ import annotations
 
@@ -61,8 +69,11 @@ async def main() -> None:
         async with backend_client() as client:
             cf_id = await create_chatflow(
                 client,
-                title="smoke combo zh",
-                execution_mode="native_react",
+                title="smoke combo zh (auto_plan)",
+                # auto_plan from the start — every turn fires the
+                # full cognitive pipeline. See module docstring for
+                # the wall-clock implications.
+                execution_mode="auto_plan",
                 cognitive_react_enabled=True,
                 extra_patch={
                     "compact_trigger_pct": None,
@@ -70,8 +81,10 @@ async def main() -> None:
                 },
             )
             try:
-                # Phase 1: 10 中文轮，把"八紫色"这个事实埋在第 1 轮。
-                report.section(f"phase 1 — 中文 {len(PHASE1_TURNS)} 轮直链")
+                # Phase 1: 10 中文轮 in auto_plan，把"八紫色"这个事实埋在第 1 轮。
+                report.section(
+                    f"phase 1 — 中文 {len(PHASE1_TURNS)} 轮直链 (auto_plan)"
+                )
                 phase1: list[dict] = []
                 for i, prompt in enumerate(PHASE1_TURNS, start=1):
                     t = await submit_turn(client, cf_id, prompt)
@@ -132,13 +145,11 @@ async def main() -> None:
                     f"count={len(compacts)}",
                 )
 
-                # Phase 4: 切到 auto_plan，要求精确取回"八紫色"原词。
+                # Phase 4: 仍在 auto_plan，要求精确取回"八紫色"原词。
+                # 与英文变体不同——这条路径在前 11 轮就已经在 auto_plan
+                # 下跑完，drill 只是最后一轮，没有模式切换的扰动。
                 report.section(
-                    "phase 4 — auto_plan + drill-down through compact"
-                )
-                await client.patch(
-                    f"/api/chatflows/{cf_id}",
-                    json={"default_execution_mode": "auto_plan"},
+                    "phase 4 — drill-down through compact (auto_plan)"
                 )
                 drill = await submit_turn(
                     client,
