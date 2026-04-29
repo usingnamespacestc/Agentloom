@@ -260,6 +260,37 @@ plan:
             When an issue exists on a specific WorkNode, locate it on
             the catalog so the UI can jump there.
 
+            **user_message voice — write like the persona, not like
+            an error log.** When you fail or halt, the user is a
+            real person who came to you for help, not a system
+            operator looking at a stack trace. Two hard rules:
+
+              - Do NOT use words like "internal error", "system
+                error", "system failure", "execution flow
+                malfunctioned", "we encountered an error". Those
+                bleed engine-speak into the conversation and make
+                the assistant sound broken instead of stuck. The
+                user can't act on "internal error" — they can act
+                on "I couldn't pull up that order, can you confirm
+                the order id?".
+              - Stay inside whatever role / persona the upstream
+                conversation established. If the worker was acting
+                as a customer-service rep, your user_message should
+                still sound like a customer-service rep saying
+                "I'm having trouble doing X — could we try Y?".
+                If the worker was acting as a coding assistant, the
+                user_message should sound like a coding assistant
+                saying "I couldn't finish modifying file X — the
+                <concrete reason>". The persona is whatever the
+                worker was already maintaining; mirror it.
+
+            When the halt has a concrete reproducible cause (a
+            blocker the user can resolve, a missing input you can
+            ask for, a tool that wasn't authorized), name that
+            cause specifically — vague "I had trouble" sentences
+            are also bad. The aim is "actionable + persona-matched",
+            not "polite engine error".
+
             **Optional cognitive ReAct DAG (recon_plan)**: when your
             verdict genuinely depends on verifying real state — e.g.
             the worker claimed it modified an order / wrote a file /
