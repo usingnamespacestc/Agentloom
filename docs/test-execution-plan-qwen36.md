@@ -985,7 +985,207 @@ docker exec $(docker-compose -f /home/usingnamespacestc/Agentloom/docker-compose
 
 ---
 
-## 给执行 AI 的最后提示
+## 出问题怎么办：debug 接力 protocol（必读）
+
+测了这么多东西，**几乎一定会有问题**。这一节是给执行 AI（你）的"我跑完发现 X，怎么把 X 交接给下一个会 debug 的 AI" 操作手册。
+
+### D1. detection — 跑测试时盯什么
+
+实时跑的时候 + 每个 task 结束写 summary 时，主动找下面这些信号：
+
+| 信号 | 在哪看 |
+|---|---|
+| pytest FAILED / ERROR | `runs/批量测试/pytest/output.log` grep `FAILED\|ERROR` |
+| smoke ✗ check | `runs/批量测试/smoke/run.log` grep `✗\|FAIL\|exception` |
+| Traceback / 5xx / unhandled exception | 所有 `*.log` grep `Traceback\|HTTPStatusError\|500 Internal` |
+| ChatNode `status=failed` | 每个 chatflow JSON 里看 |
+| WorkFlowNode `status=failed` 或 `error != None` | 同上 |
+| Agent 回复含 engine-speak | grep `internal error\|system error\|系统错误\|内部错误` 在 transcript |
+| auto_plan 没走完 pipeline（比如缺 worker / 缺 judge_post）| WorkFlow 简表（worknodes.tsv）看 role 分布 |
+| recon DAG 跑超过 1 轮（fuse 失效）| 看 judge_pre 节点 count，>2 就异常 |
+| backend 日志异常 | `tail /tmp/agentloom-backend.log` grep `WARNING\|ERROR\|Exception` |
+| GPU OOM / llama-server 崩 | nvidia-smi memory + llama-server 进程是否还在 |
+| tau-bench 里 `stop_reason=backend_error` 或 `agent_status_failed` | task_*.json |
+
+### D2. 分类决策树
+
+每发现一个异常，按这个树分类：
+
+```
+异常 →
+├─ pytest / smoke / TS 编译失败？
+│   └─ engine bug 候选（很可能是回归）
+├─ tau-bench 里 reward=0 / status=failed？
+│   ├─ 看 transcript：agent 答非所问 / 编造工具结果？
+│   │   → model quality（qwen36 弱）
+│   ├─ 看 chatflow：工作流 halt 在某 cognitive 节点？
+│   │   → engine bug 候选（设计文档承诺但路径破了）
+│   └─ 看 chatflow：worker 调对了工具但 DB 没改？
+│       → 工具实现 bug（少见）/ tau-bench 校验 bug
+├─ docker / llama-server / curl 起不来？
+│   └─ infra 问题（不属于 Agentloom）
+└─ Agentloom 答了但内容错（幻觉 / 自相矛盾）？
+    └─ model quality 观察
+```
+
+**engine bug 候选** = 优先；**model quality** = 记录但不 block；**infra** = 修了重跑当前 task。
+
+### D3. 捕获 — 每个 issue 要带的最小证据包
+
+写 issue 时每条至少要含下面这些（不全的话调试者得反复回来问，效率低）：
+
+```markdown
+## Issue N: <一句话总结>
+
+- **Category**: engine_bug | model_quality | infra | test_setup
+- **Severity**: blocker | regression | minor | observation
+- **Task**: 1 | 2 | 3 | 4 | preflight
+- **Status**: detected | partial_repro | confirmed
+- **Found at**: <YYYY-MM-DD HH:MM>
+
+### Where
+- chatflow_id: `<id 全长，方便 GET /api/chatflows/<id>>`（如有）
+- chatnode_id: `<id>`（如有）
+- worknode_id: `<id>`（如有）
+- log path: `runs/.../run.log` line ~N
+- guessed source: `backend/agentloom/<file>:<line>`（你能猜就猜，不能就空）
+
+### Symptom（看到什么）
+1-3 句话。原文 / 原 log 截选优先于你的转述。
+
+### Expected（应该看到什么）
+1-2 句话。如果你不确定 expected，就写"unknown — 不知道哪样算对"。
+
+### Minimal repro
+最短能复现的命令序列。如果靠运气只触发一次，写"flaky, did not isolate"。
+
+### Hypothesis（你的初步猜测）
+1-3 行。**不需要对**——一个错的猜测也比"不知道"信息量高。
+
+### Attached evidence
+- log excerpt: `runs/.../foo.log` line 123-145（贴 5-30 行原文）
+- chatflow snapshot: `runs/.../bug-chatflow-N.json`（如果有可保留的状态）
+- WorkFlow worknodes.tsv 截行（如果工作流路径异常）
+
+### What debugger should check first
+（你的 best guess：哪个文件 / 哪个 commit / 哪个测试该读）
+```
+
+### D4. 汇总到一个 handoff 文件
+
+测试全部跑完（或决定 abort）后，**把所有 issue 写到一个文件**：
+
+```bash
+# 路径就这一个，别分散：
+/home/usingnamespacestc/Agentloom/runs/issues-for-debug.md
+```
+
+文件结构：
+
+```markdown
+# 待 debug 问题清单 — <YYYY-MM-DD>
+
+## 元信息
+- 执行 AI: <你的标识，如 "Claude Sonnet 4.6 / Cursor / Aider …">
+- backend commit: <`git rev-parse HEAD`>
+- 测试模型: qwen36-27b-q4km @ localhost llama.cpp（json_mode=schema）
+- 测试整体时长: <小时>
+- 完成的 task: 1 / 2 / 3 / 4（哪几个跑完了）
+- 中断原因（如有）: ...
+
+## 摘要
+
+| 指标 | 数 |
+|---|---|
+| 总 issue 数 | N |
+| engine_bug 候选 | N |
+| model_quality 观察 | N |
+| infra 问题 | N |
+| test_setup 问题 | N |
+
+## 优先级建议（你给的，不用对）
+
+- **P0 (block 后续测试)**: issue #X, #Y
+- **P1 (回归 / 设计文档承诺破了)**: ...
+- **P2 (minor / observation)**: ...
+
+## Issue 详情
+
+（按 D3 schema 一个个写，编号 1, 2, 3 ...）
+
+## 此外的观察（不构成 issue 但值得提）
+- 模型行为模式（如 qwen36 多 turn 后倾向输出停止）
+- 性能数字（avg LLM call 时长 / GPU 利用率峰值）
+- 测试覆盖盲区（你发现某个 feature 的测试我们都没写）
+```
+
+### D5. 怎么把 issue 抛给我（debugger）
+
+执行 AI 写完 `runs/issues-for-debug.md` 后，告诉用户："写完了，路径 `runs/issues-for-debug.md`，请把内容贴给原作者 / debug AI"。
+
+用户把那个文件 `cat` / 复制粘贴回 debug AI，debug AI 就能：
+1. 直接 `Read` 提到的 chatflow JSON
+2. `curl /api/chatflows/<id>` 看持久化状态（chatflow 没删过！这就是为什么铁则要求 keep）
+3. `git show <commit>:<file>` 看相关源码
+4. 跑 minimal repro 确认
+
+### D6. 不确定是 bug 还是 model quality 怎么办
+
+**两条都写**——分开两个 issue 不矛盾：
+- 一个标 `Category: engine_bug` `Status: detected`，写 hypothesis
+- 一个标 `Category: model_quality` `Status: observation`
+
+debug AI 收到后会决定哪个更可能。你不需要 commit 一个判断。
+
+### D7. 一个具体例子（参考）
+
+如果 task 4 retail 有个 task reward=0 + status=failed 而你猜是 engine bug：
+
+```markdown
+## Issue 3: tau-bench retail task 7 在 worker 阶段 halt，疑似 capability_request 反馈循环没生效
+
+- **Category**: engine_bug
+- **Severity**: regression
+- **Task**: 4
+- **Status**: detected
+- **Found at**: 2026-04-30 03:42
+
+### Where
+- chatflow_id: `019dd9aa-3322-71e0-8ff6-deadbeef1234`
+- chatnode_id: `019dd9aa-...-turn3` （第 3 个 user turn 的 ChatNode）
+- worknode_id: `019dd9aa-...-worker1`
+- log path: `runs/tau-bench/retail-auto-plan/task_7.json` + `run.log:18432`
+- guessed source: `backend/agentloom/engine/chatflow_engine.py::_after_worker_judge`
+
+### Symptom
+worker 节点输出含 `<capability_request>tau_xxx_modify_pending_order_items</capability_request>`，但
+worker_judge 节点的 verdict.capability_escalation 是 []，没把 marker 升级。
+
+### Expected
+worker_judge 应该读 worker.capability_request → 写入 capability_escalation → 引擎 widen
+inheritable_tools + spawn 新 planner（按 commit 2f9998f 设计）。
+
+### Minimal repro
+```bash
+agentloom-bench --domain retail --task-ids 7 \
+  --execution-mode auto_plan ...（跟 4.3 一样）
+```
+
+### Hypothesis
+worker_judge fixture 模板里 `worker_capability_request` 变量替换可能有问题；或者 qwen36 没按 schema
+写 capability_escalation。看 worker_judge 节点的 input_messages（system message 里 capability_request
+是不是真嵌进来了）。
+
+### Attached evidence
+- log excerpt: `runs/tau-bench/retail-auto-plan/run.log` line 18432-18510（贴出来）
+- chatflow snapshot: `curl /api/chatflows/019dd9aa-... > runs/issues/issue-3-chatflow.json`
+
+### What debugger should check first
+- `tests/backend/unit/test_capability_escalation_feedback.py` 是否真覆盖这条路径
+- `backend/agentloom/templates/fixtures/zh-CN/worker_judge.yaml` 模板渲染
+- worker 节点的 `capability_request` 字段是否真填上（看 chatflow.json）
+```
+
 
 1. **跑顺序**：建议 task 1 → task 2 → task 3 → task 4。task 1 验证整套测试基础工作，前面没跑通后面别开始。
 2. **task 4 是耗时大头**：可能要 10-20 小时，**起 nohup 后定期 check log**，不要一直堵在前台。
