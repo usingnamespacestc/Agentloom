@@ -3584,38 +3584,12 @@ class ChatFlowEngine:
         *,
         round_index: int,
     ) -> WorkFlowNode:
-        # PR 6 (44634dd) moved the planner's structured output from
-        # free-text ``content`` to ``tool_uses[0].arguments`` via
-        # ``forced_tool_name="submit_plan"``. The judge prompt's
-        # ``plan_json`` slot was never updated to follow — it kept
-        # reading the (now empty) content field, so plan_judge saw
-        # "blank plan" every round, voted revise, and ran out of
-        # debate budget before any worker could spawn (observed
-        # 2026-04-29 retail tau-bench: 3 of 3 turns halted at
-        # plan_judge with "plan为空" critiques despite the planner
-        # having emitted a valid atomic brief on every round).
-        # Fix: parse via the same helper ``_after_planner`` uses,
-        # then re-serialize to JSON for the prompt. Falls back to
-        # the raw content on parse failure so weak providers /
-        # adapters that drop tool_choice still feed something to
-        # the judge.
-        plan_json_text = ""
-        if planner_node.output_message is not None:
-            try:
-                parsed = _parse_planner_output_message(
-                    planner_node.output_message
-                )
-                plan_json_text = parsed.model_dump_json(indent=2)
-            except PlannerParseError:
-                plan_json_text = (
-                    planner_node.output_message.content or ""
-                )
         templated = instantiate_fixture(
             self._fixture_plans["plan_judge"],
             {
                 **_trio_params(inner),
                 "available_tools": self._available_tools_listing(),
-                "plan_json": plan_json_text,
+                "plan_json": _render_planner_output_for_prompt(planner_node),
                 "round": str(round_index),
                 "round_budget": str(inner.debate_round_budget),
             },
@@ -4142,7 +4116,7 @@ class ChatFlowEngine:
                     workflow,
                     planner_judge_node,
                     resolved_model=resolved_model,
-                    prior_plan=planner_node.output_message.content,
+                    prior_plan=_render_planner_output_for_prompt(planner_node),
                     critique=_compose_planner_retry_critique(
                         exc, planner_judge_node
                     ),
@@ -4194,7 +4168,7 @@ class ChatFlowEngine:
                         workflow,
                         planner_judge_node,
                         resolved_model=resolved_model,
-                        prior_plan=planner_node.output_message.content,
+                        prior_plan=_render_planner_output_for_prompt(planner_node),
                         critique=critique,
                     )
                     return
@@ -4273,7 +4247,7 @@ class ChatFlowEngine:
                 workflow,
                 planner_judge_node,
                 resolved_model=resolved_model,
-                prior_plan=planner_node.output_message.content,
+                prior_plan=_render_planner_output_for_prompt(planner_node),
                 critique=_render_critiques(verdict),
             )
             return
@@ -6696,6 +6670,36 @@ def _parse_planner_output_message(
             if tu.name == SUBMIT_PLAN_TOOL_NAME:
                 return parse_planner_from_tool_args(dict(tu.arguments))
     return parse_recursive_planner_output(output.content or "")
+
+
+def _render_planner_output_for_prompt(
+    planner_node: WorkFlowNode,
+) -> str:
+    """Render a planner WorkNode's frozen output as the JSON string that
+    the planner_judge / planner-respawn templates feed into their
+    ``plan_json`` / ``prior_plan`` slots.
+
+    PR 6 (44634dd) routed the planner via ``forced_tool_name='submit_plan'``,
+    so on success ``output_message.content`` is empty and the structured
+    plan lives in ``tool_uses[0].arguments``. Several call sites
+    (planner_judge spawn, planner respawn after revise / parse_error /
+    phantom-tool critique) used to read ``content`` directly and ended
+    up feeding the empty string into the prompt — judges saw "no plan",
+    new planners saw "no prior attempt", and the auto_plan loop
+    revised in circles until debate budget halt'd. This helper is the
+    single source of truth: parse via ``_parse_planner_output_message``
+    (the same helper ``_after_planner`` consumes), then dump as
+    indented JSON. Falls back to raw content on PlannerParseError so
+    weak providers / adapters that drop tool_choice still surface
+    something to the caller.
+    """
+    if planner_node.output_message is None:
+        return ""
+    try:
+        parsed = _parse_planner_output_message(planner_node.output_message)
+        return parsed.model_dump_json(indent=2)
+    except PlannerParseError:
+        return planner_node.output_message.content or ""
 
 
 def _atomic_brief_for_worker(
