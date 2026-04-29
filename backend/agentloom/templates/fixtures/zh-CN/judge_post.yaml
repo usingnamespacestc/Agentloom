@@ -224,13 +224,28 @@ plan:
             当问题出现在具体某个 WorkNode 时，去 catalog 里定位它，
             让 UI 能跳转过去。
 
+            **可选的认知 ReAct DAG（recon_plan）**：当你的判定真的
+            依赖于核实真实状态——比如 worker 声称改了订单 / 写了文件 /
+            更新了记录，而 accept 还是 retry 的唯一诚实判断方式就是
+            真的去查一眼——你可以用
+            ``{"name": str, "args": object}`` 列表的形式发出
+            ``recon_plan`` 而不是直接给 verdict。引擎会跑完这些只读
+            工具调用，然后把结果作为上下文重跑你一次。**只在 accept-
+            vs-retry 取决于 transcript 里看不到的事实时使用**——最
+            常见的场景就是 worker 说"做完了"，recon 一下确认。recon
+            名字必须来自可用的只读工具（引擎会把 WRITE / 未知 / 已禁
+            用的名字过滤掉并打 warning）。**只允许一轮**——已经消费
+            过 recon 结果的 judge_post 再发 recon_plan 会被拒绝，第二
+            次必须给出最终 verdict。
+
             返回 JSON：
               {"post_verdict": "accept"|"retry"|"fail",
                "issues": [{"location": worknode_id, "expected": str,
                            "actual": str, "reproduction": str}, ...],
                "user_message": str | null,
                "merged_response": str | null,
-               "redo_targets": [{"node_id": str, "critique": str}, ...]}。
+               "redo_targets": [{"node_id": str, "critique": str}, ...],
+               "recon_plan": [{"name": str, "args": object}, ...]}。
             不需要的字段省略；不要输出多余散文。
         - role: user
           content: |

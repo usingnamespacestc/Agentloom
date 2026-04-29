@@ -300,6 +300,29 @@ _VARIANT_SCHEMAS: dict[JudgeVariant, dict[str, Any]] = {
                     "first sees the worker marker."
                 ),
             },
+            "recon_plan": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "args": {"type": "object"},
+                    },
+                    "required": ["name"],
+                },
+                "description": (
+                    "M7.5 PR 7 sub-task 3: cognitive ReAct DAG for "
+                    "judge_post. When deciding accept/retry/fail "
+                    "depends on verifying real state (worker claimed "
+                    "a mutation, accept hinges on confirming it), "
+                    "emit read-only tool calls here instead of "
+                    "committing to a verdict. Engine runs them, then "
+                    "re-runs judge_post with the results in context. "
+                    "One round only — recursion is fused. Leave "
+                    "empty when the transcript already shows enough "
+                    "to decide."
+                ),
+            },
         },
         "required": ["post_verdict"],
     },

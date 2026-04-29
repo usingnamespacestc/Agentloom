@@ -3287,6 +3287,98 @@ class ChatFlowEngine:
             return False
         return True
 
+    def _cognitive_react_enabled_for_post(
+        self,
+        chatflow: ChatFlow,
+        workflow: WorkFlow,
+        judge_post_node: WorkFlowNode,
+    ) -> bool:
+        """Decide whether to honor a ``judge_post`` ``recon_plan``.
+
+        Same two outer gates as the pre variant
+        (``cognitive_react_enabled`` + tool registry present) plus a
+        recursion fuse: a judge_post that already consumed recon
+        results (i.e. its parents are TOOL_CALL nodes spawned by
+        :meth:`_spawn_recon_chain_for_post`) cannot recon again. The
+        guard caps the depth at one round.
+
+        Per-judge ``effective_tools`` is enforced inside
+        ``_filter_recon_plan`` at spawn time (same as pre).
+        """
+        if not chatflow.cognitive_react_enabled:
+            return False
+        if self._tools is None:
+            log.warning(
+                "cognitive_react_enabled=True but no tool registry; "
+                "skipping judge_post recon"
+            )
+            return False
+        for pid in judge_post_node.parent_ids or []:
+            parent = workflow.nodes.get(pid)
+            if parent is not None and parent.step_kind == StepKind.TOOL_CALL:
+                return False
+        return True
+
+    def _filter_recon_plan(
+        self,
+        recon_plan: list[ReconToolCall],
+        judge_node: WorkFlowNode,
+        chatflow_disabled: frozenset[str],
+    ) -> list[ReconToolCall]:
+        """Drop unsafe / unusable specs from a judge's ``recon_plan``.
+
+        Three cumulative gates:
+        - ``chatflow_disabled`` — workspace / chatflow toggle; the
+          most-specific gate.
+        - registry presence — drop hallucinated names so we don't
+          dispatch a "tool not found" tool_call.
+        - judge ``effective_tools`` (M7.5 §4.1) — drop tools outside
+          the per-judge cognitive READ ceiling. ``None`` means legacy
+          fallthrough; the registry+disabled checks remain the floor.
+
+        Pure function (logs warnings, otherwise no side effects) so the
+        pre / post recon paths share the exact same filter and a
+        future plan_judge / worker_judge variant just reuses it.
+        """
+        assert self._tools is not None
+        judge_allocation: frozenset[str] | None = (
+            frozenset(judge_node.effective_tools)
+            if judge_node.effective_tools is not None
+            else None
+        )
+        kept: list[ReconToolCall] = []
+        for spec in recon_plan:
+            if spec.name in chatflow_disabled:
+                log.warning(
+                    "recon: chatflow disabled tool %r — dropping spec; "
+                    "judge node=%s variant=%s",
+                    spec.name,
+                    judge_node.id,
+                    judge_node.judge_variant,
+                )
+                continue
+            if not self._tools.has(spec.name):
+                log.warning(
+                    "recon: unknown tool %r — dropping spec; "
+                    "judge node=%s variant=%s",
+                    spec.name,
+                    judge_node.id,
+                    judge_node.judge_variant,
+                )
+                continue
+            if judge_allocation is not None and spec.name not in judge_allocation:
+                log.warning(
+                    "recon: tool %r not in judge effective_tools "
+                    "allocation (likely WRITE side_effect or workspace-"
+                    "disabled) — dropping spec; judge node=%s variant=%s",
+                    spec.name,
+                    judge_node.id,
+                    judge_node.judge_variant,
+                )
+                continue
+            kept.append(spec)
+        return kept
+
     def _spawn_recon_chain(
         self,
         workflow: WorkFlow,
@@ -3295,15 +3387,15 @@ class ChatFlowEngine:
         *,
         resolved_model: ProviderModelRef | None,
     ) -> None:
-        """Spawn the recon DAG: N tool_call children + a follow-up
-        judge_pre node that consumes their outputs.
+        """Spawn the recon DAG for judge_pre: N tool_call children + a
+        follow-up judge_pre node that consumes their outputs.
 
-        Filters ``verdict.recon_plan`` against the registry so a
-        hallucinated name (or a chatflow-disabled tool) drops with a
-        warning instead of stalling the WorkFlow with a "tool not
-        found" tool_call. The remaining calls are spawned with
-        ``side_effect`` constraints implicit in the engine's
-        registry filter — recon is read-only by contract.
+        Sister of :meth:`_spawn_recon_chain_for_post`. The two share
+        :meth:`_filter_recon_plan` for spec validation; they diverge
+        on what they spawn as the follow-up node and what they do
+        on "every spec dropped" fallback (pre applies the trio,
+        post falls through to its existing accept/retry/fail
+        decision tree).
 
         The follow-up judge_pre is parented on every spawned
         tool_call so the scheduler waits for them all before re-
@@ -3313,54 +3405,10 @@ class ChatFlowEngine:
         tool_results in via the tool_call ancestors.
         """
         assert self._tools is not None  # enforced by _cognitive_react_enabled_for_pre
-        disabled = workflow.disabled_tool_names if hasattr(workflow, "disabled_tool_names") else frozenset()
-        # Prefer the engine-side disabled set if present; the
-        # recursive walk already enforces it elsewhere via
-        # _disabled_tool_names. Use the chatflow flag here as the
-        # outer gate.
         chatflow_disabled = self._disabled_tool_names_for_workflow(workflow)
-        # M7.5 §4.1 per-judge ceiling: when the judge_pre node carries
-        # an explicit ``effective_tools`` allocation (set by
-        # ``_spawn_judge_pre`` from ``_judge_pre_effective_tools``),
-        # use it as the recon whitelist — drops WRITE tools the
-        # judge prompt shouldn't have asked for, plus any tool the
-        # workspace / chatflow disabled. ``None`` means legacy
-        # fallthrough (sub-WorkFlow judges, bare-engine tests):
-        # gate falls open and the registry-existence + chatflow-
-        # disabled checks below remain the only filter.
-        judge_allocation: frozenset[str] | None = (
-            frozenset(judge_pre_node.effective_tools)
-            if judge_pre_node.effective_tools is not None
-            else None
+        kept = self._filter_recon_plan(
+            verdict.recon_plan, judge_pre_node, chatflow_disabled
         )
-        kept: list[ReconToolCall] = []
-        for spec in verdict.recon_plan:
-            if spec.name in chatflow_disabled:
-                log.warning(
-                    "recon: chatflow disabled tool %r — dropping spec; "
-                    "judge_pre node=%s",
-                    spec.name,
-                    judge_pre_node.id,
-                )
-                continue
-            if not self._tools.has(spec.name):
-                log.warning(
-                    "recon: unknown tool %r — dropping spec; "
-                    "judge_pre node=%s",
-                    spec.name,
-                    judge_pre_node.id,
-                )
-                continue
-            if judge_allocation is not None and spec.name not in judge_allocation:
-                log.warning(
-                    "recon: tool %r not in judge effective_tools "
-                    "allocation (likely WRITE side_effect or workspace-"
-                    "disabled) — dropping spec; judge_pre node=%s",
-                    spec.name,
-                    judge_pre_node.id,
-                )
-                continue
-            kept.append(spec)
         if not kept:
             log.warning(
                 "recon: every spec dropped; falling back to atomic "
@@ -3396,6 +3444,95 @@ class ChatFlowEngine:
         follow_up.model_override = resolved_model or workflow.judge_model_override
         workflow.add_node(follow_up)
 
+    def _spawn_recon_chain_for_post(
+        self,
+        workflow: WorkFlow,
+        judge_post_node: WorkFlowNode,
+        verdict: JudgeVerdict,
+        *,
+        resolved_model: ProviderModelRef | None,
+    ) -> bool:
+        """Spawn judge_post's recon DAG: N tool_call children + a
+        follow-up judge_post that re-evaluates with the recon results
+        in context. Returns True when recon was actually spawned, False
+        when every spec dropped (caller falls through to the original
+        accept/retry/fail decision tree).
+
+        Sister of :meth:`_spawn_recon_chain`; see that doc for the
+        shared filter semantics. The post variant exists because
+        judge_post is the universal exit gate and often needs to
+        verify state mutations the worker claimed (e.g. retail
+        ``outputs_match=True / db_hash_match=False`` symptom — agent
+        said "I changed the order" but the mock DB shows otherwise).
+        Verifying via ``get_order_details`` recon before issuing the
+        final verdict closes that gap.
+
+        The follow-up reuses the original judge_post's input_messages
+        so the trio + upstream-summary framing carries over; the
+        spawned tool_call ancestors splice their results in via the
+        engine's standard context build.
+        """
+        assert self._tools is not None  # enforced by _cognitive_react_enabled_for_post
+        chatflow_disabled = self._disabled_tool_names_for_workflow(workflow)
+        kept = self._filter_recon_plan(
+            verdict.recon_plan, judge_post_node, chatflow_disabled
+        )
+        if not kept:
+            log.warning(
+                "recon (post): every spec dropped; judge_post node=%s "
+                "falling through to original verdict path",
+                judge_post_node.id,
+            )
+            return False
+
+        tool_call_ids: list[str] = []
+        for spec in kept:
+            tc = WorkFlowNode(
+                step_kind=StepKind.TOOL_CALL,
+                parent_ids=[judge_post_node.id],
+                tool_name=spec.name,
+                tool_args=dict(spec.args or {}),
+            )
+            workflow.add_node(tc)
+            tool_call_ids.append(tc.id)
+
+        templated = instantiate_fixture(
+            self._fixture_plans["judge_post"],
+            {
+                # Re-render the prompt with empty trio/catalog params;
+                # we'll overwrite input_messages below with the
+                # original judge_post's seed so these placeholders
+                # never reach the model. The instantiate_fixture call
+                # is just to get the WorkFlowNode skeleton with the
+                # right step_kind / role / judge_variant.
+                "workflow_description": "",
+                "workflow_inputs": "",
+                "workflow_expected_outcome": "",
+                "upstream_kind": "recon_followup",
+                "upstream_summary": "",
+                "worknode_catalog": "",
+                "redo_eligible_catalog": "",
+            },
+            includes=self._fixture_includes,
+        )
+        follow_up = _single_node(templated)
+        follow_up.parent_ids = list(tool_call_ids)
+        follow_up.judge_target_id = judge_post_node.judge_target_id
+        # Re-use the original seed so the trio + upstream summary +
+        # worknode catalog the original judge saw all carry over —
+        # the recon results splice in via the tool_call ancestors.
+        follow_up.input_messages = list(judge_post_node.input_messages or [])
+        follow_up.model_override = (
+            resolved_model or workflow.judge_model_override
+        )
+        # M7.5 §4.1 — propagate the cognitive ceiling to the follow-up
+        # so a second round of recon (if the model emits one) hits the
+        # same gate as the first.
+        if judge_post_node.effective_tools is not None:
+            follow_up.effective_tools = list(judge_post_node.effective_tools)
+        workflow.add_node(follow_up)
+        return True
+
     def _disabled_tool_names_for_workflow(
         self, workflow: WorkFlow
     ) -> frozenset[str]:
@@ -3421,6 +3558,7 @@ class ChatFlowEngine:
         upstream_kind: str,
         upstream_summary: str,
         worknode_catalog: str,
+        chatflow: ChatFlow | None = None,
     ) -> WorkFlowNode:
         """Materialize the universal-exit-gate judge_post.
 
@@ -3464,6 +3602,39 @@ class ChatFlowEngine:
         node.judge_target_id = parent_node.id
         node.input_messages = [*(node.input_messages or []), *context_wire]
         node.model_override = inner.judge_model_override
+        # M7.5 §4.1 cognitive ceiling — same as judge_pre
+        # (sub-task 3 of cognitive ReAct DAG productionization).
+        # Snapshot the read-only allocation onto judge_post so the
+        # post-recon path's _filter_recon_plan has the same gate as
+        # the pre-recon path: a hallucinated WRITE recon spec drops
+        # at spawn rather than dispatching as a real call.
+        #
+        # Two source paths for the disabled set:
+        # - chatflow passed explicitly (judge_pre's hook + the
+        #   easy-to-thread sites): derive from chatflow.disabled +
+        #   foreign-tau filter.
+        # - chatflow=None (most spawn sites — aggregator / halt
+        #   helpers buried deep in the post_node_hook): fall back to
+        #   the engine's per-execute ``_disabled_tool_names`` which
+        #   already unions the workspace + chatflow + foreign-tau
+        #   sets at execute time. Same effective filter, no need to
+        #   plumb chatflow through every helper.
+        if chatflow is not None:
+            node.effective_tools = self._cognitive_judge_effective_tools(
+                chatflow
+            )
+        else:
+            # Fallback: the engine's per-execute disabled set is the
+            # same union (workspace + chatflow + foreign-tau) the
+            # explicit-chatflow path computes, just pre-baked. Bare-
+            # engine tests that never set this field see the default
+            # empty frozenset and get the full READ+NONE registry —
+            # matches the pre-allocation behavior for those callers.
+            node.effective_tools = (
+                self._cognitive_judge_effective_tools_from_disabled(
+                    self._inner._disabled_tool_names
+                )
+            )
         return inner.add_node(node)
 
     def _available_tools_listing(self) -> str:
@@ -3532,42 +3703,44 @@ class ChatFlowEngine:
             caps.add(CROSS_CHATFLOW_CAPABILITY)
         return frozenset(caps)
 
-    def _judge_pre_effective_tools(self, chatflow: ChatFlow) -> list[str]:
-        """Compute the M7.5 §4.1 ``effective_tools`` allocation for a
-        judge_pre WorkNode.
+    def _cognitive_judge_effective_tools_from_disabled(
+        self, disabled: frozenset[str]
+    ) -> list[str]:
+        """Compute the M7.5 §4.1 ``effective_tools`` allocation shared
+        by every cognitive (judge) WorkNode that exposes a recon DAG,
+        given a pre-computed disabled set.
 
         Cognitive nodes get ``side_effect_filter={NONE, READ}`` — they
         can read but never write. ``effective_tools`` is the
         registry-name-list expression of that ceiling, snapshotted on
         the WorkNode at spawn time so:
 
-        - ``_spawn_recon_chain`` can validate ``recon_plan`` specs
-          against this list (the gate in ``_cognitive_react_enabled_for_pre``
-          that the docstring used to describe as "deferred"). A
-          hallucinated ``Bash`` recon spec drops at spawn instead of
-          dispatching as a real WRITE call.
+        - ``_spawn_recon_chain`` (pre and post variants) can validate
+          ``recon_plan`` specs against this list. A hallucinated
+          ``Bash`` recon spec drops at spawn instead of dispatching
+          as a real WRITE call.
         - Future per-judge ``resolve_for_node`` calls (if/when judges
           start exposing tools to the LLM) read a coherent allocation
           rather than falling through to legacy.
 
-        Excludes:
-        - WRITE tools (``side_effect=WRITE``) — the cognitive ceiling.
-        - Names in ``chatflow.disabled_tool_names`` — the workspace /
+        Excludes (caller's responsibility, baked into ``disabled``):
+        - Names in ``chatflow.disabled_tool_names`` — workspace /
           chatflow toggle wins regardless of the effective_tools
           allocation. Mirrors the catalog-render filter.
         - ``foreign tau-bench`` tools (other concurrent benchmark
           sessions' wrappers leaking through the shared registry).
 
-        Returns ``[]`` when the registry is missing — the caller
-        treats empty as "no allocation, fall through to the side-effect
-        filter alone" so bare-engine tests behave like pre-PR-7.
+        Excludes here:
+        - WRITE tools (``side_effect=WRITE``) — the cognitive ceiling.
+
+        Returns ``[]`` when the registry is missing.
+
+        judge_pre and judge_post share this exact set today (both are
+        cognitive READ-only). plan_judge / worker_judge use the same
+        filter when their recon path lands (sub-task follow-up).
         """
         if self._tools is None:
             return []
-        disabled = (
-            frozenset(chatflow.disabled_tool_names or ())
-            | self._foreign_tau_tools(chatflow.id)
-        )
         out: list[str] = []
         for tool in sorted(self._tools.all(), key=lambda t: t.name):
             if tool.name in disabled:
@@ -3576,6 +3749,25 @@ class ChatFlowEngine:
                 continue
             out.append(tool.name)
         return out
+
+    def _cognitive_judge_effective_tools(
+        self, chatflow: ChatFlow
+    ) -> list[str]:
+        """ChatFlow-keyed convenience wrapper — derives the disabled
+        set from the chatflow's settings + foreign-tau filter and
+        delegates."""
+        disabled = (
+            frozenset(chatflow.disabled_tool_names or ())
+            | self._foreign_tau_tools(chatflow.id)
+        )
+        return self._cognitive_judge_effective_tools_from_disabled(disabled)
+
+    def _judge_pre_effective_tools(self, chatflow: ChatFlow) -> list[str]:
+        """Backward-compat wrapper kept to preserve the call site name
+        used by tests + ``_spawn_judge_pre``. Delegates to the unified
+        cognitive helper since judge_pre and judge_post share the
+        ceiling."""
+        return self._cognitive_judge_effective_tools(chatflow)
 
     def _resolve_tool_catalog(self, chatflow: ChatFlow) -> str:
         """Render the M7.5 inheritable-tool catalog injected before
@@ -3970,6 +4162,7 @@ class ChatFlowEngine:
                         user_message_text=user_message_text,
                         context_wire=context_wire,
                         resolved_model=chat_node.resolved_model,
+                        chatflow=chatflow,
                     )
                 return
 
@@ -4817,9 +5010,20 @@ class ChatFlowEngine:
         user_message_text: str,
         context_wire: list[WireMessage],
         resolved_model: ProviderModelRef | None,
+        chatflow: ChatFlow | None = None,
     ) -> None:
         """judge_post finished. Decide what happens next:
 
+        - ``recon_plan`` (when ``cognitive_react_enabled`` and the
+          judge_post itself isn't already a recon follow-up): spawn
+          read-only tool_calls + a follow-up judge_post that re-runs
+          with the recon results in context. Sub-task 3 of cognitive
+          ReAct DAG productionization. Targets the
+          ``outputs_match=True / db_hash_match=False`` symptom on
+          retail tau-bench: agent says "I changed the order" but the
+          mock DB shows otherwise. judge_post calls
+          ``get_order_details``, sees the discrepancy, then can issue
+          a ``retry`` verdict instead of accepting.
         - ``accept``: nothing — the WorkFlow is done, agent_response is
           derived by the ChatFlow layer from the verdict (merged_response)
           or the terminal llm_call.
@@ -4842,6 +5046,28 @@ class ChatFlowEngine:
         verdict = judge_post_node.judge_verdict
         if verdict is None:
             return
+
+        # M7.5 PR 7 sub-task 3 — cognitive ReAct DAG for judge_post.
+        # When the judge asked for recon and this isn't already a
+        # recon follow-up, branch into the DAG path and skip the
+        # accept/retry/fail decision tree (the follow-up will re-run
+        # this hook with a fresh verdict that doesn't carry recon).
+        if (
+            chatflow is not None
+            and verdict.recon_plan
+            and self._cognitive_react_enabled_for_post(
+                chatflow, workflow, judge_post_node
+            )
+        ):
+            spawned = self._spawn_recon_chain_for_post(
+                workflow,
+                judge_post_node,
+                verdict,
+                resolved_model=resolved_model,
+            )
+            if spawned:
+                return
+            # else: every spec dropped, fall through to original verdict.
 
         # accept → nothing to do; agent_response derivation happens in
         # _execute_node via _judge_post_response_text / _terminal_llm_call.

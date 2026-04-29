@@ -260,13 +260,33 @@ plan:
             When an issue exists on a specific WorkNode, locate it on
             the catalog so the UI can jump there.
 
+            **Optional cognitive ReAct DAG (recon_plan)**: when your
+            verdict genuinely depends on verifying real state — e.g.
+            the worker claimed it modified an order / wrote a file /
+            updated a record, and the only honest way to decide
+            ``accept`` vs ``retry`` is to actually look — you may
+            emit ``recon_plan`` as an array of
+            ``{"name": str, "args": object}`` entries instead of
+            committing to a verdict. The engine will run those
+            read-only tool calls, then re-run you with their results
+            in context. Use sparingly: only when accept-vs-retry
+            hinges on a fact you can't see in the transcript. The
+            single most common case is a worker that says it did
+            something — recon to confirm. Recon names must come from
+            the available read-only tools (the engine drops WRITE /
+            unknown / disabled names with a warning). One round
+            only — a follow-up judge_post that emits another
+            recon_plan is rejected, so commit to a verdict on the
+            second pass.
+
             Return JSON:
               {"post_verdict": "accept"|"retry"|"fail",
                "issues": [{"location": worknode_id, "expected": str,
                            "actual": str, "reproduction": str}, ...],
                "user_message": str | null,
                "merged_response": str | null,
-               "redo_targets": [{"node_id": str, "critique": str}, ...]}.
+               "redo_targets": [{"node_id": str, "critique": str}, ...],
+               "recon_plan": [{"name": str, "args": object}, ...]}.
             Omit fields you don't need; never include extra prose.
         - role: user
           content: |
