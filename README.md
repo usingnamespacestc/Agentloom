@@ -19,7 +19,7 @@
 | **核心能力** | ChatFlow DAG（fork/merge/compact/pack/fold）+ 嵌套 WorkFlow + 递归 planner + 三段式 judge + MemoryBoard + 跨 chatflow 数据访问门禁 |
 | **执行模式** | `native_react`（直连 ReAct）/ `semi_auto`（一次性 plan）/ `auto_plan`（递归 planner + judge 驱动重试），ChatFlow 默认 + ChatNode 覆盖 |
 | **WorkNode 类型** | `llm_call` · `tool_call` · `judge_call` (pre/during/post) · `sub_agent_delegation` · `compact` · `merge` · `pack` · `brief` |
-| **测试覆盖** | 后端 **854** unit + integration（其中 **665** unit / **189** integration）/ 4 skipped；前端 **91** 单测；全部跑过 |
+| **测试覆盖** | 后端 **857** unit + integration（其中 **665** unit / **192** integration）/ 4 skipped；前端 **91** 单测；live-backend smoke **47** checks across 7 scripts；全部跑过 |
 | **最近里程碑** | **M7.5 capability model**（2026-04-26 · 8 PR + 1 hotfix 单日 ship · ~1900 行 diff · ~100 新测试）+ **post-ship 修复 8 commit**（2026-04-26 night → 2026-04-27：auto_plan 死锁修复 / capability_request 反馈闭环履约 / drill-down nudge / 跨 chatflow 工具污染 fix / etc.） |
 | **τ-bench retail 0-9 (NATIVE_REACT) baseline** | **8/10 = 80% pass^1**（agent: ark-code-latest via 火山引擎 coding plan lite · user simulator: doubao-seed-2-0-pro-260215 · 全程 ~27 min · 2 fail 归因到 user simulator 演 "private person" persona 拒验证而非 agent 错） |
 | **provider 支持** | OpenAI 兼容（Volcengine / Ark / Ollama / OpenAI）+ Anthropic 原生 + MCP 客户端 |
@@ -207,11 +207,62 @@ turn N:
 - **side_effect default 是 silent 杀手**：基类 default `WRITE` 是 fail-safe 不是 graceful——任何 Tool 子类、任何 wrapper 必须显式标 side_effect 或自带 classifier。MCP bridge 已经做了（读 `readOnlyHint`），tau-bench 漏了。Memory 已记 `feedback_tool_side_effect_landmine.md` 防再踩。
 - **结构化递归 fuse > metadata 字段**：判 post 跟 judge_pre 的 fuse 都用"parent_ids 里有 TOOL_CALL"这条结构信号，不维护额外 metadata。spawn 流程一改，fuse 自动跟上——不会出现"忘了 reset 状态字段"的经典 bug。
 
+---
+
+## 🧪 第五轮：smoke 框架 + 第一次跑就抓 bug（commit `0ab919b..bc8dab4`）
+
+第四轮还原了端到端 cognitive 路径的工作能力，但都是单点验证。这一轮建了一套**live-backend smoke scripts**（`scripts/smoke/`）——每个脚本驱动运行中的后端走真 HTTP + 真 provider，按 feature 拆，输出 PASS/FAIL 行。跟 pytest 不替代：pytest 用 stub provider + TestClient 验逻辑分支（毫秒级、密集），smoke 验整栈在用（发现 wire format / 中间件 / 真 LLM 行为问题）。
+
+### 7 个脚本 + 1 个 framework
+
+| 脚本 | feature | 时长 | 结果 |
+|---|---|---|---|
+| `01_single_turn.py` | POST /chatflows + POST /turns + GET 一致性 | 33s | 7/7 ✓ |
+| `02_fork_branch.py` | fork 从非 leaf；fork 不拒绝原则 | 118s | 8/8 ✓ |
+| `03_compact_drill_down.py` | 手动 compact + drill-down 拉回原文 | 293s | 6/6 ✓（`8473921` 一字不差）|
+| `04_auto_plan_recon.py` | auto_plan + recon DAG + 递归 fuse 验证 | 120s | 6/6 ✓ |
+| `05_capability_request.py` | worker emit marker → escalation → respawn | 33s | 2/2 ✓（识别 short-circuit 路径）|
+| `06_cross_chatflow.py` | workspace toggle off → 拒，on → 通 | 165s | 8/8 ✓ |
+| `combo_full_pipeline.py` | 多 feature 组合：3 turn + fork + compact + auto_plan + drill-down + UX 检查 | 454s | **10/10** ✓ |
+| **总计** | **47 checks** | **~22 分钟** | **全绿** |
+
+### 第一次跑就抓到一个真 bug
+
+`a1caef7` —— smoke 06 跑出 phase 2 失败：toggle ON 之后 `get_node_context(scope=cross_chatflow)` 仍然被 gate 拒。drill 进去发现 `PatchWorkspaceSettingsRequest` Pydantic schema **没声明 `allow_cross_chatflow_lookup` 字段**，Pydantic 把这个 key 直接 drop 了，PATCH 完全无效。整条 cross_chatflow 路径在生产里 un-flippable——schema 在（74bb772 加了），engine consumer 在（`_resolve_extra_capabilities` 读它），unit + integration 测试都绿，但 wire format 漏一站点。
+
+跟今晚的 leak 系列同款模式（plan_judge 读空 content / tau wrapper WRITE default / recon fall-through 不接通 caller）。**这种 bug pytest 完全测不到——必须真 HTTP 跑**。
+
+修完之后再跑 06：8/8 PASS，secret code 真的从 chatflow A 拉到 chatflow B。
+
+### combo 的端到端信号
+
+`combo_full_pipeline.py` 是这一轮最有说服力的脚本——一个 chatflow 走 4 phase：
+
+1. 3 turn 链（"我喜欢的颜色是 octarine"埋在 turn 1）
+2. 中段 fork
+3. 手动 compact 把 turn 1 折进 summary
+4. **切 auto_plan，问"我之前给你的具体颜色是什么"**
+
+agent 答 `octarine` —— 一字不差，没废话，没 engine-speak。背后引擎信号：
+- judge_pre + planner + planner_judge + worker + worker_judge + judge_post 全部跑过
+- recon recursion fuse 限 judge_pre count=1
+- worker 真的调用了 `get_node_context` 拉回 turn 1 原文（因为 turn 1 已经被 compact 折掉）
+- judge_post 没漏 "internal error" / "system error" 等 engine-speak
+
+**所有今天 ship 的 fix 在这一个脚本里全联动了**。
+
+### 这一轮的元教训
+
+- **smoke 跟 pytest 真互补不替代**：pytest 单测+集成 853 条全绿，smoke 第一次跑就抓 1 个真 bug。两层覆盖的是不同 surface——pytest 验逻辑分支密度，smoke 验 wire format 完整性。
+- **wire-format leak 是高频 bug 模式**：今晚 6 个 bug 里 4 个都是"schema 在，consumer 在，中间一站点漏接"。共同诊断：单元测试单独验每端，但端到端 dataflow 没人测。Smoke 弥补这个。
+- **真 LLM 行为是另一种 reality check**：03 / combo 验证 drill-down 不只是引擎能 spawn `get_node_context` tool_call——真模型在压缩过的上下文里**真的能识别需要拉原文 + 真的把数字字节级回答出来**。这是 prompt + sticky-restore + brief 协作的端到端正确性，pytest 看不到。
+
 ### 还在 backlog 的（已识别但未履约）
 
 - 🟡 (B) judge_pre prompt 加前瞻指令（fixture 改）—— 当前 (A) 跨 turn 累积 + (C) cap_request 反馈循环 + recon DAG 都是 reactive 路径；(B) 是预防层，等真负载数据再决定 ROI
 - 🟢 τ-bench 工具 first-class 化（当前 mitigation `bdedbdd` + `ed5bcfe` 通了，根本架构 hack 等长期决策）
 - 🟡 plan_judge / worker_judge 也加 recon —— judge_post 的同样路线，但这俩不出 user reply，ROI 小
+- 🟢 给剩余 30+ 个 feature 也写 smoke（当前 7/38 覆盖；按需补就行，框架已有）
 
 ---
 
@@ -486,7 +537,7 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
 - [x] **Frozen-guard exempt 不变量测试**：`test_frozen_guard_exempts.py`
       正反两面固定 UI-only 字段（position / sticky / pending_queue）在
       frozen 节点上放行、语义字段必触发；防未来加新字段时踩拖动丢失那类坑
-- [x] Pytest：后端 **854** unit + integration / 4 skipped + 前端 **91** 个单测全绿，collection 干净
+- [x] Pytest：后端 **857** unit + integration / 4 skipped + 前端 **91** 个单测全绿，collection 干净；live-backend smoke 47 checks 全绿
 - [x] **真模型实测验证不变量**：M7.5 跑了 3 个 auto_plan + cognitive_react chatflow（claude-haiku/sonnet）+ τ-bench retail 0-9 batch，挖出 1 个 cross-provider schema bug（PR 6 hotfix）+ 1 个 emergent property（catalog 前置吸收 capability_request 路径）反写回设计文档
 
 ---
