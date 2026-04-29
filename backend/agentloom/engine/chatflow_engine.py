@@ -105,7 +105,12 @@ from agentloom.schemas.common import (
 from agentloom.schemas.workflow import WireMessage
 from agentloom.templates.instantiate import instantiate_fixture
 from agentloom.templates.loader import fragments_as_texts, load_fixtures
-from agentloom.tools.base import ToolContext, ToolRegistry, accessed_scope
+from agentloom.tools.base import (
+    SideEffect,
+    ToolContext,
+    ToolRegistry,
+    accessed_scope,
+)
 from agentloom.tools.node_context import CROSS_CHATFLOW_CAPABILITY
 
 log = logging.getLogger(__name__)
@@ -3166,7 +3171,9 @@ class ChatFlowEngine:
         if switches.judge_pre:
             # Only the pre-judge runs upfront; the rest of the chain is
             # spawned dynamically once we know the verdict.
-            self._spawn_judge_pre(inner, user_message_text, context_wire)
+            self._spawn_judge_pre(
+                inner, user_message_text, context_wire, chatflow=chatflow
+            )
         else:
             inner.add_node(
                 WorkFlowNode(
@@ -3219,6 +3226,8 @@ class ChatFlowEngine:
         inner: WorkFlow,
         user_message_text: str,  # noqa: ARG002 — kept for symmetry / future logging
         context_wire: list[WireMessage],
+        *,
+        chatflow: ChatFlow | None = None,
     ) -> WorkFlowNode:
         templated = instantiate_fixture(
             self._fixture_plans["judge_pre"],
@@ -3229,6 +3238,15 @@ class ChatFlowEngine:
         node.parent_ids = []
         node.input_messages = [*(node.input_messages or []), *context_wire]
         node.model_override = inner.judge_model_override
+        # M7.5 §4.1: snapshot the read-only allocation onto the judge so
+        # ``_spawn_recon_chain`` (and any future per-judge
+        # ``resolve_for_node`` consumer) has an authoritative ceiling.
+        # ``chatflow=None`` is the bare-engine fallback — leaves
+        # effective_tools as ``None`` (legacy fallthrough), preserving
+        # pre-allocation behavior for tests that drive the spawner
+        # without a ChatFlow context.
+        if chatflow is not None:
+            node.effective_tools = self._judge_pre_effective_tools(chatflow)
         return inner.add_node(node)
 
     # ---------------------------------------------------- M7.5 PR 7 recon DAG
@@ -3246,15 +3264,19 @@ class ChatFlowEngine:
           would all dispatch as "tool not found" errors and the
           follow-up judge_pre would just see noise.
 
-        The judge node is passed in for symmetry with the design
-        doc's per-node ``effective_tools`` gate, but PR 7 doesn't
-        yet allocate effective_tools to judges (judges currently run
-        with ``expose_tools=False`` and no allocation pipeline). When
-        that lands, this method tightens to also require the
-        recon-target tools to be in the judge's allocation. For now
-        the chatflow-disabled list is the only ceiling.
+        The judge_pre node's ``effective_tools`` (snapshotted by
+        ``_spawn_judge_pre`` at allocation time, M7.5 §4.1) is the
+        per-node ceiling: the recon spawn site additionally requires
+        each ``recon_plan`` spec name to live on that list. Allocation
+        excludes WRITE side-effect tools and chatflow-disabled tools,
+        so a hallucinated ``Bash`` recon spec drops at spawn even if
+        the judge_pre prompt accidentally let it through. Top-level
+        turns get the allocation; nested sub-WorkFlow judge_pre nodes
+        currently fall through to ``effective_tools=None`` (legacy)
+        — recon at deeper depths is rare and the gate at sub-level
+        is a future tightening.
         """
-        del judge_pre_node  # reserved for the per-node allocation gate
+        del judge_pre_node  # gate enforced inside _spawn_recon_chain
         if not chatflow.cognitive_react_enabled:
             return False
         if self._tools is None:
@@ -3297,6 +3319,20 @@ class ChatFlowEngine:
         # _disabled_tool_names. Use the chatflow flag here as the
         # outer gate.
         chatflow_disabled = self._disabled_tool_names_for_workflow(workflow)
+        # M7.5 §4.1 per-judge ceiling: when the judge_pre node carries
+        # an explicit ``effective_tools`` allocation (set by
+        # ``_spawn_judge_pre`` from ``_judge_pre_effective_tools``),
+        # use it as the recon whitelist — drops WRITE tools the
+        # judge prompt shouldn't have asked for, plus any tool the
+        # workspace / chatflow disabled. ``None`` means legacy
+        # fallthrough (sub-WorkFlow judges, bare-engine tests):
+        # gate falls open and the registry-existence + chatflow-
+        # disabled checks below remain the only filter.
+        judge_allocation: frozenset[str] | None = (
+            frozenset(judge_pre_node.effective_tools)
+            if judge_pre_node.effective_tools is not None
+            else None
+        )
         kept: list[ReconToolCall] = []
         for spec in verdict.recon_plan:
             if spec.name in chatflow_disabled:
@@ -3311,6 +3347,15 @@ class ChatFlowEngine:
                 log.warning(
                     "recon: unknown tool %r — dropping spec; "
                     "judge_pre node=%s",
+                    spec.name,
+                    judge_pre_node.id,
+                )
+                continue
+            if judge_allocation is not None and spec.name not in judge_allocation:
+                log.warning(
+                    "recon: tool %r not in judge effective_tools "
+                    "allocation (likely WRITE side_effect or workspace-"
+                    "disabled) — dropping spec; judge_pre node=%s",
                     spec.name,
                     judge_pre_node.id,
                 )
@@ -3486,6 +3531,51 @@ class ChatFlowEngine:
         if ws_settings.allow_cross_chatflow_lookup:
             caps.add(CROSS_CHATFLOW_CAPABILITY)
         return frozenset(caps)
+
+    def _judge_pre_effective_tools(self, chatflow: ChatFlow) -> list[str]:
+        """Compute the M7.5 §4.1 ``effective_tools`` allocation for a
+        judge_pre WorkNode.
+
+        Cognitive nodes get ``side_effect_filter={NONE, READ}`` — they
+        can read but never write. ``effective_tools`` is the
+        registry-name-list expression of that ceiling, snapshotted on
+        the WorkNode at spawn time so:
+
+        - ``_spawn_recon_chain`` can validate ``recon_plan`` specs
+          against this list (the gate in ``_cognitive_react_enabled_for_pre``
+          that the docstring used to describe as "deferred"). A
+          hallucinated ``Bash`` recon spec drops at spawn instead of
+          dispatching as a real WRITE call.
+        - Future per-judge ``resolve_for_node`` calls (if/when judges
+          start exposing tools to the LLM) read a coherent allocation
+          rather than falling through to legacy.
+
+        Excludes:
+        - WRITE tools (``side_effect=WRITE``) — the cognitive ceiling.
+        - Names in ``chatflow.disabled_tool_names`` — the workspace /
+          chatflow toggle wins regardless of the effective_tools
+          allocation. Mirrors the catalog-render filter.
+        - ``foreign tau-bench`` tools (other concurrent benchmark
+          sessions' wrappers leaking through the shared registry).
+
+        Returns ``[]`` when the registry is missing — the caller
+        treats empty as "no allocation, fall through to the side-effect
+        filter alone" so bare-engine tests behave like pre-PR-7.
+        """
+        if self._tools is None:
+            return []
+        disabled = (
+            frozenset(chatflow.disabled_tool_names or ())
+            | self._foreign_tau_tools(chatflow.id)
+        )
+        out: list[str] = []
+        for tool in sorted(self._tools.all(), key=lambda t: t.name):
+            if tool.name in disabled:
+                continue
+            if tool.side_effect == SideEffect.WRITE:
+                continue
+            out.append(tool.name)
+        return out
 
     def _resolve_tool_catalog(self, chatflow: ChatFlow) -> str:
         """Render the M7.5 inheritable-tool catalog injected before
