@@ -479,6 +479,13 @@ class PatchChatFlowRequest(BaseModel):
     compact_require_confirmation: bool | None = None
     chatnode_compact_trigger_pct: float | None = None
     chatnode_compact_target_pct: float | None = None
+    #: M7.5 PR 7 — opt-in cognitive ReAct DAG for judge_pre. When True
+    #: the judge may emit ``recon_plan`` listing read-only tool calls;
+    #: the engine runs those then re-runs judge_pre with the results in
+    #: context. Default False (set on schema). Per-chatflow toggle so
+    #: experimental behavior stays scoped without flipping the global
+    #: default.
+    cognitive_react_enabled: bool | None = None
 
 
 @router.patch("/{chatflow_id}")
@@ -531,6 +538,7 @@ async def patch_chatflow(
         "compact_require_confirmation",
         "chatnode_compact_trigger_pct",
         "chatnode_compact_target_pct",
+        "cognitive_react_enabled",
     ):
         if fld in provided:
             kwargs[fld] = getattr(body, fld)
@@ -597,6 +605,7 @@ async def patch_chatflow(
             "compact_require_confirmation",
             "chatnode_compact_trigger_pct",
             "chatnode_compact_target_pct",
+            "cognitive_react_enabled",
         ):
             if fld in provided:
                 val = getattr(body, fld)

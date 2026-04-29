@@ -330,7 +330,9 @@
     "compact_model": "Compact worker model",
     "compact_model_hint": "Model used by the compact worker that produces the summary. Inherit = use the chat's default model.",
     "compact_require_confirmation": "Ask before explicit compact",
-    "compact_require_confirmation_hint": "When on, invoking compact from the UI opens a confirmation dialog (review instructions, must-keep / must-drop, dry-run). Off = compact immediately."
+    "compact_require_confirmation_hint": "When on, invoking compact from the UI opens a confirmation dialog (review instructions, must-keep / must-drop, dry-run). Off = compact immediately.",
+    "cognitive_react_enabled": "Cognitive ReAct DAG (judge_pre recon, experimental)",
+    "cognitive_react_enabled_hint": "When on, judge_pre may emit a recon plan listing read-only tool calls (Glob / Grep / Read / get_node_context) the engine runs before its verdict is final; a follow-up judge_pre then re-runs with the recon results in context. Verifies feasibility against real state instead of pattern-matching on the user's text. Increases per-turn LLM + tool calls. Off = atomic judge_pre (default)."
   },
   "canvas_prefs": {
     "show_node_id": "Show node ID",

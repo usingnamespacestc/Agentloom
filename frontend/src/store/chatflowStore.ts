@@ -380,6 +380,7 @@ export interface ChatFlowStoreState {
     chatnode_compact_target_pct?: number;
     max_produced_tags?: number;
     max_consumed_tags?: number;
+    cognitive_react_enabled?: boolean;
   }) => Promise<void>;
 
   /** Which edge is currently hovered on the ChatFlow canvas — drives
@@ -926,6 +927,12 @@ export const useChatFlowStore = create<ChatFlowStoreState>((set, get) => ({
       && patch.chatnode_compact_target_pct !== undefined
     ) {
       updated.chatnode_compact_target_pct = patch.chatnode_compact_target_pct;
+    }
+    if (
+      "cognitive_react_enabled" in patch
+      && patch.cognitive_react_enabled !== undefined
+    ) {
+      updated.cognitive_react_enabled = patch.cognitive_react_enabled;
     }
     set({ chatflow: updated as typeof cf });
     // Refresh sidebar list too (title may have changed).

@@ -109,6 +109,7 @@ export const api = {
       chatnode_compact_target_pct?: number;
       max_produced_tags?: number;
       max_consumed_tags?: number;
+      cognitive_react_enabled?: boolean;
     },
   ) =>
     request<{ ok: boolean }>(`/api/chatflows/${id}`, {

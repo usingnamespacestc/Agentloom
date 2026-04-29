@@ -143,6 +143,7 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         compact_require_confirmation: bool | None = ...,  # type: ignore[assignment]
         chatnode_compact_trigger_pct: float | None = ...,  # type: ignore[assignment]
         chatnode_compact_target_pct: float | None = ...,  # type: ignore[assignment]
+        cognitive_react_enabled: bool | None = ...,  # type: ignore[assignment]
     ) -> None:
         """Update metadata fields. Pass ``...`` (default) to skip a field.
 
@@ -242,6 +243,12 @@ class ChatFlowRepository(WorkspaceScopedRepository):
         if chatnode_compact_target_pct is not ...:
             if chatnode_compact_target_pct is not None:
                 payload["chatnode_compact_target_pct"] = chatnode_compact_target_pct
+        if cognitive_react_enabled is not ...:
+            # Bool field — None is rejected at the API layer, but defensive
+            # against an explicit None at this layer too. Skip on None so
+            # the payload's existing default is preserved.
+            if cognitive_react_enabled is not None:
+                payload["cognitive_react_enabled"] = cognitive_react_enabled
         row.payload = payload
         await self.session.flush()
 

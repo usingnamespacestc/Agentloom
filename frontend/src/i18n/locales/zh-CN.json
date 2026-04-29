@@ -330,7 +330,9 @@
     "compact_model": "压缩 worker 模型",
     "compact_model_hint": "执行压缩摘要的 worker 所用模型。选择「继承」则沿用对话默认模型。",
     "compact_require_confirmation": "手动压缩前先确认",
-    "compact_require_confirmation_hint": "勾选后，在 UI 上发起压缩会先弹出确认对话框（审阅指令、must-keep / must-drop、dry-run）。不勾选则立即压缩。"
+    "compact_require_confirmation_hint": "勾选后，在 UI 上发起压缩会先弹出确认对话框（审阅指令、must-keep / must-drop、dry-run）。不勾选则立即压缩。",
+    "cognitive_react_enabled": "判官 ReAct DAG（judge_pre 勘察，实验性）",
+    "cognitive_react_enabled_hint": "勾选后，judge_pre 可以在不确定时先发出 recon 计划列出若干只读工具调用（Glob / Grep / Read / get_node_context），引擎跑完它们之后再 re-run judge_pre 并把 recon 结果一起喂进去。让可行性判断基于真实状态而不是字面意图。每 turn 的 LLM/工具调用数会增加。不勾选则走原子 judge_pre（默认）。"
   },
   "canvas_prefs": {
     "show_node_id": "显示节点 ID",

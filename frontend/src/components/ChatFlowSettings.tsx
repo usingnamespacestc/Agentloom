@@ -93,6 +93,11 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
   // index (brief still emits prose, but no tag chip lands on the row).
   const [maxProducedTagsStr, setMaxProducedTagsStr] = useState("");
   const [maxConsumedTagsStr, setMaxConsumedTagsStr] = useState("");
+  // M7.5 PR 7 — opt-in cognitive ReAct DAG. When on, judge_pre may
+  // emit ``recon_plan`` to run read-only tool calls before its verdict
+  // is final. Default off; the toggle exists per-chatflow so users
+  // can experiment without flipping the global default.
+  const [cognitiveReactEnabled, setCognitiveReactEnabled] = useState(false);
   // Per-tool visibility: set of built-in tool names the user has
   // enabled for this chatflow. A tool is "checked" iff its name is
   // NOT in the stored ``disabled_tool_names`` list.
@@ -184,6 +189,7 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
       setCompactPreserveMode(chatflow?.compact_preserve_mode ?? "by_count");
       setMaxProducedTagsStr(String(chatflow?.max_produced_tags ?? 10));
       setMaxConsumedTagsStr(String(chatflow?.max_consumed_tags ?? 8));
+      setCognitiveReactEnabled(chatflow?.cognitive_react_enabled ?? false);
     }
   }, [open, chatflow, loadProviders, loadMcpServers, loadTools]);
 
@@ -400,6 +406,7 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
         recalled_context_sticky_turns: recalledSticky,
         max_produced_tags: maxProducedTags,
         max_consumed_tags: maxConsumedTags,
+        cognitive_react_enabled: cognitiveReactEnabled,
       });
       onClose();
     } finally {
@@ -589,6 +596,24 @@ export function ChatFlowSettings({ open, onClose }: ChatFlowSettingsProps) {
                         {t("chatflow_settings.runtime_environment_note_reset")}
                       </button>
                     )}
+                  </div>
+                </label>
+
+                <label className="flex items-start gap-2 text-[11px] text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={cognitiveReactEnabled}
+                    onChange={(e) => setCognitiveReactEnabled(e.target.checked)}
+                    data-testid="cognitive-react-enabled-input"
+                    className="mt-0.5"
+                  />
+                  <div className="flex-1">
+                    <span>
+                      {t("chatflow_settings.cognitive_react_enabled")}
+                    </span>
+                    <p className="mt-0.5 text-[10px] text-gray-400">
+                      {t("chatflow_settings.cognitive_react_enabled_hint")}
+                    </p>
                   </div>
                 </label>
               </div>

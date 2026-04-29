@@ -488,6 +488,15 @@ export interface ChatFlow {
   max_produced_tags: number;
   /** Hard ceiling on ``consumed_tags`` per BoardItem. Default 8. */
   max_consumed_tags: number;
+  /**
+   * M7.5 PR 7 — opt-in cognitive ReAct DAG for judge_pre. When true,
+   * judge_pre may emit a ``recon_plan`` listing read-only tool calls
+   * the engine runs before the verdict is final; a follow-up judge_pre
+   * then re-runs with the recon results in context. Increases per-turn
+   * LLM/tool calls but lets feasibility judgments verify against
+   * real state. Default false.
+   */
+  cognitive_react_enabled: boolean;
   sticky_notes?: Record<string, StickyNote>;
   created_at: string;
 }
