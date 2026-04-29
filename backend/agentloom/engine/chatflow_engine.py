@@ -354,12 +354,35 @@ def _make_board_writer(
                     consumed_tags=consumed_tags,
                 )
                 await session.commit()
-        except Exception:  # noqa: BLE001 — board is best-effort
-            log.exception(
-                "BoardItemRepository upsert failed for source=%s scope=%s",
-                source_node_id,
-                scope,
-            )
+        except Exception as exc:  # noqa: BLE001 — board is best-effort
+            # FK violation on ``chatflow_id`` is the in-memory /
+            # not-yet-persisted case — pure-engine integration tests
+            # never persist their ChatFlow row, and a brief that
+            # races a chatflow DELETE in production hits the same
+            # path. Either way the brief is best-effort and the
+            # engine still kept the description on the WorkNode, so
+            # logging a full traceback is just noise. Other failures
+            # (schema mismatch, connection drop, etc.) keep the loud
+            # ``log.exception`` so genuine bugs stay visible.
+            msg = str(exc)
+            if (
+                "board_items_chatflow_id_fkey" in msg
+                or "violates foreign key constraint" in msg
+                and "chatflow" in msg
+            ):
+                log.debug(
+                    "BoardItemRepository upsert skipped: chatflow %s "
+                    "not in DB (source=%s scope=%s)",
+                    chatflow_id,
+                    source_node_id,
+                    scope,
+                )
+            else:
+                log.exception(
+                    "BoardItemRepository upsert failed for source=%s scope=%s",
+                    source_node_id,
+                    scope,
+                )
 
     return write
 
