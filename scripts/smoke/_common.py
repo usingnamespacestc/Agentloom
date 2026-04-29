@@ -46,6 +46,18 @@ DEFAULT_MODEL = os.environ.get(
     "AGENTLOOM_SMOKE_MODEL", "doubao-seed-2-0-pro-260215"
 )
 
+#: When set, ``delete_chatflow()`` becomes a no-op so the chatflow
+#: persists in the DB after the smoke finishes — useful when an
+#: operator (or a fresh AI runner) wants to drill into the canvas
+#: afterwards. Set ``AGENTLOOM_SMOKE_KEEP=1`` in the environment.
+KEEP_CHATFLOWS = bool(os.environ.get("AGENTLOOM_SMOKE_KEEP"))
+
+#: When set, every chatflow the smoke creates gets moved into this
+#: folder id immediately after creation. Operator pre-creates the
+#: folder via ``POST /api/folders`` and exports the id so all the
+#: smoke chatflows surface in the same sidebar group.
+TARGET_FOLDER_ID = os.environ.get("AGENTLOOM_SMOKE_FOLDER_ID")
+
 
 # ---------------------------------------------------------------------------
 # PASS/FAIL printing
@@ -199,6 +211,18 @@ async def create_chatflow(
     if patch:
         rp = await client.patch(f"/api/chatflows/{cf_id}", json=patch)
         rp.raise_for_status()
+    if TARGET_FOLDER_ID:
+        # Move into the operator-specified UI folder so all smoke
+        # chatflows surface in the same sidebar group. Best-effort:
+        # an invalid folder id surfaces as a 404 here but the
+        # chatflow itself is still usable in workspace root.
+        try:
+            await client.patch(
+                f"/api/chatflows/{cf_id}/folder",
+                json={"folder_id": TARGET_FOLDER_ID},
+            )
+        except Exception:  # noqa: BLE001
+            pass
     return cf_id
 
 
@@ -233,7 +257,15 @@ async def delete_chatflow(
     client: httpx.AsyncClient, chatflow_id: str
 ) -> None:
     """Best-effort cleanup; swallow errors so cleanup doesn't mask
-    the script's actual verdict."""
+    the script's actual verdict.
+
+    No-op when ``AGENTLOOM_SMOKE_KEEP=1`` is set in the environment —
+    operators (or fresh-AI runners following the test-execution
+    plan) flip this so the smoke artefacts persist in the DB for
+    drill-in afterwards.
+    """
+    if KEEP_CHATFLOWS:
+        return
     try:
         await client.delete(f"/api/chatflows/{chatflow_id}")
     except Exception:  # noqa: BLE001
