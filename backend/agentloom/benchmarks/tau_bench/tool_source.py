@@ -27,7 +27,13 @@ import re
 from typing import Any
 
 from agentloom.schemas.common import ToolResult
-from agentloom.tools.base import Tool, ToolContext, ToolError, ToolRegistry
+from agentloom.tools.base import (
+    SideEffect,
+    Tool,
+    ToolContext,
+    ToolError,
+    ToolRegistry,
+)
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +46,34 @@ _CAMEL_TO_SNAKE = re.compile(r"(?<!^)(?=[A-Z])")
 
 def _snake(camel: str) -> str:
     return _CAMEL_TO_SNAKE.sub("_", camel).lower()
+
+
+def _tau_tool_side_effect(snake_name: str) -> SideEffect:
+    """Classify a tau_bench tool's ``side_effect`` so the M7.5
+    cognitive ceiling (judges read but never write) admits read-only
+    queries (``get_*`` / ``find_*`` / ``list_*``) into recon while
+    excluding mutators (``cancel_*`` / ``modify_*`` / ``exchange_*`` /
+    ``return_*`` / ``transfer_*``). Without this every tau tool
+    inherits the base ``WRITE`` default and judge_pre / judge_post
+    recon paths drop every spec — breaks auto_plan because the
+    fallback path applies the trio but doesn't continue the chain
+    (observed 2026-04-29 retail batch: every task halted at
+    judge_pre → no terminal llm_call → ChatNode FAILED).
+
+    Curated rather than prefix-only because:
+    - ``calculate`` is pure compute — strictly NONE side_effect.
+    - ``transfer_to_human_agents`` looks read-y but mutates session
+      state.
+    Both retail and airline use the same upstream class names, so
+    one mapping covers both domains.
+    """
+    name = snake_name.lower()
+    if name == "calculate":
+        return SideEffect.NONE
+    read_prefixes = ("get_", "find_", "list_")
+    if any(name.startswith(p) for p in read_prefixes):
+        return SideEffect.READ
+    return SideEffect.WRITE
 
 
 class TauBenchToolWrapper(Tool):
@@ -83,6 +117,15 @@ class TauBenchToolWrapper(Tool):
         self.name = registered_name
         self.description = fn.get("description", "")
         self.parameters = fn.get("parameters", {"type": "object", "properties": {}})
+        # M7.5 cognitive ceiling — derive from the upstream class name
+        # so judges' recon DAG can dispatch read-only queries
+        # (``get_*`` / ``find_*`` / ``list_*``) without dropping every
+        # spec. The session's prefix masks the snake name from a
+        # naive str-startswith check, so use the upstream class's own
+        # advertised name (``info["function"]["name"]``).
+        self.side_effect = _tau_tool_side_effect(
+            fn.get("name") or _snake(tau_tool_cls.__name__)
+        )
 
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         try:

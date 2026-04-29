@@ -3427,16 +3427,22 @@ class ChatFlowEngine:
         verdict: JudgeVerdict,
         *,
         resolved_model: ProviderModelRef | None,
-    ) -> None:
+    ) -> bool:
         """Spawn the recon DAG for judge_pre: N tool_call children + a
         follow-up judge_pre node that consumes their outputs.
 
+        Returns True when recon actually spawned, False when every
+        spec dropped (caller is responsible for falling through to
+        the regular atomic path so the planner / halt branch still
+        runs — without that, the chain dies at judge_pre with no
+        terminal llm_call and the ChatNode goes FAILED, observed
+        2026-04-29 retail batch when every tau tool was filtered by
+        the WRITE-side-effect ceiling).
+
         Sister of :meth:`_spawn_recon_chain_for_post`. The two share
-        :meth:`_filter_recon_plan` for spec validation; they diverge
-        on what they spawn as the follow-up node and what they do
-        on "every spec dropped" fallback (pre applies the trio,
-        post falls through to its existing accept/retry/fail
-        decision tree).
+        :meth:`_filter_recon_plan` for spec validation; both return
+        bool so callers can distinguish "spawned, defer to follow-up"
+        from "fell back, continue this turn's regular flow".
 
         The follow-up judge_pre is parented on every spawned
         tool_call so the scheduler waits for them all before re-
@@ -3452,12 +3458,12 @@ class ChatFlowEngine:
         )
         if not kept:
             log.warning(
-                "recon: every spec dropped; falling back to atomic "
-                "judge_pre node=%s",
+                "recon: every spec dropped; judge_pre node=%s falling "
+                "through to atomic path (caller continues to apply "
+                "trio + planner spawn)",
                 judge_pre_node.id,
             )
-            _apply_judge_pre_trio(workflow, verdict)
-            return
+            return False
 
         tool_call_ids: list[str] = []
         for spec in kept:
@@ -3484,6 +3490,7 @@ class ChatFlowEngine:
         follow_up.input_messages = list(judge_pre_node.input_messages or [])
         follow_up.model_override = resolved_model or workflow.judge_model_override
         workflow.add_node(follow_up)
+        return True
 
     def _spawn_recon_chain_for_post(
         self,
@@ -4281,18 +4288,28 @@ class ChatFlowEngine:
         # this hook again (recon_plan empty by design — a single
         # round per design §4.4) and falls through to the normal
         # apply-trio + halt-or-continue branch.
+        #
+        # ``_spawn_recon_chain`` returns ``False`` when every spec
+        # dropped (e.g. all WRITE side_effect, all chatflow-disabled).
+        # In that case fall through to the atomic path below so the
+        # planner / halt branch still runs — otherwise the chain
+        # dies at judge_pre with no terminal llm_call and the
+        # ChatNode goes FAILED.
         if (
             verdict is not None
             and verdict.recon_plan
             and self._cognitive_react_enabled_for_pre(chatflow, judge_pre_node)
         ):
-            self._spawn_recon_chain(
+            spawned = self._spawn_recon_chain(
                 workflow,
                 judge_pre_node,
                 verdict,
                 resolved_model=resolved_model,
             )
-            return
+            if spawned:
+                return
+            # else: fall through, atomic path below applies trio +
+            # spawns planner.
         if verdict is not None:
             _apply_judge_pre_trio(workflow, verdict)
         halt = verdict is None or _judge_pre_should_halt(verdict)
