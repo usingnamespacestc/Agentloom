@@ -153,10 +153,17 @@ def _model_ref() -> dict[str, str]:
 
 
 @asynccontextmanager
-async def backend_client():
-    """Async httpx client preconfigured for the smoke backend."""
+async def backend_client(timeout: float = 600.0):
+    """Async httpx client preconfigured for the smoke backend.
+
+    Default timeout 600s because auto_plan turns with recon DAG +
+    drill-down legitimately take 3-7 minutes on volcengine free tier
+    (combo pipeline has been observed at ~7 min to phase 3, then
+    another auto_plan turn for phase 4). Per-script overrides allow
+    quick scripts to keep tighter bounds.
+    """
     async with httpx.AsyncClient(
-        base_url=BACKEND_URL, timeout=180.0
+        base_url=BACKEND_URL, timeout=timeout
     ) as client:
         yield client
 

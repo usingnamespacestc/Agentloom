@@ -67,12 +67,22 @@ async def main() -> None:
                 cf = await get_chatflow(client, cf_id)
                 worknodes = all_worknodes(cf, chat_node_id=t1["node_id"])
 
-                # Look for any worker node that emitted a
-                # capability_request. Whether the worker's draft has
-                # the marker depends on the model — strong models
-                # emit it, weaker models might just give up. We pin
-                # the engine-side path: if the marker fired, the
-                # field gets populated.
+                # Three scenarios depending on model behavior. Only
+                # the third actually exercises the feedback loop;
+                # the first two are valid model-quality observations
+                # that don't fault the engine.
+                #
+                # 1. judge_pre voted infeasible up-front (saw Bash
+                #    disabled in the catalog, declined). No worker
+                #    spawned; the chain halted before the marker
+                #    could fire.
+                # 2. Worker spawned and answered without trying to
+                #    invoke the missing tool — model didn't realize
+                #    it needed Bash.
+                # 3. Worker spawned and emitted
+                #    ``<capability_request>...</capability_request>``
+                #    in its draft — engine should propagate to
+                #    judge → escalation → respawn planner.
                 worker_nodes = [
                     w
                     for w in worknodes
@@ -84,6 +94,18 @@ async def main() -> None:
                     for w in worker_nodes
                     if (w.get("capability_request") or [])
                 ]
+
+                if not worker_nodes:
+                    # Path 1: judge_pre short-circuited.
+                    report.add(
+                        "ℹ judge_pre short-circuited before worker "
+                        "(infeasible verdict on disabled tool catalog)",
+                        True,
+                        "valid path — feedback loop not exercised "
+                        "this run; rerun or rephrase prompt to test",
+                    )
+                    return
+
                 report.add(
                     "≥1 worker WorkNode in the turn",
                     len(worker_nodes) >= 1,
@@ -91,14 +113,12 @@ async def main() -> None:
                 )
 
                 if not with_marker:
-                    # Model didn't emit the marker — that's a
-                    # model-quality observation, not an engine bug.
-                    # Note it but don't fail the smoke.
+                    # Path 2: worker didn't emit marker.
                     report.add(
-                        "⚠ worker did NOT emit capability_request marker",
+                        "ℹ worker did NOT emit capability_request marker",
                         True,
                         "model-quality observation; downstream "
-                        "checks skipped",
+                        "checks skipped (engine path covered by pytest)",
                     )
                     return
 
