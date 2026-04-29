@@ -19,7 +19,7 @@
 | **核心能力** | ChatFlow DAG（fork/merge/compact/pack/fold）+ 嵌套 WorkFlow + 递归 planner + 三段式 judge + MemoryBoard + 跨 chatflow 数据访问门禁 |
 | **执行模式** | `native_react`（直连 ReAct）/ `semi_auto`（一次性 plan）/ `auto_plan`（递归 planner + judge 驱动重试），ChatFlow 默认 + ChatNode 覆盖 |
 | **WorkNode 类型** | `llm_call` · `tool_call` · `judge_call` (pre/during/post) · `sub_agent_delegation` · `compact` · `merge` · `pack` · `brief` |
-| **测试覆盖** | 后端 **797** unit + integration（其中 **607** unit）/ 4 skipped；前端 **78** 单测；全部跑过 |
+| **测试覆盖** | 后端 **825** unit + integration（其中 **640** unit）/ 4 skipped；前端 **78** 单测；全部跑过 |
 | **最近里程碑** | **M7.5 capability model**（2026-04-26 · 8 PR + 1 hotfix 单日 ship · ~1900 行 diff · ~100 新测试）+ **post-ship 修复 8 commit**（2026-04-26 night → 2026-04-27：auto_plan 死锁修复 / capability_request 反馈闭环履约 / drill-down nudge / 跨 chatflow 工具污染 fix / etc.） |
 | **τ-bench retail 0-9 (NATIVE_REACT) baseline** | **8/10 = 80% pass^1**（agent: ark-code-latest via 火山引擎 coding plan lite · user simulator: doubao-seed-2-0-pro-260215 · 全程 ~27 min · 2 fail 归因到 user simulator 演 "private person" persona 拒验证而非 agent 错） |
 | **provider 支持** | OpenAI 兼容（Volcengine / Ark / Ollama / OpenAI）+ Anthropic 原生 + MCP 客户端 |
@@ -131,15 +131,35 @@ M7.5 主链 ship 后跑实负载暴露了一批**问题域** + **设计文档承
 | `ff72eec` | 🟡 UX | **拖动位置 in-app navigation 持久化**：之前只在 pagehide/beforeunload 时 flush。React 内 unmount（drag → ⤢ 进 WorkFlow → 回来）不触发任何 page 事件 → debounce timer 跟着 GC → PATCH 永远发不出。加 unmount cleanup flush |
 | `305b04a` | 🟢 benchmark infra | **τ-bench API + CLI 加 `execution_mode` + agent_model 同步覆盖**：让外部 benchmark 也能跑 auto_plan，不只是 native_react |
 
+---
+
+## 🔬 第二轮：真负载（auto_plan tau-bench retail）暴露的 deeper bugs（commit `74bb772..8f3288c`）
+
+第一轮 post-ship 修复后跑 auto_plan retail 0-9 batch，verdict=0/2 reward 但 `outputs_match=True / db_hash_match=False`——agent 说对了但工具没真调。Drill in 发现一连串 PR-6/PR-7/PR-8 留下的"plumbing 完整但字段从没写过"问题。**真负载是这条线唯一可靠的 audit 工具**：单测全绿，集成测试全绿，靠真模型才暴露。
+
+| Commit | 类别 | 修了什么 |
+|---|---|---|
+| `74bb772` | 🟠 履约 PR 8 | **`get_node_context.cross_chatflow` 生产授予路径**：`WorkspaceSettings.allow_cross_chatflow_lookup` 默认 False，开启后引擎把虚拟 cap union 进每个 tool call 的 `caller_effective_tools`。PR 8 的 cap 定义+gate 已 ship 但生产没人写——这次补上 workspace-scoped trust toggle |
+| `7de9d6b` | 🟠 多 turn 退化 | **`inheritable_tools` 跨 turn 累积**：(1) `_apply_judge_pre_trio` replace→保留顺序的 union；(2) `_spawn_turn_node` 从主父 ChatNode 的 workflow 拷贝 `inheritable_tools`/`capabilities_origin` 当种子。让标准能力面随对话单调增长，replace 语义还会清掉 mid-turn `capability_escalation` 加的工具 |
+| `19fc655` | 🟢 bench infra | **`agentloom-bench --execution-mode` 接通**：CLI/runner/client 三层加这个 kwarg。之前 auto_plan 任务必须 curl API 才能跑 |
+| `0db76d4` | 🔴 auto_plan 全死 | **plan_judge 读 `submit_plan` tool_use 解析后的 plan**：PR 6 把结构化 plan 从 `output_message.content` 移到 `tool_uses[0].arguments`，但 plan_judge 一直读空 content，三轮全 vote `revise → halt`，worker 从来没 spawn 过。**这是 retail 0-2/0-2 reward 的真正根因，不是模型差** |
+| `5d06297` | 🔴 同源 leak | **planner 重 spawn 也读 `tool_use` 解析后的 plan**：3 个 site（revise/parse_error/phantom-tool 路径）传给新 planner 的 `prior_plan` 也是空 content。新 planner 看不到上一轮自己写了什么，原地打转加速 halt。提取共享 helper `_render_planner_output_for_prompt` |
+| `8f3288c` | 🟡 履约 §4.1 | **判 pre 节点 `effective_tools` 分配 + PR 7 recon gate 真激活**：`_judge_pre_effective_tools(chatflow)` 返回 READ+NONE 工具列表（cognitive ceiling），spawn 时 snapshot 到 `node.effective_tools`，`_spawn_recon_chain` 用作 recon spec 白名单。幻觉 `Bash` recon spec 在 spawn 时 drop 而不是 dispatch |
+
+### 这一轮暴露的元教训
+
+- **"plumbing 完整但 field 从没写过" 是高频 bug 模式**：M7.5 设计了 capability model 全套字段，但生产代码大量地方仍然 None/空。单测验单点，集成验数据流，但真负载才能暴露"端到端 dataflow 上有断点"
+- **PR 6 的 tool_use 改造留下了多个隐藏 leak**：每处读 `output_message.content` 都要重新审视；3 个 site 用相同模式的不同变体写出，每个都看似合理。这次提取了 `_render_planner_output_for_prompt` 当 single source of truth
+- **判官 effective_tools 这种"design §4.1 deferred"的字段，dormant 时无害，激活时是关键**：M7.5 PR 7 commit message 明说 gate 没接，没接的副作用是幻觉 WRITE 工具会真 dispatch
+
 ### 还在 backlog 的（已识别但未履约）
 
-后续审计还发现几条"半截功能"，按优先级排在 [`memory/`](.) 各个 backlog memo 里：
+经过这一轮已经把几条最大的 deadcode/leak 都闭环了，剩下的：
 
-- 🟠 `get_node_context.cross_chatflow` 虚拟 cap 定义了但**从未被授予过** → PR 8 跨 chatflow 路径在生产代码里实际是 deadcode
-- 🟡 判官节点自己的 `effective_tools` 分配（design §4.1 deferred）→ PR 7 recon DAG 的真正 gate 永远过不了
-- 🟡 `cognitive_react_enabled = False` 默认 + 仅 `pre` 一类 spawn 路径 → 整条 ReAct DAG 在生产里 dormant
+- 🟡 `cognitive_react_enabled = False` 默认 + 仅 `pre` 一类 spawn 路径 → 整条 ReAct DAG 在生产里仍 dormant（gate 已通，只缺 default 和 dispatch 路径补全）
+- 🟡 (B) judge_pre prompt 加前瞻指令（fixture 改）—— 当前 (A) 跨 turn 累积 + (C) cap_request 反馈循环 都是 reactive；(B) 是预防层
 - 🟢 τ-bench 工具 first-class 化（当前 mitigation `bdedbdd` 通了，根本架构 hack 等长期决策）
-- 🟡 inheritable_tools 跨 turn 不累积（multi-turn auto_plan 每 turn 独立 fresh extract，丢前一 turn 工具）
+- 🟡 其他 judge 节点（plan_judge / worker_judge / judge_post）的 `effective_tools` 分配 —— 它们不 spawn recon，ROI 偏低
 
 ---
 
@@ -414,7 +434,7 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
 - [x] **Frozen-guard exempt 不变量测试**：`test_frozen_guard_exempts.py`
       正反两面固定 UI-only 字段（position / sticky / pending_queue）在
       frozen 节点上放行、语义字段必触发；防未来加新字段时踩拖动丢失那类坑
-- [x] Pytest：后端 **783** unit + integration / 4 skipped + 前端 **78** 个单测全绿，collection 干净
+- [x] Pytest：后端 **825** unit + integration / 4 skipped + 前端 **78** 个单测全绿，collection 干净
 - [x] **真模型实测验证不变量**：M7.5 跑了 3 个 auto_plan + cognitive_react chatflow（claude-haiku/sonnet）+ τ-bench retail 0-9 batch，挖出 1 个 cross-provider schema bug（PR 6 hotfix）+ 1 个 emergent property（catalog 前置吸收 capability_request 路径）反写回设计文档
 
 ---
