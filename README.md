@@ -19,7 +19,7 @@
 | **核心能力** | ChatFlow DAG（fork/merge/compact/pack/fold）+ 嵌套 WorkFlow + 递归 planner + 三段式 judge + MemoryBoard + 跨 chatflow 数据访问门禁 |
 | **执行模式** | `native_react`（直连 ReAct）/ `semi_auto`（一次性 plan）/ `auto_plan`（递归 planner + judge 驱动重试），ChatFlow 默认 + ChatNode 覆盖 |
 | **WorkNode 类型** | `llm_call` · `tool_call` · `judge_call` (pre/during/post) · `sub_agent_delegation` · `compact` · `merge` · `pack` · `brief` |
-| **测试覆盖** | 后端 **839** unit + integration（其中 **651** unit）/ 4 skipped；前端 **88** 单测；全部跑过 |
+| **测试覆盖** | 后端 **841** unit + integration（其中 **652** unit / **189** integration）/ 4 skipped；前端 **88** 单测；全部跑过 |
 | **最近里程碑** | **M7.5 capability model**（2026-04-26 · 8 PR + 1 hotfix 单日 ship · ~1900 行 diff · ~100 新测试）+ **post-ship 修复 8 commit**（2026-04-26 night → 2026-04-27：auto_plan 死锁修复 / capability_request 反馈闭环履约 / drill-down nudge / 跨 chatflow 工具污染 fix / etc.） |
 | **τ-bench retail 0-9 (NATIVE_REACT) baseline** | **8/10 = 80% pass^1**（agent: ark-code-latest via 火山引擎 coding plan lite · user simulator: doubao-seed-2-0-pro-260215 · 全程 ~27 min · 2 fail 归因到 user simulator 演 "private person" persona 拒验证而非 agent 错） |
 | **provider 支持** | OpenAI 兼容（Volcengine / Ark / Ollama / OpenAI）+ Anthropic 原生 + MCP 客户端 |
@@ -466,7 +466,7 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
 - [x] **Frozen-guard exempt 不变量测试**：`test_frozen_guard_exempts.py`
       正反两面固定 UI-only 字段（position / sticky / pending_queue）在
       frozen 节点上放行、语义字段必触发；防未来加新字段时踩拖动丢失那类坑
-- [x] Pytest：后端 **839** unit + integration / 4 skipped + 前端 **88** 个单测全绿，collection 干净
+- [x] Pytest：后端 **841** unit + integration / 4 skipped + 前端 **88** 个单测全绿，collection 干净
 - [x] **真模型实测验证不变量**：M7.5 跑了 3 个 auto_plan + cognitive_react chatflow（claude-haiku/sonnet）+ τ-bench retail 0-9 batch，挖出 1 个 cross-provider schema bug（PR 6 hotfix）+ 1 个 emergent property（catalog 前置吸收 capability_request 路径）反写回设计文档
 
 ---
