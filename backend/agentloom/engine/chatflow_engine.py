@@ -3584,16 +3584,38 @@ class ChatFlowEngine:
         *,
         round_index: int,
     ) -> WorkFlowNode:
+        # PR 6 (44634dd) moved the planner's structured output from
+        # free-text ``content`` to ``tool_uses[0].arguments`` via
+        # ``forced_tool_name="submit_plan"``. The judge prompt's
+        # ``plan_json`` slot was never updated to follow — it kept
+        # reading the (now empty) content field, so plan_judge saw
+        # "blank plan" every round, voted revise, and ran out of
+        # debate budget before any worker could spawn (observed
+        # 2026-04-29 retail tau-bench: 3 of 3 turns halted at
+        # plan_judge with "plan为空" critiques despite the planner
+        # having emitted a valid atomic brief on every round).
+        # Fix: parse via the same helper ``_after_planner`` uses,
+        # then re-serialize to JSON for the prompt. Falls back to
+        # the raw content on parse failure so weak providers /
+        # adapters that drop tool_choice still feed something to
+        # the judge.
+        plan_json_text = ""
+        if planner_node.output_message is not None:
+            try:
+                parsed = _parse_planner_output_message(
+                    planner_node.output_message
+                )
+                plan_json_text = parsed.model_dump_json(indent=2)
+            except PlannerParseError:
+                plan_json_text = (
+                    planner_node.output_message.content or ""
+                )
         templated = instantiate_fixture(
             self._fixture_plans["plan_judge"],
             {
                 **_trio_params(inner),
                 "available_tools": self._available_tools_listing(),
-                "plan_json": (
-                    planner_node.output_message.content
-                    if planner_node.output_message
-                    else ""
-                ),
+                "plan_json": plan_json_text,
                 "round": str(round_index),
                 "round_budget": str(inner.debate_round_budget),
             },
