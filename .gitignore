@@ -210,11 +210,12 @@ __marimo__/
 /docs/*
 /tests/
 /runs/
-# Exception: devlog + README-linked screenshots + design docs are shipped
+# Exception: devlog + README-linked screenshots + design docs + test plans are shipped
 !/docs/devlog.md
 !/docs/images/
 !/docs/images/**
 !/docs/design-*.md
+!/docs/test-execution-plan-qwen36.md
 
 # Env / secrets
 .env
