@@ -202,6 +202,7 @@ async def test_connection(
 
     api_key = (body.api_key if body and body.api_key else None) or repo.resolve_api_key(config)
 
+    adapter = None
     try:
         adapter = build_adapter(
             kind=config.provider_kind.value,
@@ -211,10 +212,15 @@ async def test_connection(
             sub_kind=config.provider_sub_kind.value if config.provider_sub_kind else None,
         )
         models = await adapter.list_models()
-        await adapter.close()
         return {"ok": True, "models": models}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+    finally:
+        if adapter is not None:
+            try:
+                await adapter.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 @router.post("/{provider_id}/models")
@@ -231,6 +237,7 @@ async def discover_models(
 
     api_key = repo.resolve_api_key(config)
 
+    adapter = None
     try:
         adapter = build_adapter(
             kind=config.provider_kind.value,
@@ -240,9 +247,14 @@ async def discover_models(
             sub_kind=config.provider_sub_kind.value if config.provider_sub_kind else None,
         )
         model_ids = await adapter.list_models()
-        await adapter.close()
     except Exception as exc:
         raise HTTPException(502, f"Failed to fetch models: {exc}") from exc
+    finally:
+        if adapter is not None:
+            try:
+                await adapter.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     # Merge: keep existing ModelInfo for known IDs, add new ones.
     existing = {m.id: m for m in config.available_models}

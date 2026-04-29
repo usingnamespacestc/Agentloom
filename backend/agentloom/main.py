@@ -193,6 +193,46 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 pass
         await mcp_runtime.close_all()
 
+        # Drain api/workflows.py background judge tasks. Without this,
+        # an in-flight ``re-run judge`` (POST /workflows/{id}/judges/...)
+        # spawned via ``_spawn_judge_task`` keeps an asyncio.Task alive
+        # in the event loop after lifespan returns, and uvicorn's
+        # "Waiting for background tasks to complete" loop counts it.
+        # The set is the API-layer mirror of what the chatflow engine
+        # tracks per-runtime, but it lives in module state so the
+        # lifespan has to drain it explicitly.
+        try:
+            from agentloom.api.workflows import _active_judge_tasks
+
+            for task in list(_active_judge_tasks):
+                if not task.done():
+                    task.cancel()
+            if _active_judge_tasks:
+                await asyncio.gather(
+                    *list(_active_judge_tasks), return_exceptions=True
+                )
+        except Exception:  # noqa: BLE001 — best-effort drain
+            logging.getLogger(__name__).exception(
+                "lifespan: judge-task drain failed"
+            )
+
+        # Dispose the SQLAlchemy AsyncEngine. asyncpg keeps a
+        # ``Connection._cancel`` task alive per pooled connection;
+        # without ``engine.dispose()`` those tasks survive lifespan
+        # and uvicorn's shutdown watcher counts them as in-flight
+        # work, blocking the process forever (the symptom that
+        # forced dev.sh to learn how to SIGKILL). The dispose closes
+        # every pooled connection cleanly, draining the keepers.
+        try:
+            from agentloom.db.base import _engine  # noqa: PLC0415
+
+            if _engine is not None:
+                await _engine.dispose()
+        except Exception:  # noqa: BLE001 — best-effort
+            logging.getLogger(__name__).exception(
+                "lifespan: db engine dispose failed"
+            )
+
 
 _LOGGING_CONFIGURED = False
 

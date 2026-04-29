@@ -412,88 +412,100 @@ def _provider_call_from_settings():
                 api_key=api_key,
                 sub_kind=config.provider_sub_kind.value if config.provider_sub_kind else None,
             )
-            # Use first pinned model as default if no model specified.
-            if not model_id:
-                pinned_models = config.pinned_models()
-                fallback = pinned_models[0] if pinned_models else (
-                    config.available_models[0] if config.available_models else None
+            # Always close the adapter — it owns an httpx.AsyncClient
+            # whose connection pool would otherwise stay alive in the
+            # event loop until GC. Fired at every LLM call (one
+            # adapter per call), so without this every turn leaked N
+            # httpx clients and uvicorn shutdown hung indefinitely on
+            # "Waiting for background tasks to complete".
+            try:
+                # Use first pinned model as default if no model specified.
+                if not model_id:
+                    pinned_models = config.pinned_models()
+                    fallback = pinned_models[0] if pinned_models else (
+                        config.available_models[0] if config.available_models else None
+                    )
+                    model_id = fallback.id if fallback else None
+
+                # Look up model metadata to enforce output length limits.
+                # max_output_tokens is the precise cap; context_window is
+                # the total budget (prompt + completion) and serves as a
+                # generous fallback when the per-model output cap isn't set.
+                model_info = next(
+                    (m for m in config.available_models if m.id == model_id),
+                    None,
                 )
-                model_id = fallback.id if fallback else None
+                _FALLBACK_MAX_TOKENS = 8192
+                max_tokens: int = _FALLBACK_MAX_TOKENS
+                if model_info is not None:
+                    max_tokens = (
+                        model_info.max_output_tokens
+                        or model_info.context_window
+                        or _FALLBACK_MAX_TOKENS
+                    )
 
-            # Look up model metadata to enforce output length limits.
-            # max_output_tokens is the precise cap; context_window is
-            # the total budget (prompt + completion) and serves as a
-            # generous fallback when the per-model output cap isn't set.
-            model_info = next(
-                (m for m in config.available_models if m.id == model_id),
-                None,
-            )
-            _FALLBACK_MAX_TOKENS = 8192
-            max_tokens: int = _FALLBACK_MAX_TOKENS
-            if model_info is not None:
-                max_tokens = (
-                    model_info.max_output_tokens
-                    or model_info.context_window
-                    or _FALLBACK_MAX_TOKENS
+                # Resolve structured-output discipline: per-model override
+                # wins; otherwise the provider-level default. ``"none"``
+                # (the default default) skips response_format altogether.
+                resolved_json_mode = None
+                if model_info is not None and model_info.json_mode is not None:
+                    resolved_json_mode = model_info.json_mode.value
+                elif config.json_mode is not None:
+                    resolved_json_mode = config.json_mode.value
+
+                # Per-model sampling parameters; ``None`` falls through to
+                # adapter → provider default. No provider-level default here
+                # (scoped to ModelInfo only). Schema-layer validation
+                # (ProviderConfig._validate_sub_kind_params) guarantees that
+                # only params legal for this sub_kind are ever non-None.
+                temperature = model_info.temperature if model_info else None
+                top_p = model_info.top_p if model_info else None
+                top_k = model_info.top_k if model_info else None
+                presence_penalty = model_info.presence_penalty if model_info else None
+                frequency_penalty = model_info.frequency_penalty if model_info else None
+                repetition_penalty = model_info.repetition_penalty if model_info else None
+                num_ctx = model_info.num_ctx if model_info else None
+                thinking_budget_tokens = (
+                    model_info.thinking_budget_tokens if model_info else None
                 )
 
-            # Resolve structured-output discipline: per-model override
-            # wins; otherwise the provider-level default. ``"none"``
-            # (the default default) skips response_format altogether.
-            resolved_json_mode = None
-            if model_info is not None and model_info.json_mode is not None:
-                resolved_json_mode = model_info.json_mode.value
-            elif config.json_mode is not None:
-                resolved_json_mode = config.json_mode.value
+                # Volcengine's Ark API needs explicit ``{"thinking": {"type":
+                # "enabled"}}`` to turn reasoning on. Per-model
+                # ``thinking_enabled`` overrides the provider default (which is
+                # currently on for volcengine to preserve pre-toggle behavior).
+                call_extra: dict = {}
+                if config.provider_sub_kind == ProviderSubKind.VOLCENGINE:
+                    thinking_on = True
+                    if model_info is not None and model_info.thinking_enabled is not None:
+                        thinking_on = model_info.thinking_enabled
+                    if thinking_on:
+                        call_extra["thinking"] = {"type": "enabled"}
+                if extra:
+                    call_extra.update(extra)
 
-            # Per-model sampling parameters; ``None`` falls through to
-            # adapter → provider default. No provider-level default here
-            # (scoped to ModelInfo only). Schema-layer validation
-            # (ProviderConfig._validate_sub_kind_params) guarantees that
-            # only params legal for this sub_kind are ever non-None.
-            temperature = model_info.temperature if model_info else None
-            top_p = model_info.top_p if model_info else None
-            top_k = model_info.top_k if model_info else None
-            presence_penalty = model_info.presence_penalty if model_info else None
-            frequency_penalty = model_info.frequency_penalty if model_info else None
-            repetition_penalty = model_info.repetition_penalty if model_info else None
-            num_ctx = model_info.num_ctx if model_info else None
-            thinking_budget_tokens = (
-                model_info.thinking_budget_tokens if model_info else None
-            )
-
-            # Volcengine's Ark API needs explicit ``{"thinking": {"type":
-            # "enabled"}}`` to turn reasoning on. Per-model
-            # ``thinking_enabled`` overrides the provider default (which is
-            # currently on for volcengine to preserve pre-toggle behavior).
-            call_extra: dict = {}
-            if config.provider_sub_kind == ProviderSubKind.VOLCENGINE:
-                thinking_on = True
-                if model_info is not None and model_info.thinking_enabled is not None:
-                    thinking_on = model_info.thinking_enabled
-                if thinking_on:
-                    call_extra["thinking"] = {"type": "enabled"}
-            if extra:
-                call_extra.update(extra)
-
-            return await adapter.chat(
-                messages=messages,
-                tools=tools,
-                model=model_id,
-                temperature=temperature,
-                top_p=top_p,
-                top_k=top_k,
-                presence_penalty=presence_penalty,
-                frequency_penalty=frequency_penalty,
-                repetition_penalty=repetition_penalty,
-                num_ctx=num_ctx,
-                thinking_budget_tokens=thinking_budget_tokens,
-                max_tokens=max_tokens,
-                extra=call_extra or None,
-                on_token=on_token,
-                json_mode=resolved_json_mode,
-                json_schema=json_schema,
-                forced_tool_name=forced_tool_name,
-            )
+                return await adapter.chat(
+                    messages=messages,
+                    tools=tools,
+                    model=model_id,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                    presence_penalty=presence_penalty,
+                    frequency_penalty=frequency_penalty,
+                    repetition_penalty=repetition_penalty,
+                    num_ctx=num_ctx,
+                    thinking_budget_tokens=thinking_budget_tokens,
+                    max_tokens=max_tokens,
+                    extra=call_extra or None,
+                    on_token=on_token,
+                    json_mode=resolved_json_mode,
+                    json_schema=json_schema,
+                    forced_tool_name=forced_tool_name,
+                )
+            finally:
+                try:
+                    await adapter.close()
+                except Exception:  # noqa: BLE001 — close is best-effort
+                    pass
 
     return call
