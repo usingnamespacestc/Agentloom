@@ -103,6 +103,7 @@ class TauBenchRunner:
         user_simulator: UserSimulator,
         agent_model: dict[str, str] | None = None,
         fetch_final_state: bool = True,
+        execution_mode: str | None = None,
     ) -> TaskTrace:
         """Drive one τ-bench task to completion.
 
@@ -117,6 +118,7 @@ class TauBenchRunner:
             domain=domain,
             task_index=task_index,
             agent_model=agent_model,
+            execution_mode=execution_mode,
         )
         trace = TaskTrace(
             domain=session.domain,

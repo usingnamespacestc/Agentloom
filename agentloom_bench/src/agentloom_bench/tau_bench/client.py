@@ -66,6 +66,7 @@ class TauBenchBackendClient:
         task_index: int,
         agent_model: dict[str, str] | None = None,
         title: str | None = None,
+        execution_mode: str | None = None,
     ) -> SessionInfo:
         """``POST /api/tau-bench/sessions``."""
         payload: dict[str, Any] = {"domain": domain, "task_index": task_index}
@@ -73,6 +74,8 @@ class TauBenchBackendClient:
             payload["agent_model"] = agent_model
         if title is not None:
             payload["title"] = title
+        if execution_mode is not None:
+            payload["execution_mode"] = execution_mode
         resp = await self._http.post(
             "/api/tau-bench/sessions",
             json=payload,

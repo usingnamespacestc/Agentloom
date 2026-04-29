@@ -138,6 +138,14 @@ def run(
         "--skip-aggregate",
         help="Skip writing the aggregated markdown report at the end.",
     ),
+    execution_mode: Optional[str] = typer.Option(
+        None,
+        "--execution-mode",
+        help="ChatFlow execution mode for the spawned session. ``None`` "
+        "(default) uses the backend default (native_react). Pass "
+        "``auto_plan`` to exercise the full cognitive pipeline; "
+        "``semi_auto`` for plan + judges without auto-decompose.",
+    ),
 ) -> None:
     """Run one or more τ-bench tasks against the Agentloom backend."""
     indices = _parse_task_ids(task_ids)
@@ -155,6 +163,7 @@ def run(
             out=out,
             skip_reward=skip_reward,
             skip_aggregate=skip_aggregate,
+            execution_mode=execution_mode,
         )
     )
 
@@ -173,6 +182,7 @@ async def _run_batch(
     out: Path,
     skip_reward: bool,
     skip_aggregate: bool,
+    execution_mode: Optional[str] = None,
 ) -> None:
     n = len(task_indices)
     typer.echo(
@@ -212,6 +222,7 @@ async def _run_batch(
                         "model_id": agent_model,
                     },
                     fetch_final_state=not skip_reward,
+                    execution_mode=execution_mode,
                 )
             except Exception as exc:  # noqa: BLE001
                 # Even runner-level failures shouldn't kill the batch —
