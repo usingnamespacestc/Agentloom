@@ -6958,6 +6958,31 @@ def _judge_crash_unrecoverable(workflow: WorkFlow) -> str | None:
     )
 
 
+#: Literal-string sentinels that some models (notably qwen36 q4km
+#: under json_mode=schema) emit instead of leaving a nullable
+#: field unset. Treated as "no value" for response-derivation —
+#: a 4-byte string ``"null"`` reaching the user as
+#: ``agent_response`` is a UX disaster (issue #6, 2026-04-29
+#: qwen36 batch: ChatNode 9bc3c73a6773 had merged_response =
+#: user_message = the literal string "null", so the user got the
+#: word "null" as the agent's reply). Match case-insensitively
+#: and trim surrounding whitespace before the comparison.
+_FAKE_NULL_TOKENS: frozenset[str] = frozenset(
+    {"null", "none", "n/a", "na", "nil", "undefined"}
+)
+
+
+def _is_fake_null(text: str | None) -> bool:
+    """True iff ``text`` is None, empty after strip, or a model-
+    emitted string sentinel that should be treated as empty."""
+    if text is None:
+        return True
+    stripped = text.strip()
+    if not stripped:
+        return True
+    return stripped.lower() in _FAKE_NULL_TOKENS
+
+
 def _judge_post_response_text(workflow: WorkFlow) -> str | None:
     """Return the user-facing reply produced by the terminal judge_post,
     if any, so the ChatNode's ``agent_response`` can use it as the
@@ -6978,6 +7003,13 @@ def _judge_post_response_text(workflow: WorkFlow) -> str | None:
     fields empty (worker's draft is the reply) and for halt paths
     (``pending_user_prompt`` is already set via
     ``judge_post_needs_user_input``).
+
+    Also returns ``None`` when both fields are *fake nulls* — the
+    literal string ``"null"`` / ``"none"`` / etc. that some models
+    emit under json_mode instead of leaving the field unset.
+    Issue #6: qwen36 q4km had a verdict with merged_response =
+    user_message = ``"null"``; without this filter the user got
+    that 4-byte string as the agent's reply.
     """
     for n in reversed(list(workflow.nodes.values())):
         if (
@@ -6991,7 +7023,11 @@ def _judge_post_response_text(workflow: WorkFlow) -> str | None:
             # retry / fail are surfaced through pending_user_prompt;
             # the caller uses that instead.
             return None
-        return v.merged_response or v.user_message or None
+        if not _is_fake_null(v.merged_response):
+            return v.merged_response
+        if not _is_fake_null(v.user_message):
+            return v.user_message
+        return None
     return None
 
 
@@ -7028,9 +7064,9 @@ def _last_judge_post_user_message(workflow: WorkFlow) -> str | None:
             or n.judge_verdict is None
         ):
             continue
-        msg = (n.judge_verdict.user_message or "").strip()
-        if msg:
-            return msg
+        msg = n.judge_verdict.user_message
+        if not _is_fake_null(msg):
+            return msg.strip() if msg else None
     return None
 
 
