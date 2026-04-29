@@ -3141,6 +3141,28 @@ class ChatFlowEngine:
             brief_model_override=chatflow.brief_model or chatflow.draft_model,
         )
 
+        # Cross-turn capability accumulation (2026-04-28) — seed the
+        # new turn's WorkFlow from the primary parent ChatNode's
+        # WorkFlow so judge_pre starts with the standing tool surface
+        # rather than re-extracting from this turn's user words alone.
+        # Combined with ``_apply_judge_pre_trio``'s order-preserving
+        # union, the surface grows monotonically along the chain.
+        # Forks naturally diverge: each fork inherits at the fork
+        # point and unions in its own per-turn additions
+        # independently (the seed is a copy, not a reference). Pack /
+        # compact ChatNodes whose inner WorkFlow doesn't run
+        # judge_pre still propagate the seed to their downstream so
+        # the chain doesn't reset across compaction boundaries.
+        if parent_ids:
+            primary_parent = chatflow.nodes.get(parent_ids[0])
+            if primary_parent is not None and primary_parent.workflow is not None:
+                inner.inheritable_tools = list(
+                    primary_parent.workflow.inheritable_tools or []
+                )
+                inner.capabilities_origin = list(
+                    primary_parent.workflow.capabilities_origin or []
+                )
+
         if switches.judge_pre:
             # Only the pre-judge runs upfront; the rest of the chain is
             # spawned dynamically once we know the verdict.
@@ -5724,20 +5746,50 @@ def _apply_judge_pre_trio(workflow: WorkFlow, verdict: JudgeVerdict) -> None:
     _set("description", verdict.extracted_description)
     _set("inputs", verdict.extracted_inputs)
     _set("expected_outcome", verdict.extracted_expected_outcome)
-    # M7.5 capability model: judge_pre now emits TWO lists.
-    # ``extracted_capabilities`` is the natural-language list (UI / human
-    # review) → ``WorkFlow.capabilities_origin``.
-    # ``extracted_inheritable_tools`` is the registry-name list (engine
-    # consumed) → ``WorkFlow.inheritable_tools``.
-    # Both fields independently overwrite only when judge_pre returned
-    # non-empty values, so a partial extraction (e.g. older fixture
-    # that only emits ``extracted_capabilities``) keeps the other
-    # field's previous value untouched. PR 3 wires the engine filter
-    # to read ``inheritable_tools``; for now this is plumbing only.
+    # M7.5 capability model: judge_pre emits TWO lists.
+    # ``extracted_capabilities`` (natural-language) →
+    # ``WorkFlow.capabilities_origin``; ``extracted_inheritable_tools``
+    # (registry names) → ``WorkFlow.inheritable_tools``.
+    #
+    # Cross-turn accumulation (2026-04-28): both fields **union** with
+    # whatever's already on the WorkFlow instead of replacing. The
+    # WorkFlow comes seeded from the prior turn's WorkFlow (see
+    # ``_spawn_turn_node``), so a fresh extraction is additive. Why:
+    # judge_pre runs against the current turn's user words alone; in
+    # multi-turn auto_plan it consistently mis-judged the standing
+    # tool surface as "just what's needed for this exact ask"
+    # (2026-04-26 tau-bench retail batch: 3 of 3 tasks landed
+    # reward=0 because turn-2 judge_pre picked 2 / 16 of the tools
+    # turn-1 had granted, then later turn workers couldn't find the
+    # ones turn-1 needed). Replace-semantics also clobbered any
+    # mid-turn ``capability_escalation`` widening from
+    # ``_after_worker_judge``. Union preserves the standing surface
+    # AND lets judge_pre / capability_escalation grow it.
+    #
+    # Order-preserving union — keep existing order, append new
+    # entries that aren't already present. Stable for prompt-cache
+    # locality (the prompt's ``capabilities`` slot is rendered from
+    # ``capabilities_origin`` joined with ", "; reordering would
+    # blow the cache prefix on every turn).
+    def _union_preserve_order(prior: list[str], new: list[str]) -> list[str]:
+        seen = set(prior)
+        merged = list(prior)
+        for item in new:
+            if item not in seen:
+                merged.append(item)
+                seen.add(item)
+        return merged
+
     if verdict.extracted_capabilities:
-        workflow.capabilities_origin = list(verdict.extracted_capabilities)
+        workflow.capabilities_origin = _union_preserve_order(
+            list(workflow.capabilities_origin or []),
+            list(verdict.extracted_capabilities),
+        )
     if verdict.extracted_inheritable_tools:
-        workflow.inheritable_tools = list(verdict.extracted_inheritable_tools)
+        workflow.inheritable_tools = _union_preserve_order(
+            list(workflow.inheritable_tools or []),
+            list(verdict.extracted_inheritable_tools),
+        )
 
 
 def _judge_pre_should_halt(verdict: JudgeVerdict) -> bool:
