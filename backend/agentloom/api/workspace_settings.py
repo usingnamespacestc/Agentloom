@@ -39,6 +39,7 @@ class PatchWorkspaceSettingsRequest(BaseModel):
     tool_states: dict[str, ToolState] | None = None
     language: WorkspaceLanguage | None = None
     canvas_prefs: CanvasPrefs | None = None
+    allow_cross_chatflow_lookup: bool | None = None
 
 
 @router.get("")
@@ -69,6 +70,17 @@ async def patch_workspace_settings(
         current.language = body.language
     if "canvas_prefs" in provided and body.canvas_prefs is not None:
         current.canvas_prefs = body.canvas_prefs
+    if (
+        "allow_cross_chatflow_lookup" in provided
+        and body.allow_cross_chatflow_lookup is not None
+    ):
+        # M7.5 PR 8 cross-chatflow grant toggle. Bool field — None
+        # is a "skip" sentinel; True/False are real updates that
+        # flip the workspace's trust posture for
+        # ``get_node_context.cross_chatflow``.
+        current.allow_cross_chatflow_lookup = (
+            body.allow_cross_chatflow_lookup
+        )
 
     await repo.save(current)
     await session.commit()
