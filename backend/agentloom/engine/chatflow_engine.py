@@ -3292,17 +3292,28 @@ class ChatFlowEngine:
     # ---------------------------------------------------- M7.5 PR 7 recon DAG
 
     def _cognitive_react_enabled_for_pre(
-        self, chatflow: ChatFlow, judge_pre_node: WorkFlowNode
+        self,
+        chatflow: ChatFlow,
+        workflow: WorkFlow,
+        judge_pre_node: WorkFlowNode,
     ) -> bool:
         """Decide whether to honor a ``judge_pre`` ``recon_plan``.
 
-        Two gates, both must pass:
+        Three gates, all must pass:
 
-        - The chatflow opted in via ``cognitive_react_enabled``
-          (default False — see schema docstring for the reason).
+        - The chatflow opted in via ``cognitive_react_enabled``.
         - The tool registry exists. Without it the recon tool_calls
           would all dispatch as "tool not found" errors and the
           follow-up judge_pre would just see noise.
+        - Recursion fuse (mirror of
+          ``_cognitive_react_enabled_for_post``): a judge_pre whose
+          parent is a TOOL_CALL is itself a recon follow-up, must
+          commit to a verdict instead of recon-again. 2026-04-29
+          retail evidence: without this fuse, judge_pre repeatedly
+          emitted the same ``recon_plan=[get_order_details]`` after
+          consuming its results — 5 rounds of redundant recon
+          before the model finally gave up. Capping at one round
+          per design §4.4 forces the second pass to commit.
 
         The judge_pre node's ``effective_tools`` (snapshotted by
         ``_spawn_judge_pre`` at allocation time, M7.5 §4.1) is the
@@ -3317,7 +3328,6 @@ class ChatFlowEngine:
         ``_inner._disabled_tool_names`` is the same union the
         explicit chatflow path would compute).
         """
-        del judge_pre_node  # gate enforced inside _spawn_recon_chain
         if not chatflow.cognitive_react_enabled:
             return False
         if self._tools is None:
@@ -3326,6 +3336,10 @@ class ChatFlowEngine:
                 "falling back to atomic judge_pre"
             )
             return False
+        for pid in judge_pre_node.parent_ids or []:
+            parent = workflow.nodes.get(pid)
+            if parent is not None and parent.step_kind == StepKind.TOOL_CALL:
+                return False
         return True
 
     def _cognitive_react_enabled_for_post(
@@ -4298,7 +4312,9 @@ class ChatFlowEngine:
         if (
             verdict is not None
             and verdict.recon_plan
-            and self._cognitive_react_enabled_for_pre(chatflow, judge_pre_node)
+            and self._cognitive_react_enabled_for_pre(
+                chatflow, workflow, judge_pre_node
+            )
         ):
             spawned = self._spawn_recon_chain(
                 workflow,
