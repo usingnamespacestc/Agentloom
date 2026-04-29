@@ -259,7 +259,7 @@ agent 答 `octarine` —— 一字不差，没废话，没 engine-speak。背后
 
 ---
 
-## 🐞 第六轮：qwen36 全栈测试 + debug 接力（commit `1d94ecb..3f60f64`）
+## 🐞 第六轮：qwen36 全栈测试 + debug 接力（commit `1d94ecb..HEAD`）
 
 执行 AI 跑了一个为本地 qwen36-27b-q4km 模型量身写的 4-task 全栈测试方案（[`docs/test-execution-plan-qwen36.md`](docs/test-execution-plan-qwen36.md)，1198 行 self-contained），耗时约 12 小时跑完 task 1+2+3（task 4 主动停了）。**第一次用真实弱模型跑完整 cognitive 路径就是 bug 富矿**——抓到 6 个 issue（4 engine bug + 1 model quality + 1 test setup），按 [`docs/test-execution-plan-qwen36.md`](docs/test-execution-plan-qwen36.md) 里的 D1-D7 debug 接力 protocol 写到 `runs/issues-for-debug.md`，再粘回到 debug AI 这边逐个修。
 
@@ -271,6 +271,7 @@ agent 答 `octarine` —— 一字不差，没废话，没 engine-speak。背后
 | `3f60f64` (#3) | 🟠 P1 fallback | **memoryboard_lookup 自动 fallback 到 `ctx.caller_chatflow_id`**：sub-WorkFlow worker 没法知道顶层 chatflow id（引擎细节，模型不该关心）。Pre-fix 工具直接 raise，worker 把 "memoryboard_lookup needs chatflow_id but I don't know it" 漏给用户。修后两层 fallback：args 没给 → ctx 顶层 id；ctx 也没（bare test 路径）→ 友好错误 |
 | `3f60f64` (#5) | 🟠 P1 prompt | **judge_pre fixture 加 ✗/✓ 范例**：qwen36 把 `(节点: <id>)` 模板里的 `<id>` 当占位符替换成描述（`(nodes: 包含生态维度详细分析的节点)`）→ planner / worker 拿到查不到的字符串。fixture 现在硬规定 node id 必须是 UUID 格式，加描述性"占位符"被显式禁用，给不出真 id 时改写 missing_inputs 让 chain 公开断而非偷偷断 |
 | `3f60f64` (#2) | 🟢 P2 test | **smoke timeout 600s → 1800s**：qwen36 + auto_plan + recon DAG + drill-down through compact 实测单 turn 17 min，超过原默认。bumped 到 30 min 容忍 |
+| `HEAD` | 🟡 P2 default flip | **`tool_loop_budget` 默认 12 → None**：旧默认在合法长链（τ-bench retail / Agentloom 自分析）上误杀。planner-grounding fuse + judge_post retry budget + auto_mode revise budget 三层 runaway 守护已经够，专门留 12 反而把强 agent 的 tool-use chain 截断。新 chatflow 默认 unlimited；DB 里已存的 chatflow 保留各自的 12（Pydantic payload-loaded 不重写） |
 
 ### 这一轮的元教训
 
@@ -476,7 +477,7 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
       （SUCCEEDED / FAILED / CANCELLED）即启动聚合 judge_post，partial 结果
       配合带具体失败原因的 halt message 推给用户
 - [x] Retry budget + redo_targets（重开并重跑受影响的子树）
-      `📁` 三层 retry 体系：① 工具层 `ToolError → ToolResult(is_error=True)` LLM 下一轮看见可改写（`tool_loop_budget=12` 默认）② 草稿层 `judge_during.during_verdict="revise"` 触发 worker re-spawn（`auto_mode_revise_budget`）③ 工作流层 `judge_post.post_verdict="retry"` + `redo_targets[node_id, critique]` 精确点名重跑（`judge_retry_budget`）
+      `📁` 三层 retry 体系：① 工具层 `ToolError → ToolResult(is_error=True)` LLM 下一轮看见可改写（`tool_loop_budget` 默认 None=unlimited，由 grounding fuse 兜底 runaway）② 草稿层 `judge_during.during_verdict="revise"` 触发 worker re-spawn（`auto_mode_revise_budget`）③ 工作流层 `judge_post.post_verdict="retry"` + `redo_targets[node_id, critique]` 精确点名重跑（`judge_retry_budget`）
 - [x] Tool-loop 预算守卫
 - [x] Pending user-prompt：agent 可以在流程中主动提问并暂停，用户回复后流程继续
 

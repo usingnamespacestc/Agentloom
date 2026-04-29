@@ -319,9 +319,16 @@ class ChatFlow(BaseModel):
     #: summarizing a long draft context never silently truncates.
     brief_model: ProviderModelRef | None = None
     #: ReAct inner-loop cap shared by every WorkFlow in this ChatFlow.
-    #: ``None`` means unlimited. Per-WorkFlow and per-WorkNode overrides
-    #: are planned. See §5.4 FR-EX-6.
-    tool_loop_budget: int | None = 12
+    #: ``None`` means unlimited (default). Per-WorkFlow and per-WorkNode
+    #: overrides are planned. See §5.4 FR-EX-6.
+    #:
+    #: Default flipped 12 → None on 2026-04-28: the cap was tripping on
+    #: legitimate long tool-use chains (τ-bench retail, complex Agentloom
+    #: self-analysis runs) and the planner-grounding fuse + judge_post
+    #: retry budget already provide the runaway guards. Existing
+    #: chatflows in the DB keep their stored value; this only affects
+    #: newly-created chatflows.
+    tool_loop_budget: int | None = None
     #: Auto-mode halt cap: total ``judge_during.verdict == "revise"`` tolerated
     #: per WorkFlow run before the engine pauses at ``waiting_for_user``.
     #: Per-WorkNode override allowed; ``None`` = unlimited. See §5.3 FR-PL-7.

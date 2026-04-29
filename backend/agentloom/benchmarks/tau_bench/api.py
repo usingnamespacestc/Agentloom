@@ -50,12 +50,14 @@ class CreateSessionRequest(BaseModel):
     tool_loop_budget: int = Field(
         30,
         ge=1,
-        description="Max tool-use iterations per turn. Default 30 (vs "
-        "the ChatFlow default 12) because airline tasks legitimately "
-        "need 5-10+ tool calls per turn (lookup user → list "
-        "reservations → for each: get details + update flights + "
-        "update baggage). Set lower if you specifically want to "
-        "stress-test the budget guard.",
+        description="Max tool-use iterations per turn. Default 30 — "
+        "tau-bench keeps an explicit cap (the global ChatFlow default "
+        "is now unlimited as of 2026-04-28) because airline tasks "
+        "legitimately need 5-10+ tool calls per turn (lookup user → "
+        "list reservations → for each: get details + update flights "
+        "+ update baggage), and a runaway agent in a benchmark loop "
+        "wastes provider quota. Set lower if you specifically want "
+        "to stress-test the budget guard.",
     )
     execution_mode: str | None = Field(
         None,
