@@ -800,20 +800,26 @@ _COGNITIVE_SIDE_EFFECTS: frozenset[SideEffect] = frozenset(
 def _resolve_caller_effective_tools(
     workflow: WorkFlow, tool_call_node: WorkFlowNode
 ) -> frozenset[str]:
-    """Find the worker draft that spawned *tool_call_node* and return
-    its ``effective_tools`` as a frozenset.
+    """Find the authoritative caller capability set for *tool_call_node*
+    and return it as a frozenset.
 
-    Tool_call nodes are spawned by ``_spawn_tool_loop_children`` with
-    ``parent_ids=[worker_draft.id]``, so the parent's allocation is
-    the authoritative caller context for capability gating
-    (``get_node_context.cross_chatflow`` etc).
-
-    Returns ``frozenset()`` when the parent isn't a draft (rare —
-    direct-mode legacy paths) or when its ``effective_tools`` is None
-    (legacy chatflow that pre-dates the capability model). Tools that
-    consult this set fall open on empty, matching the bare-test
-    behavior — locking out legacy chatflows would break them.
+    Resolution order:
+    1. ``tool_call_node.effective_tools`` if explicitly set — used by
+       atomic tool_call plans that the planner committed to (see
+       ``_spawn_atomic_tool_call``). Those TOOL_CALLs have a cognitive
+       judge as parent (planner_judge) whose own effective_tools is
+       a read-only set; without this branch the gate would reject any
+       side-effect tool the planner explicitly authorized.
+    2. Otherwise the parent's ``effective_tools`` — the original M7.5
+       PR 8 semantic for LLM-emitted tool_uses, where the worker draft
+       parent's allocation is what authorized the call.
+    3. ``frozenset()`` when neither has it (legacy nodes pre-dating
+       the capability model). Tools that consult this set fall open
+       on empty, matching the bare-test behavior — locking out legacy
+       chatflows would break them.
     """
+    if tool_call_node.effective_tools is not None:
+        return frozenset(tool_call_node.effective_tools)
     if not tool_call_node.parent_ids:
         return frozenset()
     parent = workflow.nodes.get(tool_call_node.parent_ids[0])

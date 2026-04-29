@@ -4178,6 +4178,18 @@ class ChatFlowEngine:
                 if atomic.expected_outcome
                 else None
             ),
+            # Pin the caller capability context to exactly the tool the
+            # planner authorized. Without this the parent (planner_judge)
+            # is a cognitive node whose effective_tools is a read-only
+            # set or None — ``_resolve_caller_effective_tools`` would
+            # then return frozenset() and any tool gating on
+            # ``ctx.caller_effective_tools`` (e.g.
+            # ``get_node_context.cross_chatflow``) would lock out a
+            # call the planner explicitly committed to. The resolver's
+            # PR 472 update prefers the tool_call's own
+            # effective_tools when set, so this single-element list is
+            # the authoritative caller surface for this call.
+            effective_tools=[atomic.tool_name],
         )
         inner.add_node(tc)
         follow_up = WorkFlowNode(
