@@ -4126,6 +4126,68 @@ class ChatFlowEngine:
         node.redo_source_id = redo_source_id
         return inner.add_node(node)
 
+    def _spawn_atomic_tool_call(
+        self,
+        inner: WorkFlow,
+        parent_node: WorkFlowNode,
+        atomic: AtomicBrief,
+        *,
+        resolved_model: ProviderModelRef | None,
+    ) -> WorkFlowNode:
+        """Materialize a ``mode=atomic, step_kind=tool_call`` plan as a
+        real TOOL_CALL WorkNode + follow-up DRAFT.
+
+        Why this exists (2026-04-29 fix): ``AtomicBrief`` carries
+        first-class ``step_kind / tool_name / tool_args`` fields and
+        ``plan.yaml`` explicitly tells the LLM e.g. "single
+        get_node_context retrieval → ``step_kind: tool_call`` +
+        ``tool_name: get_node_context`` + ``tool_args:
+        {'node_id': ...}``". Pre-fix ``_after_planner_judge`` always
+        called ``_spawn_worker`` for atomic plans, which only renders
+        ``description / inputs / expected_outcome`` into the worker
+        template. The planner's pinned ``tool_name`` + ``tool_args``
+        were silently dropped — the worker had to re-derive them
+        from a vague description and frequently lost the args (e.g.
+        the description said "use get_node_context to verify the
+        spelling" while the ``node_id`` lived only in
+        ``atomic.tool_args``; the worker fell back to ``memoryboard_lookup``
+        and reported "missing node_id" to the user). Observed on
+        chatflow ``019dd8a8`` 2026-04-29 with qwen36-q4km, which
+        actually commits to ``step_kind=tool_call`` (cloud models
+        prefer ``draft`` and accidentally hide the bug).
+
+        The new path mirrors the LLM-emitted-tool-uses pattern in
+        :func:`workflow_engine._spawn_real_tool_calls_for_parent`:
+        one TOOL_CALL with ``tool_name + tool_args`` verbatim, then a
+        follow-up DRAFT (role=None) that the engine fills with the
+        spliced tool_result via the standard ancestor walk. The
+        follow-up routes to ``judge_post`` through the role-less
+        DRAFT branch in the post-node hook — same shape the engine
+        already takes when a worker emits tool_uses, so the rest of
+        the orchestration (judge_post / aggregation / retry) stays
+        unchanged.
+        """
+        tc = WorkFlowNode(
+            step_kind=StepKind.TOOL_CALL,
+            parent_ids=[parent_node.id],
+            tool_name=atomic.tool_name,
+            tool_args=dict(atomic.tool_args or {}),
+            description=EditableText.by_agent(atomic.description),
+            expected_outcome=(
+                EditableText.by_agent(atomic.expected_outcome)
+                if atomic.expected_outcome
+                else None
+            ),
+        )
+        inner.add_node(tc)
+        follow_up = WorkFlowNode(
+            step_kind=StepKind.DRAFT,
+            parent_ids=[tc.id],
+            model_override=inner.tool_call_model_override or resolved_model,
+        )
+        inner.add_node(follow_up)
+        return follow_up
+
     def _spawn_worker_judge(
         self,
         inner: WorkFlow,
@@ -4583,6 +4645,27 @@ class ChatFlowEngine:
                     upstream_summary=critique,
                     user_message_text=user_message_text,
                     context_wire=context_wire,
+                )
+                return
+            # Honor planner's ``step_kind=tool_call`` decision: when
+            # the planner committed to a specific registered tool with
+            # explicit ``tool_args``, run that tool directly instead of
+            # spawning a draft worker that would have to re-derive the
+            # call. The phantom-tool-name guard above already filtered
+            # out unregistered names, so reaching this branch means the
+            # tool is real and the planner's args are authoritative.
+            # (See ``_spawn_atomic_tool_call`` for the why.)
+            if (
+                plan.atomic.step_kind == StepKind.TOOL_CALL
+                and plan.atomic.tool_name
+                and self._tools is not None
+                and self._tools.has(plan.atomic.tool_name)
+            ):
+                self._spawn_atomic_tool_call(
+                    workflow,
+                    planner_judge_node,
+                    plan.atomic,
+                    resolved_model=resolved_model,
                 )
                 return
             self._spawn_worker(

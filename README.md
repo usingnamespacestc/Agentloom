@@ -271,7 +271,8 @@ agent 答 `octarine` —— 一字不差，没废话，没 engine-speak。背后
 | `3f60f64` (#3) | 🟠 P1 fallback | **memoryboard_lookup 自动 fallback 到 `ctx.caller_chatflow_id`**：sub-WorkFlow worker 没法知道顶层 chatflow id（引擎细节，模型不该关心）。Pre-fix 工具直接 raise，worker 把 "memoryboard_lookup needs chatflow_id but I don't know it" 漏给用户。修后两层 fallback：args 没给 → ctx 顶层 id；ctx 也没（bare test 路径）→ 友好错误 |
 | `3f60f64` (#5) | 🟠 P1 prompt | **judge_pre fixture 加 ✗/✓ 范例**：qwen36 把 `(节点: <id>)` 模板里的 `<id>` 当占位符替换成描述（`(nodes: 包含生态维度详细分析的节点)`）→ planner / worker 拿到查不到的字符串。fixture 现在硬规定 node id 必须是 UUID 格式，加描述性"占位符"被显式禁用，给不出真 id 时改写 missing_inputs 让 chain 公开断而非偷偷断 |
 | `3f60f64` (#2) | 🟢 P2 test | **smoke timeout 600s → 1800s**：qwen36 + auto_plan + recon DAG + drill-down through compact 实测单 turn 17 min，超过原默认。bumped 到 30 min 容忍 |
-| `HEAD` | 🟡 P2 default flip | **`tool_loop_budget` 默认 12 → None**：旧默认在合法长链（τ-bench retail / Agentloom 自分析）上误杀。planner-grounding fuse + judge_post retry budget + auto_mode revise budget 三层 runaway 守护已经够，专门留 12 反而把强 agent 的 tool-use chain 截断。新 chatflow 默认 unlimited；DB 里已存的 chatflow 保留各自的 12（Pydantic payload-loaded 不重写） |
+| `7a5defa` | 🟡 P2 default flip | **`tool_loop_budget` 默认 12 → None**：旧默认在合法长链（τ-bench retail / Agentloom 自分析）上误杀。planner-grounding fuse + judge_post retry budget + auto_mode revise budget 三层 runaway 守护已经够，专门留 12 反而把强 agent 的 tool-use chain 截断。新 chatflow 默认 unlimited；DB 里已存的 chatflow 保留各自的 12（Pydantic payload-loaded 不重写） |
+| `HEAD` | 🔴 P1 静默丢参数 | **planner atomic `step_kind=tool_call` 真的 spawn TOOL_CALL**：planner 按 `plan.yaml` 指令输出 `mode=atomic, step_kind=tool_call, tool_name=get_node_context, tool_args={"node_id": ...}`，但 `_spawn_worker` 只读 `description / inputs / expected_outcome` 三个字段，**`step_kind / tool_name / tool_args` 全部丢弃**——一律 spawn draft worker。强模型没爆是因为它们倾向 `step_kind=draft` 兜底；qwen36 老老实实选 `step_kind=tool_call` 把洞踩出来：worker 看到空 inputs + 模糊 description，丢失 planner 指定的 `node_id`，回复"missing node_id"。修：新增 `_spawn_atomic_tool_call`，当 `step_kind=tool_call` 且 `tool_name` 是已注册工具时直接 spawn TOOL_CALL（args 原样保留）+ follow-up DRAFT；plan_judge 此前没打回是合理的——plan 本身合规，是 engine 实化掉链子。回归测试 `test_atomic_tool_call_passthrough.py` 钉死三种形态（tool_call / draft / no-tool_name 兜底） |
 
 ### 这一轮的元教训
 
@@ -281,6 +282,7 @@ agent 答 `octarine` —— 一字不差，没废话，没 engine-speak。背后
   - 强模型不会把 `(节点: <id>)` 的 `<id>` 当成占位符替换，所以 issue #5 也是 qwen36 特有
   - 但这些 bug 一旦激活就直接破坏用户体验。靠 cloud-only 测试永远不会发现
 - **defensive coding 比 root-cause fix 更稳**：issue #1 的 root cause 是 post_node_hook 静默吞了某个异常，但找出那个异常的耗时 >> 加一个 fallback 的耗时。Fallback 让用户至少看到 something useful，root cause 留给后续 audit
+- **schema 字段是契约——只测 parser 不测使用方会留洞**：第 7 个 issue（atomic tool_call 丢 args）有 `test_recursive_planner_parser.py` 把 parser 钉死了，**但没有任何测试覆盖"parsed AtomicBrief → engine 实化 → 真的 spawn 出带正确 tool_args 的 TOOL_CALL"这条端到端链**。结果 `_spawn_worker` 默默忽略了 schema 上的 `step_kind / tool_name / tool_args` 三个 first-class 字段。Lesson：每加一个 schema 字段，至少要有一个测试断言"它真的被消费了"，不只是被解析了
 
 ### 还在 backlog 的（已识别但未履约）
 
