@@ -19,7 +19,7 @@
 | **核心能力** | ChatFlow DAG（fork/merge/compact/pack/fold）+ 嵌套 WorkFlow + 递归 planner + 三段式 judge + MemoryBoard + 跨 chatflow 数据访问门禁 |
 | **执行模式** | `native_react`（直连 ReAct）/ `semi_auto`（一次性 plan）/ `auto_plan`（递归 planner + judge 驱动重试），ChatFlow 默认 + ChatNode 覆盖 |
 | **WorkNode 类型** | `llm_call` · `tool_call` · `judge_call` (pre/during/post) · `sub_agent_delegation` · `compact` · `merge` · `pack` · `brief` |
-| **测试覆盖** | 后端 **857** unit + integration（其中 **665** unit / **192** integration）/ 4 skipped；前端 **91** 单测；live-backend smoke **47** checks across 7 scripts；全部跑过 |
+| **测试覆盖** | 后端 **871** unit + integration（其中 **678** unit / **193** integration）/ 4 skipped；前端 **91** 单测；live-backend smoke **47** checks across 7 scripts；全部跑过 |
 | **最近里程碑** | **M7.5 capability model**（2026-04-26 · 8 PR + 1 hotfix 单日 ship · ~1900 行 diff · ~100 新测试）+ **post-ship 修复 8 commit**（2026-04-26 night → 2026-04-27：auto_plan 死锁修复 / capability_request 反馈闭环履约 / drill-down nudge / 跨 chatflow 工具污染 fix / etc.） |
 | **τ-bench retail 0-9 (NATIVE_REACT) baseline** | **8/10 = 80% pass^1**（agent: ark-code-latest via 火山引擎 coding plan lite · user simulator: doubao-seed-2-0-pro-260215 · 全程 ~27 min · 2 fail 归因到 user simulator 演 "private person" persona 拒验证而非 agent 错） |
 | **provider 支持** | OpenAI 兼容（Volcengine / Ark / Ollama / OpenAI）+ Anthropic 原生 + MCP 客户端 |
@@ -257,12 +257,37 @@ agent 答 `octarine` —— 一字不差，没废话，没 engine-speak。背后
 - **wire-format leak 是高频 bug 模式**：今晚 6 个 bug 里 4 个都是"schema 在，consumer 在，中间一站点漏接"。共同诊断：单元测试单独验每端，但端到端 dataflow 没人测。Smoke 弥补这个。
 - **真 LLM 行为是另一种 reality check**：03 / combo 验证 drill-down 不只是引擎能 spawn `get_node_context` tool_call——真模型在压缩过的上下文里**真的能识别需要拉原文 + 真的把数字字节级回答出来**。这是 prompt + sticky-restore + brief 协作的端到端正确性，pytest 看不到。
 
+---
+
+## 🐞 第六轮：qwen36 全栈测试 + debug 接力（commit `1d94ecb..3f60f64`）
+
+执行 AI 跑了一个为本地 qwen36-27b-q4km 模型量身写的 4-task 全栈测试方案（[`docs/test-execution-plan-qwen36.md`](docs/test-execution-plan-qwen36.md)，1198 行 self-contained），耗时约 12 小时跑完 task 1+2+3（task 4 主动停了）。**第一次用真实弱模型跑完整 cognitive 路径就是 bug 富矿**——抓到 6 个 issue（4 engine bug + 1 model quality + 1 test setup），按 [`docs/test-execution-plan-qwen36.md`](docs/test-execution-plan-qwen36.md) 里的 D1-D7 debug 接力 protocol 写到 `runs/issues-for-debug.md`，再粘回到 debug AI 这边逐个修。
+
+| Commit | 类别 | 修了什么 |
+|---|---|---|
+| `1d94ecb` | 🔴 P0 死锁 | **失败 leaf 自动 fork 主父**：post_judge fail 后 ChatNode=FAILED → `_try_consume` 永远 early-return（"failed nodes never consume"）→ pending 永挂 → submit_user_turn 的 `await future` 不返回 → submit_lock 永持有 → 该 chatflow 永远不能再 POST /turns。修：`_place_pending` 检测 leaf=FAILED 时按 retry_failed_node 语义自动 spawn 失败节点的 sibling |
+| `d75996d` | 🟠 P1 silent dead-end | **`_last_judge_post_user_message` defensive fallback**：a056243 的 fix 覆盖了"dangling decompose"，但没覆盖 retry+redo_targets 路径下 hook 静默 spawn 失败的 case。chat 层 finalization 在 "no terminal llm_call" branch 前先扫最近 post_judge 的 user_message 顶上去当 agent_response。这样即使 hook 因任何原因没 spawn redo，用户至少能看到 judge 的诊断而不是 opaque engine error |
+| `a487cdb` | 🟡 P2 UX | **`_is_fake_null` 字面 sentinel 过滤**：qwen36 q4km + json_mode 偶尔写字面 4 字节字符串 `"null"` 当 user_message / merged_response 的值（应该 omit field）。Python `or` 把它当真值通过，用户看到 agent 回复是单词 "null"。helper 把 `null/none/n/a/nil/undefined` 等 case-insensitive 当空，下落到 fallback 链 |
+| `3f60f64` (#3) | 🟠 P1 fallback | **memoryboard_lookup 自动 fallback 到 `ctx.caller_chatflow_id`**：sub-WorkFlow worker 没法知道顶层 chatflow id（引擎细节，模型不该关心）。Pre-fix 工具直接 raise，worker 把 "memoryboard_lookup needs chatflow_id but I don't know it" 漏给用户。修后两层 fallback：args 没给 → ctx 顶层 id；ctx 也没（bare test 路径）→ 友好错误 |
+| `3f60f64` (#5) | 🟠 P1 prompt | **judge_pre fixture 加 ✗/✓ 范例**：qwen36 把 `(节点: <id>)` 模板里的 `<id>` 当占位符替换成描述（`(nodes: 包含生态维度详细分析的节点)`）→ planner / worker 拿到查不到的字符串。fixture 现在硬规定 node id 必须是 UUID 格式，加描述性"占位符"被显式禁用，给不出真 id 时改写 missing_inputs 让 chain 公开断而非偷偷断 |
+| `3f60f64` (#2) | 🟢 P2 test | **smoke timeout 600s → 1800s**：qwen36 + auto_plan + recon DAG + drill-down through compact 实测单 turn 17 min，超过原默认。bumped 到 30 min 容忍 |
+
+### 这一轮的元教训
+
+- **debug 接力 protocol 真的有用**：执行 AI 在 [`runs/issues-for-debug.md`](runs/issues-for-debug.md) 里给每个 issue 都附了 chatflow_id 全长。debug AI（我）直接 `curl /api/chatflows/<id>` 拿到完整 WorkFlow JSON / verdict / error_message，不用回头问执行 AI 任何细节。issue #1 / #5 / #6 都是这样从原始 verdict 字段里直接看到 root cause。
+- **弱模型 + 严格 schema 暴露的 bug 跟强模型不一样**：
+  - 强模型（GPT-4 / Claude）很少 emit 字面 "null" 字符串，所以 issue #6 的 fake-null 在 cloud LLM 上几乎看不到
+  - 强模型不会把 `(节点: <id>)` 的 `<id>` 当成占位符替换，所以 issue #5 也是 qwen36 特有
+  - 但这些 bug 一旦激活就直接破坏用户体验。靠 cloud-only 测试永远不会发现
+- **defensive coding 比 root-cause fix 更稳**：issue #1 的 root cause 是 post_node_hook 静默吞了某个异常，但找出那个异常的耗时 >> 加一个 fallback 的耗时。Fallback 让用户至少看到 something useful，root cause 留给后续 audit
+
 ### 还在 backlog 的（已识别但未履约）
 
 - 🟡 (B) judge_pre prompt 加前瞻指令（fixture 改）—— 当前 (A) 跨 turn 累积 + (C) cap_request 反馈循环 + recon DAG 都是 reactive 路径；(B) 是预防层，等真负载数据再决定 ROI
-- 🟢 τ-bench 工具 first-class 化（当前 mitigation `bdedbdd` + `ed5bcfe` 通了，根本架构 hack 等长期决策）
 - 🟡 plan_judge / worker_judge 也加 recon —— judge_post 的同样路线，但这俩不出 user reply，ROI 小
 - 🟢 给剩余 30+ 个 feature 也写 smoke（当前 7/38 覆盖；按需补就行，框架已有）
+- 🟢 找到 issue #1 的 post_node_hook 静默异常 root cause（fallback 已先稳住用户面，但底下那个 silent 吞掉的异常仍然不知道是什么）
+- 🟢 τ-bench 工具 first-class 化（当前 mitigation `bdedbdd` + `ed5bcfe` 通了，根本架构 hack 等长期决策）
 
 ---
 
@@ -537,7 +562,7 @@ WorkFlow fixture**，不是 engine 里的特殊逻辑。这意味着三层审核
 - [x] **Frozen-guard exempt 不变量测试**：`test_frozen_guard_exempts.py`
       正反两面固定 UI-only 字段（position / sticky / pending_queue）在
       frozen 节点上放行、语义字段必触发；防未来加新字段时踩拖动丢失那类坑
-- [x] Pytest：后端 **857** unit + integration / 4 skipped + 前端 **91** 个单测全绿，collection 干净；live-backend smoke 47 checks 全绿
+- [x] Pytest：后端 **871** unit + integration / 4 skipped + 前端 **91** 个单测全绿，collection 干净；live-backend smoke 47 checks 全绿
 - [x] **真模型实测验证不变量**：M7.5 跑了 3 个 auto_plan + cognitive_react chatflow（claude-haiku/sonnet）+ τ-bench retail 0-9 batch，挖出 1 个 cross-provider schema bug（PR 6 hotfix）+ 1 个 emergent property（catalog 前置吸收 capability_request 路径）反写回设计文档
 
 ---
