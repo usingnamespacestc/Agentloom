@@ -3214,6 +3214,14 @@ class ChatFlowEngine:
             # the ChatFlow didn't explicitly set a brief_model so the
             # MemoryBoard always has *some* model to reach for.
             brief_model_override=chatflow.brief_model or chatflow.draft_model,
+            # Prong 5 fact-loss fix (2026-04-30, see
+            # docs/backlog-decompose-fact-loss.md): anchor the
+            # outermost ChatNode's user_message verbatim onto the
+            # WorkFlow so every sub_agent_delegation spawned from
+            # below — at any depth — can prepend it into its own
+            # judge_pre's conversation. Stops the planner brief
+            # boundary from being a one-way fact-loss frontier.
+            outer_user_message=user_message_text,
         )
 
         # Cross-turn capability accumulation (2026-04-28) — seed the
@@ -4080,6 +4088,17 @@ class ChatFlowEngine:
         the parent planner wrote, just like the top-level case where
         judge_pre reads the user's message. Debate budget inherited from
         the parent WorkFlow.
+
+        **Prong 5 (2026-04-30, fact-loss fix)**: when the parent WorkFlow
+        carries a non-empty ``outer_user_message`` (the originating
+        ChatNode's user_message.text, propagated through every nested
+        layer), the engine prepends it to the sub's judge_pre
+        conversation as a "[Outer ChatFlow context]" preamble. This is
+        the engine-side root-cause cure for the decompose brief boundary
+        dropping literal data the planner paraphrased — sub-WorkFlows
+        now have unconditional access to the user's original turn even
+        when the planner-authored subtask description doesn't quote it
+        verbatim. See ``docs/backlog-decompose-fact-loss.md`` prong 5.
         """
         switches = derive_switches_from_mode(ExecutionMode.AUTO_PLAN)
         sub = WorkFlow(
@@ -4111,15 +4130,61 @@ class ChatFlowEngine:
             # can't keep fanning out.
             delegation_depth=parent.delegation_depth + 1,
             delegation_depth_budget=parent.delegation_depth_budget,
+            # Carry the originating ChatNode's user_message verbatim
+            # all the way down. parent.outer_user_message was written
+            # at top-level _spawn_turn_node and propagated through
+            # every nesting layer so deeper subs don't lose it.
+            outer_user_message=parent.outer_user_message,
         )
         # Feed the planner-authored task description to judge_pre as the
         # conversation it distills the trio from — mirrors the top-level
-        # path where judge_pre reads the user's turn text.
-        context_wire = [
+        # path where judge_pre reads the user's turn text. When the
+        # parent WorkFlow carries an outer_user_message (the originating
+        # ChatNode's user_message.text), prepend it as a labeled context
+        # block so judge_pre + the planner inside this sub can fall back
+        # to literal user data the planner-authored subtask description
+        # may have paraphrased away.
+        context_wire: list[WireMessage] = []
+        if parent.outer_user_message:
+            context_wire.append(
+                WireMessage(
+                    role="user",
+                    content=self._render_outer_user_message_preamble(
+                        parent.outer_user_message
+                    ),
+                )
+            )
+        context_wire.append(
             WireMessage(role="user", content=subtask.description)
-        ]
+        )
         self._spawn_judge_pre(sub, subtask.description, context_wire)
         return sub
+
+    def _render_outer_user_message_preamble(self, outer_text: str) -> str:
+        """Localized "[Outer ChatFlow context]" wrapper for the
+        originating user_message that ``_build_sub_workflow_for_subtask``
+        prepends into the sub's judge_pre conversation. Tag is in the
+        workspace's fixture language so the model reads consistent
+        meta-text alongside its trio."""
+        lang = (self._current_fixture_language or "").lower()
+        if lang.startswith("zh"):
+            return (
+                "[外层 ChatFlow 上下文 —— 用户在最外层 ChatNode 的原话。"
+                "提供给你以防止 planner 在 brief 边界 paraphrase 丢失"
+                "字面材料；当你的 subtask description 引用了"
+                "\"上面提供的 X\" 类指代但你没看到具体材料时，请回到"
+                "这段原文里取回原始数据，再据此完成任务。]\n\n"
+                f"{outer_text}"
+            )
+        return (
+            "[Outer ChatFlow context — the user's original turn at the "
+            "outermost ChatNode. Provided so you don't lose literal "
+            "data the planner above may have paraphrased. When your "
+            "subtask description references something like \"the X "
+            "provided above\" but you can't see X concretely, fall "
+            "back to this preamble for the verbatim source.]\n\n"
+            f"{outer_text}"
+        )
 
     def _spawn_worker(
         self,

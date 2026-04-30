@@ -425,6 +425,23 @@ class WorkFlow(BaseModel):
     #: prompts; deeper trees are almost always over-decomposition.
     delegation_depth_budget: int = 2
 
+    #: Verbatim copy of the **outer ChatNode's user_message.text** that
+    #: anchors this WorkFlow tree. Set by ``_spawn_turn_node`` at the
+    #: top of the chain and propagated through every
+    #: ``_build_sub_workflow_for_subtask`` so nested sub-WorkFlows
+    #: never lose access to what the user actually wrote — the engine
+    #: prepends it to each sub-WorkFlow's judge_pre input_messages
+    #: as a "[Outer ChatFlow context]" preamble. Empty string for
+    #: legacy WorkFlows / pre-2026-04-30 payloads + bare-engine
+    #: tests; in those cases the engine simply skips the injection
+    #: and falls back to pre-fix behavior. See
+    #: ``docs/backlog-decompose-fact-loss.md`` prong 5 for the
+    #: design rationale (decompose subtask description was
+    #: paraphrasing the user's data and sub-WorkFlows had no way
+    #: to recover it; carrying the outer user_message here gives
+    #: them an unconditional fallback channel).
+    outer_user_message: str = ""
+
     sticky_notes: dict[str, StickyNote] = Field(default_factory=dict)
 
     @property
