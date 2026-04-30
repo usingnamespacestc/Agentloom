@@ -4490,6 +4490,7 @@ class ChatFlowEngine:
                     node,
                     user_message_text=user_message_text,
                     context_wire=context_wire,
+                    resolved_model=chat_node.resolved_model,
                 )
                 return
 
@@ -5172,6 +5173,7 @@ class ChatFlowEngine:
         *,
         user_message_text: str,
         context_wire: list[WireMessage],
+        resolved_model: ProviderModelRef | None = None,
     ) -> None:
         """One delegation just succeeded. If all siblings in this
         decompose group are done, attach judge_post as the layer's
@@ -5189,6 +5191,21 @@ class ChatFlowEngine:
         Redo-clone delegations (M12.4d6 — a delegation spawned directly
         under a judge_post by a retry verdict) are handled by the
         re-aggregation path instead of normal decompose aggregation.
+
+        Prong 4 (2026-04-30, see docs/backlog-decompose-fact-loss.md):
+        when ALL members of the decompose group have reached terminal
+        status AND any FAILED member's sub-WorkFlow surfaced
+        ``missing_input_escalation`` in its judge_post, treat the
+        whole group as a missing-input signal at this layer and
+        spawn a fresh planner under the owning planner_judge BEFORE
+        falling through to the normal aggregator. The fresh planner
+        gets handoff_notes describing what each failed sub reported
+        missing, and is expected to write a new plan whose subtask
+        descriptions inline the missing material verbatim. ``resolved_model``
+        is required for the re-spawn — defaults to ``None`` for legacy
+        callers / tests that don't trigger the re-plan branch (it
+        only fires when a FAILED sub had missing_input_escalation,
+        which legacy paths can't reproduce).
         """
         self._inject_upstream_outputs_into_ready_children(
             workflow, delegation_node
@@ -5223,6 +5240,49 @@ class ChatFlowEngine:
         # Guard against duplicate spawning when multiple delegations
         # finish in rapid succession.
         if _decompose_group_already_aggregated(workflow, owner.id):
+            return
+
+        # Prong 4 (2026-04-30): missing_input cascade. Inspect each
+        # FAILED member's sub-WorkFlow for a judge_post that bubbled
+        # ``missing_input_escalation``; if any did, the failure was
+        # specifically because the planner brief paraphrased away
+        # context the sub-worker needed. Re-plan at this layer
+        # instead of letting the aggregator judge_post emit fail —
+        # the planner can write a better brief now that we know what
+        # was missing.
+        cascade_gaps = _collect_missing_input_from_failed_members(members)
+        if (
+            cascade_gaps
+            and _round_index_for(workflow, owner) < workflow.debate_round_budget
+        ):
+            log.info(
+                "delegation missing_input cascade: workflow=%s owner=%s — "
+                "%d failed sub(s) reported %d unique gap(s); re-planning",
+                workflow.id,
+                owner.id,
+                sum(1 for m in members if m.status == NodeStatus.FAILED),
+                len(cascade_gaps),
+            )
+            handoff = (
+                "One or more sub-WorkFlow delegations from your prior "
+                "plan halted because their workers couldn't access "
+                "context the brief paraphrased away. Reported gap(s):\n"
+                + "\n".join(f"- {g}" for g in cascade_gaps)
+                + "\n\nRe-plan this layer with the missing material "
+                "inlined VERBATIM into the new subtask description(s). "
+                "Pointer-style references (\"based on the X above\") "
+                "are forbidden — sub-WorkFlows cannot see this turn's "
+                "ChatFlow conversation; the description is their only "
+                "context. Either (a) decompose again with verbatim "
+                "data inlined per subtask, or (b) switch to atomic "
+                "if the task no longer benefits from parallel split."
+            )
+            self._spawn_planner(
+                workflow,
+                owner,
+                resolved_model=resolved_model,
+                handoff_notes=handoff,
+            )
             return
 
         upstream_summary = _format_decompose_aggregation(workflow, members)
@@ -6805,6 +6865,52 @@ def _decompose_group_already_aggregated(
         ):
             return True
     return False
+
+
+def _collect_missing_input_from_failed_members(
+    members: list[WorkFlowNode],
+) -> list[str]:
+    """Prong 4 helper: scan FAILED ``DELEGATE`` members for
+    sub-WorkFlow judge_post verdicts that bubbled
+    ``missing_input_escalation``. Returns the de-duplicated, ordered
+    list of all gap descriptions across every failed sub.
+
+    A sub-WorkFlow's judge_post sits as ``step_kind=JUDGE_CALL,
+    judge_variant=POST`` inside the sub. We pick the most recent one
+    (largest ``finished_at`` timestamp) per sub since later
+    aggregator passes can supersede earlier verdicts. Returns an
+    empty list when no failed sub had a missing-input signal —
+    callers fall through to the normal aggregator path.
+    """
+    gaps: list[str] = []
+    seen: set[str] = set()
+    for m in members:
+        if m.status != NodeStatus.FAILED or m.sub_workflow is None:
+            continue
+        post_judges = [
+            n
+            for n in m.sub_workflow.nodes.values()
+            if n.step_kind == StepKind.JUDGE_CALL
+            and n.judge_variant == JudgeVariant.POST
+            and n.judge_verdict is not None
+        ]
+        if not post_judges:
+            continue
+        # Latest by finished_at, falling back to insertion order if
+        # finished_at is None (engine sets it on success/failure).
+        latest = max(
+            post_judges,
+            key=lambda n: (n.finished_at is not None, n.finished_at),
+        )
+        verdict = latest.judge_verdict
+        if verdict is None:
+            continue
+        for desc in verdict.missing_input_escalation or []:
+            cleaned = desc.strip()
+            if cleaned and cleaned not in seen:
+                seen.add(cleaned)
+                gaps.append(cleaned)
+    return gaps
 
 
 def _redo_group_judge_post(
