@@ -175,6 +175,19 @@ plan:
                   不是工具）。判断不准就直接选 "draft"，让 worker
                   在自然语言层面完成——不要把一个不存在的工具名写
                   进计划里。
+                * **`tool_args` 必须严格按工具的 `Parameters`
+                  JSON schema 来填**——目录里每个工具下方都列出
+                  了 `Parameters` 字段（JSON schema 形式），里面
+                  写明了 properties / required 字段。请逐字使用
+                  schema 里的字段名，不要凭直觉脑补
+                  （比如 ``Write`` 的 schema 要求 ``file_path``，
+                  不是 ``path``；``Glob`` 要求 ``pattern``；
+                  ``Read`` 要求 ``file_path``）。**所有 `required`
+                  字段都必须出现在 `tool_args` 里**；缺字段或字段
+                  名拼错都会让工具运行时报错。如果你拿不准某个
+                  工具的字段名，宁可改用 `step_kind: "draft"`
+                  让 worker 通过 ToolDefinition 看到完整 schema
+                  后再调用。
             - **压缩上下文优先取全文。** 若 `inputs` 里出现了来自
               压缩摘要的节点 id 引用（例如 ``(节点: <id>)`` 标记、
               或 judge_pre 明确写出的"可用 get_node_context 读取

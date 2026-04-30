@@ -203,6 +203,20 @@ plan:
                   pick "draft" and let the worker handle it in natural
                   language — never write a non-existent tool name into
                   the plan.
+                * **`tool_args` MUST conform to the tool's
+                  ``Parameters`` JSON schema** — every tool entry in
+                  the catalog below carries a ``Parameters`` line
+                  (compact JSON schema with ``properties`` / ``required``).
+                  Use the exact field names from the schema; do not
+                  guess from intuition. (Common pitfall: ``Write``
+                  requires ``file_path``, NOT ``path``; ``Glob``
+                  requires ``pattern``; ``Read`` requires ``file_path``.)
+                  Every key listed in ``required`` MUST appear in
+                  your ``tool_args``; a missing or mistyped key
+                  surfaces as a runtime ToolError. If unsure about a
+                  field name, prefer ``step_kind: "draft"`` and let
+                  the worker invoke the tool with the full
+                  ``ToolDefinition`` schema visible.
             - **Fetch full content before answering compacted
               questions.** When `inputs` references node ids from a
               compact summary (e.g. ``(节点: <id>)`` / ``(nodes:

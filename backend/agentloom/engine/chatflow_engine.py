@@ -3888,9 +3888,11 @@ class ChatFlowEngine:
 
             - Name: `Read`
               Description: Read a file from the local filesystem.
+              Parameters: {"type":"object","properties":{...},"required":[...]}
 
             - Name: `Bash`
               Description: Execute a shell command.
+              Parameters: {...}
 
             ...
 
@@ -3898,6 +3900,24 @@ class ChatFlowEngine:
         ``chatflow.disabled_tool_names`` (workspace toggle off → not
         a candidate for inheritable_tools). Tools are sorted by name
         for stable cache prefix across calls in the same chatflow.
+
+        ``Parameters`` is the tool's JSON schema (compact, single line)
+        so the planner can author a correct ``atomic.tool_args`` on
+        the first try. Pre-2026-04-29 the catalog only carried
+        ``Name`` + ``Description``; doubao-served planners hallucinated
+        argument keys from intuition (e.g. wrote ``"path"`` for the
+        ``Write`` tool whose actual schema requires ``"file_path"``),
+        the call hit ``ToolError`` on the runtime field check, and
+        the user-facing ``judge_post`` reply surfaced "调用写入工具
+        出错" instead of the planted answer. With parameters now
+        visible the planner sees the exact required field names + types
+        + which are required vs optional. Token cost: each tool entry
+        gains ~200-500 tokens of schema; for cognitive calls
+        (planner / judge) that's an acceptable trade for first-try
+        correctness on atomic step_kind=tool_call. Workers don't see
+        this catalog — they get the full ``ToolDefinition`` injected
+        into the provider's ``tools=`` slot, which already covers
+        parameter shape via the structured tool-use protocol.
 
         Returns the empty string when the registry is missing or
         every tool is disabled. The engine treats empty as "skip the
@@ -3922,7 +3942,18 @@ class ChatFlowEngine:
                 continue
             description = (tool.description or "").strip().splitlines()
             first_line = description[0].strip() if description else ""
-            rows.append(f"- Name: `{tool.name}`\n  Description: {first_line}")
+            params = getattr(tool, "parameters", None) or {}
+            try:
+                params_line = json.dumps(
+                    params, ensure_ascii=False, separators=(",", ":")
+                )
+            except (TypeError, ValueError):
+                params_line = "{}"
+            rows.append(
+                f"- Name: `{tool.name}`\n"
+                f"  Description: {first_line}\n"
+                f"  Parameters: {params_line}"
+            )
         if not rows:
             return ""
         lang = (self._current_fixture_language or "").lower()
