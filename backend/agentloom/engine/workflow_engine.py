@@ -1566,6 +1566,16 @@ class WorkflowEngine:
                 node.capability_request.extend(
                     name for name in requests if name not in existing
                 )
+            # Prong 2 (2026-04-30) symmetric extraction for missing
+            # context. Same scope: workers only — judges + planners
+            # consume the marker, they don't emit it. Same de-dup
+            # semantics as capability_request.
+            missing = _extract_missing_input(node.output_message.content)
+            if missing:
+                existing_missing = set(node.missing_input)
+                node.missing_input.extend(
+                    desc for desc in missing if desc not in existing_missing
+                )
 
         # ------------------------------------------------------------- tool loop
         # If the model requested tool calls AND we have a registry
@@ -2765,6 +2775,70 @@ _CAPABILITY_REQUEST_JSON_RE = re.compile(
 #: drop into the same delimiter set. Empty tokens are filtered by
 #: ``_emit``.
 _CAPABILITY_REQUEST_TAG_SPLIT_RE = re.compile(r"[,\n]+")
+
+
+#: Prong 2 (2026-04-30) — symmetric markers for worker-emitted
+#: ``<missing_input>...</missing_input>``. Same dual-shape support as
+#: ``capability_request`` so prompt-tuning across model families is
+#: consistent: XML tag for instruction-tuned chat models, embedded JSON
+#: segment for json-output mode workers.
+#:
+#: Body semantics differ from capability_request: the body is **prose**
+#: (one short sentence per line / per comma-separated token describing
+#: what the worker realized was missing), not a list of registry tool
+#: names. We split on newlines OR semicolons but NOT commas — commas
+#: appear naturally inside prose ("the user's email, phone, and
+#: address") and splitting on them would shred a single missing-input
+#: description into nonsense fragments. JSON form still uses comma
+#: separators per JSON spec.
+_MISSING_INPUT_TAG_RE = re.compile(
+    r"<missing_input>\s*(?P<body>.*?)\s*</missing_input>",
+    re.DOTALL | re.IGNORECASE,
+)
+_MISSING_INPUT_JSON_RE = re.compile(
+    r'"missing_input"\s*:\s*\[(?P<body>[^\]]*)\]',
+    re.DOTALL,
+)
+_MISSING_INPUT_TAG_SPLIT_RE = re.compile(r"[\n;]+")
+
+
+def _extract_missing_input(text: str) -> list[str]:
+    """Pull missing-input descriptions out of a worker draft's content.
+
+    Symmetric to :func:`_extract_capability_request` but for missing
+    information rather than missing tools. Returns the ordered,
+    de-duplicated list of descriptions across every recognized
+    marker form (tag and JSON segment). Empty list on no match.
+
+    Token cleanup: surrounding quotes / backticks are stripped per
+    token; whitespace-only tokens drop out. Tag bodies split on
+    newlines / semicolons (NOT commas — see module docstring) so a
+    worker enumerating one-per-line gets each line preserved as its
+    own description.
+    """
+    if not text:
+        return []
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _emit(token: str) -> None:
+        cleaned = token.strip()
+        for _ in range(4):
+            stripped = cleaned.strip().strip('"').strip("'").strip("`").strip()
+            if stripped == cleaned:
+                break
+            cleaned = stripped
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            found.append(cleaned)
+
+    for m in _MISSING_INPUT_TAG_RE.finditer(text):
+        for token in _MISSING_INPUT_TAG_SPLIT_RE.split(m.group("body")):
+            _emit(token)
+    for m in _MISSING_INPUT_JSON_RE.finditer(text):
+        for token in m.group("body").split(","):
+            _emit(token)
+    return found
 
 
 def _extract_capability_request(text: str) -> list[str]:

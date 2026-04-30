@@ -427,6 +427,20 @@ class JudgeVerdict(BaseModel):
     #: + parser; consumers (re-plan / planner reset) land in a
     #: follow-up PR.
     capability_escalation: list[str] = Field(default_factory=list)
+    #: Prong 2 (2026-04-30) — symmetric to ``capability_escalation``
+    #: but for missing **information** rather than missing tools.
+    #: Worker emits ``<missing_input>concise description of what was
+    #: needed</missing_input>`` (or an embedded
+    #: ``{"missing_input": ["..."]}`` JSON segment) when it realizes
+    #: it lacked a piece of context the planner-authored brief
+    #: didn't include. Judge_during / judge_post scans for the
+    #: marker and bubbles entries into this list. The engine's
+    #: missing-input feedback path (prong 3) reads this and spawns
+    #: a fresh planner with handoff_notes describing what the
+    #: subtask reported missing — instead of going straight to
+    #: retry / fail / aggregate. Empty by default. See
+    #: ``docs/backlog-decompose-fact-loss.md`` for the full design.
+    missing_input_escalation: list[str] = Field(default_factory=list)
 
     # --- judge_post ---
     post_verdict: Literal["accept", "retry", "fail"] | None = None

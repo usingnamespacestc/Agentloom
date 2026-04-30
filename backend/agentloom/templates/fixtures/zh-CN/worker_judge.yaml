@@ -36,6 +36,17 @@ params_schema:
       空串。判官读它来填 ``capability_escalation``，触发引擎扩展
       ``WorkFlow.inheritable_tools`` 并重 spawn planner，让 worker 下
       一轮拿到这些工具。
+  worker_missing_input:
+    type: string
+    required: false
+    description: >
+      worker 草稿里通过 ``<missing_input>...</missing_input>`` 标记
+      发出的"我缺信息"信号的预渲染字符串——指 planner brief 把上层
+      原本提供的字面材料 paraphrase 掉了，worker 自己补不回来的那
+      部分。worker 没报缺时为空串。判官读它来填
+      ``missing_input_escalation``，触发引擎重 spawn planner（带着
+      "上一轮 subtask 反馈缺少 X" 的 handoff_notes），下一轮 brief
+      把缺的材料 inline 进去。
 plan:
   description:
     text: "worker_judge —— 评审 worker 草稿"
@@ -92,11 +103,35 @@ plan:
             如果列表为空，``capability_escalation`` 留 ``[]``，按
             正常方式判草稿质量。
 
+            **缺信息升级（missing_input escalation，prong 2）**：
+            worker 还可能发出
+            ``<missing_input>...</missing_input>`` 标记，表示 planner
+            写的 brief 把它需要的字面材料（具体表结构、代码块、URL、
+            精确数值等）paraphrase 掉了。已被预先抽取到下面字段：
+
+                worker_missing_input: {{ worker_missing_input }}
+
+            如果该列表非空：
+            - 设 ``during_verdict: "revise"``。
+            - 把缺失项描述原样填进 ``missing_input_escalation``。引
+              擎读这个字段去重 spawn 一个 planner，handoff_notes
+              里写明 worker 反馈缺少什么，让下一轮 brief 把材料
+              inline 进去。
+            - 在 ``critiques`` 里加一条 severity ``concern`` 的条目，
+              简述缺口（如 "worker 反馈 planner brief 没把索引设计
+              所需的表结构 inline 进来"）。
+            - **不要把 worker 判为"做错了"**——worker 是把 planner
+              端的 brief 缺口正确地暴露出来；修复在 planner 这一层，
+              不在 worker 的产出上。
+
+            如果列表为空，``missing_input_escalation`` 留 ``[]``。
+
             返回 JSON：
               {"during_verdict": "continue"|"revise"|"halt",
                "critiques": [{"issue": str, "severity": "blocker"|"concern"|"nit",
                               "evidence": str}, ...],
-               "capability_escalation": [str, ...]}
+               "capability_escalation": [str, ...],
+               "missing_input_escalation": [str, ...]}
             不要输出其他散文。
         - role: user
           content: |

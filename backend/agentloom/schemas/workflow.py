@@ -155,6 +155,19 @@ class WorkFlowNode(NodeBase):
     #: bubbles them to a re-plan request via ``JudgeVerdict.
     #: capability_escalation``. PR 5 implements the read+propagate path.
     capability_request: list[str] = Field(default_factory=list)
+    #: Prong 2 (2026-04-30) signal slot symmetric to
+    #: ``capability_request``: when a worker discovers that the
+    #: planner-authored brief paraphrased away some piece of context
+    #: it needs (e.g. specific table schema, code block, URL, exact
+    #: number), it emits ``<missing_input>concise description</missing_input>``
+    #: in its draft. The engine extracts the markers into this list
+    #: at LLM-call completion time. ``_spawn_worker_judge`` /
+    #: ``_spawn_judge_post`` render it into the judge fixture so the
+    #: judge can bubble the entries to ``JudgeVerdict.missing_input_escalation``,
+    #: which the missing-input feedback path (prong 3) reads to
+    #: spawn a fresh planner with handoff_notes describing what was
+    #: missing — instead of going straight to retry / fail.
+    missing_input: list[str] = Field(default_factory=list)
     #: Pin for the model this specific WorkNode's LLM call uses. Set by
     #: the engine at spawn time (from the enclosing ChatNode's
     #: ``resolved_model``) and propagated across retries/tool-call

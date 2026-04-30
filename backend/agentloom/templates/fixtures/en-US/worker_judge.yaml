@@ -38,6 +38,17 @@ params_schema:
       uses this to populate ``capability_escalation`` and trigger an
       escalation flow (engine widens ``WorkFlow.inheritable_tools``
       and re-runs the planner).
+  worker_missing_input:
+    type: string
+    required: false
+    description: >
+      Pre-rendered list of short descriptions the worker emitted via
+      ``<missing_input>...</missing_input>`` markers in its draft —
+      pieces of context the planner-authored brief paraphrased away.
+      Empty string when the worker reported no gaps. The judge uses
+      this to populate ``missing_input_escalation`` and trigger a
+      re-plan loop (engine spawns a fresh planner with handoff_notes
+      describing what was missing, instead of going to retry / fail).
 plan:
   description:
     text: "worker_judge — review the worker's draft"
@@ -101,11 +112,38 @@ plan:
             If the list is empty, leave ``capability_escalation`` as
             ``[]`` and judge the draft on its own merits as usual.
 
+            **Missing-input escalation (prong 2)**:
+            The worker may have also emitted
+            ``<missing_input>...</missing_input>`` markers indicating
+            the planner-authored brief paraphrased away context the
+            worker needed (e.g. specific table schema, code block,
+            URL, exact number). Pre-extracted into:
+
+                worker_missing_input: {{ worker_missing_input }}
+
+            If that list is non-empty:
+            - Set ``during_verdict: "revise"``.
+            - Copy the descriptions verbatim into
+              ``missing_input_escalation``. The engine reads this and
+              spawns a fresh planner with handoff_notes describing
+              what the worker reported missing, so the next plan can
+              inline the data into the brief.
+            - In ``critiques``, add one entry of severity ``concern``
+              summarizing the gap (e.g. "worker reports planner brief
+              omitted the table schemas needed for index design").
+            - DO NOT mark the worker as "wrong" — the worker
+              correctly surfaced a planner-side gap; the fix is at
+              the planner level, not in the worker's output.
+
+            If the list is empty, leave ``missing_input_escalation``
+            as ``[]``.
+
             Return JSON:
               {"during_verdict": "continue"|"revise"|"halt",
                "critiques": [{"issue": str, "severity": "blocker"|"concern"|"nit",
                               "evidence": str}, ...],
-               "capability_escalation": [str, ...]}
+               "capability_escalation": [str, ...],
+               "missing_input_escalation": [str, ...]}
             No other prose.
         - role: user
           content: |

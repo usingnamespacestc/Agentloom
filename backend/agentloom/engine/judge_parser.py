@@ -60,6 +60,7 @@ _LIST_FIELDS = (
     "issues",
     "redo_targets",
     "capability_escalation",
+    "missing_input_escalation",
     "recon_plan",
 )
 
@@ -254,6 +255,19 @@ _VARIANT_SCHEMAS: dict[JudgeVariant, dict[str, Any]] = {
                     "halting the WorkFlow."
                 ),
             },
+            "missing_input_escalation": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Prong 2 (decompose fact-loss family): short "
+                    "descriptions the worker emitted via "
+                    "<missing_input>...</missing_input> markers when it "
+                    "realized a piece of context the planner-authored "
+                    "brief didn't include. Surfaces the gap so the "
+                    "engine can spawn a fresh planner with handoff_notes "
+                    "instead of going to retry/fail."
+                ),
+            },
         },
         "required": ["during_verdict"],
     },
@@ -298,6 +312,17 @@ _VARIANT_SCHEMAS: dict[JudgeVariant, dict[str, Any]] = {
                     "surfacing to the orchestrator. Same field as the "
                     "DURING variant — populated by whichever judge "
                     "first sees the worker marker."
+                ),
+            },
+            "missing_input_escalation": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Prong 2 (decompose fact-loss family): worker-"
+                    "emitted <missing_input> markers describing context "
+                    "gaps the planner brief didn't fill. judge_post "
+                    "surfaces them so the engine can spawn a fresh "
+                    "planner with handoff_notes instead of fail."
                 ),
             },
             "recon_plan": {

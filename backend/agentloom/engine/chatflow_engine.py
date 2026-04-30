@@ -4351,6 +4351,12 @@ class ChatFlowEngine:
         # ``["X", "Y"]``-style JSON for unambiguous copying.
         cap_req = worker_node.capability_request or []
         cap_req_str = json.dumps(cap_req, ensure_ascii=False)
+        # Prong 2 (2026-04-30): same pattern for missing_input.
+        # worker_node.missing_input was populated by the engine after
+        # the worker's draft completed (see workflow_engine.py
+        # _extract_missing_input).
+        missing_inputs = worker_node.missing_input or []
+        missing_inputs_str = json.dumps(missing_inputs, ensure_ascii=False)
         templated = instantiate_fixture(
             self._fixture_plans["worker_judge"],
             {
@@ -4371,6 +4377,7 @@ class ChatFlowEngine:
                 "round": str(round_index),
                 "round_budget": str(inner.debate_round_budget),
                 "worker_capability_request": cap_req_str,
+                "worker_missing_input": missing_inputs_str,
             },
             includes=self._fixture_includes,
         )
@@ -5048,6 +5055,58 @@ class ChatFlowEngine:
                 "to include those names. Re-plan with the widened set in "
                 "mind — the new worker should use the requested tools to "
                 "complete what the prior worker couldn't."
+            )
+            critique_text = _render_critiques(verdict)
+            self._spawn_planner(
+                workflow,
+                worker_judge_node,
+                resolved_model=resolved_model,
+                prior_plan=(
+                    worker_node.output_message.content
+                    if worker_node.output_message
+                    else ""
+                ),
+                critique=critique_text,
+                handoff_notes=handoff,
+            )
+            return
+
+        # Prong 3 (2026-04-30) missing_input feedback loop. Symmetric
+        # to capability_escalation above: when worker_judge bubbles
+        # ``missing_input_escalation`` (because the worker emitted
+        # ``<missing_input>`` markers indicating planner brief
+        # paraphrased away context), don't retry under the same plan
+        # — the worker is correctly stuck without the data. Spawn a
+        # fresh planner with handoff_notes describing what was
+        # missing so the new brief inlines the data verbatim. Shares
+        # ``debate_round_budget`` (no separate budget surface; the
+        # existing fuse caps re-plan rounds).
+        # See ``docs/backlog-decompose-fact-loss.md`` prong 3.
+        if (
+            verdict is not None
+            and verdict.missing_input_escalation
+            and worker_node is not None
+            and _round_index_for(workflow, worker_node) < workflow.debate_round_budget
+        ):
+            missing = list(verdict.missing_input_escalation)
+            log.info(
+                "missing_input_escalation: workflow=%s worker=%s — "
+                "%d gap(s) reported by worker, re-planning. gaps=%r",
+                workflow.id,
+                worker_node.id,
+                len(missing),
+                missing,
+            )
+            handoff = (
+                f"Prior worker (id={worker_node.id}) emitted "
+                f"missing_input signal(s): {'; '.join(missing)}. The "
+                "previous subtask description paraphrased away material "
+                "the worker needed. Re-plan with the missing material "
+                "inlined VERBATIM into the new subtask description — "
+                "do NOT use pointer-style references (\"based on the X "
+                "above\"). The sub-WorkFlow cannot see this turn's "
+                "ChatFlow conversation; the description is its only "
+                "context."
             )
             critique_text = _render_critiques(verdict)
             self._spawn_planner(
