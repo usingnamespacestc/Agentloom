@@ -177,17 +177,73 @@ plan:
               extract a clean task from the conversation. Emit
               `mode: "infeasible"` with a `reason` explaining that
               the task is too vague to plan, so the user is re-asked.
-            - A child only sees the `description` you write — not
-              your reasoning and not sibling output. So when a child
-              must operate on raw material literally (text to edit,
-              a code block to review, an exact quote to cite), embed
-              that material **directly in the description** (verbatim
-              copy). Don't just say "please process the code the user
-              just provided" — the sub-WorkFlow has no user transcript
-              to read. If a downstream child later reports missing
-              information, the exit judge will surface that back to
-              the user — you don't need to front-load everything
-              "just in case".
+            - **Downstream-isolation hard rule** — violating this
+              wrecks the whole turn:
+              **When mode is decompose**, every subtask's sub-WorkFlow
+              **CANNOT see** this turn's ChatFlow conversation — it
+              cannot see the user's words, cannot see the trio's
+              `inputs`, cannot see sibling subtasks' output. **It sees
+              only the literal text you write into its `description`**.
+              So **anything a subtask needs to reference verbatim**
+              (text to edit, code blocks, table schemas / SQL DDL,
+              API responses, requirement lists, specific values or
+              field names …) MUST be **copied byte-for-byte into that
+              subtask's description**. Paraphrasing or pointer-language
+              ("based on the X above") loses the data at the brief
+              boundary and the sub-worker will fail with "missing
+              info".
+
+              ✗ **Wrong** (subtask cannot see the SQL, will fail):
+                ```
+                {"description": "Based on the three PostgreSQL tables
+                 provided above, design indexes."}
+                ```
+                ↑ The sub-worker doesn't know what "provided above"
+                means.
+
+              ✗ **Wrong** (subtask cannot see the code, will fail):
+                ```
+                {"description": "Review the React component code the
+                 user pasted earlier and find potential bugs."}
+                ```
+
+              ✓ **Right** (code verbatim in description):
+                ```
+                {"description": "Review the following React component
+                 for potential bugs:
+
+                 ```tsx
+                 export function Foo({ items }) { ... }
+                 ```
+
+                 Criteria: ..."}
+                ```
+
+              ✓ **Right** (SQL verbatim in description):
+                ```
+                {"description": "Design indexes for the following 3
+                 PostgreSQL tables:
+
+                 CREATE TABLE accounts ( id BIGSERIAL PK, ... );
+                 CREATE TABLE transactions ( ... );
+                 CREATE TABLE budgets ( ... );
+
+                 Typical queries: ...
+                 Output format: per index — name / columns / type /
+                 query scenario"}
+                ```
+
+              For atomic mode the worker DOES see the WorkFlow's
+              trio (including `inputs`), so atomic doesn't need data
+              re-copied into description — atomic.description states
+              the task; raw material lives in inputs and the worker
+              reads it directly. **The verbatim rule applies strictly
+              to decompose subtasks only.**
+
+              Self-check after writing each subtask description:
+              "If someone with zero knowledge of the prior conversation
+              read only this description, could they finish the
+              subtask?" If no, more material needs to be inlined.
             - For atomic worker briefs, choose `step_kind`:
                 * "draft": natural language / reasoning task.
                 * "tool_call": single tool invocation. Provide

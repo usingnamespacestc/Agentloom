@@ -154,14 +154,62 @@ plan:
               中抽出干净的任务。请输出 `mode: "infeasible"` 并在
               `reason` 中说明任务过于模糊无法规划，以便系统重新
               询问用户。
-            - 子节点只能看到你写给它的 `description`，看不到你的推理，
-              也看不到兄弟节点的输出。所以当子节点必须字面操作原材料
-              时（待编辑的文本、待审阅的代码块、必须引用的原话），
-              请把这些材料**直接写进 description 里**（逐字复制），
-              不要只说"请处理用户刚才给的那段代码"——子 WorkFlow 没有
-              用户的原话可读。若下游子任务之后反馈信息缺失，出口
-              judge 会把信息缺口反馈给用户——你不必"以防万一"地全量
-              前置。
+            - **下游隔离硬性规则**——这条非常重要，违反会导致整轮失败：
+              **当 mode 是 decompose 时**，每个 subtask 的 sub-WorkFlow
+              **完全看不到**当前这一轮 ChatFlow 对话——它看不到用户原话、
+              看不到 trio 的 `inputs`、也看不到兄弟 subtask 的输出。
+              **它能看到的全部就是你写在它的 `description` 里的字面内容**。
+              所以**任何 subtask 需要字面引用的原材料**（待编辑的文本、
+              待审阅的代码块、表结构 / SQL DDL、API 响应、用户贴的需求
+              清单、引用的具体数值或字段名……）都必须**逐字 copy 进
+              对应 subtask 的 description**，不能只用概述指代。
+
+              ✗ **错误**（subtask 拿不到 SQL，会失败）：
+                ```
+                {"description": "基于上面提供的三张 PostgreSQL 表结构，
+                 输出索引设计方案"}
+                ```
+                ↑ 子 worker 看不到"上面提供的"是什么。
+
+              ✗ **错误**（subtask 拿不到代码，会失败）：
+                ```
+                {"description": "请审阅用户刚才贴的那段 React 组件代码，
+                 找出潜在 bug"}
+                ```
+
+              ✓ **正确**（数据 verbatim 进 description）：
+                ```
+                {"description": "审阅以下 React 组件代码，找出潜在 bug：
+
+                 ```tsx
+                 export function Foo({ items }) { ... }
+                 ```
+
+                 评判标准：……"}
+                ```
+
+              ✓ **正确**（SQL verbatim 进 description）：
+                ```
+                {"description": "为以下 3 张 PostgreSQL 表设计索引：
+
+                 CREATE TABLE accounts ( id BIGSERIAL PK, ... );
+                 CREATE TABLE transactions ( ... );
+                 CREATE TABLE budgets ( ... );
+
+                 典型查询场景：……
+                 输出格式：每个索引给出索引名 / 字段 / 类型 / 适用场景"}
+                ```
+
+              对 atomic 模式：worker 能看到当前 WorkFlow 层的 trio
+              （含 inputs），所以 atomic 不需要把所有数据再 verbatim
+              进 description——atomic.description 写任务就好，原材料留
+              在 inputs 里 worker 能直接拿到。**这条 verbatim 规则只
+              对 decompose 严格适用**。
+
+              判断用：planner 写完 description 后请自检——
+              "如果一个完全不知道之前对话内容的人，只看这条
+              description 能不能直接做完？" 答案是"不能"就还有材料
+              没 inline。
             - atomic worker 的说明中需要选择 `step_kind`：
                 * "draft"：自然语言 / 推理任务。
                 * "tool_call"：单次工具调用。需提供 `tool_name` 和

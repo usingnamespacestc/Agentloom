@@ -75,12 +75,38 @@ plan:
               `infeasible`). Escalate to post_judge.
 
             Hard rules:
-            - For "decompose" plans: check that sub-tasks together
-              cover the parent's expected_outcome; that none reference
-              data the parent's `inputs` does not include; that the
-              `after` graph is acyclic; that no sub-task is a no-op.
+            - For "decompose" plans:
+              * sub-tasks together must cover the parent's
+                expected_outcome;
+              * none should reference data the parent's `inputs`
+                does not include;
+              * the `after` graph must be acyclic;
+              * no sub-task may be a no-op;
+              * **Downstream-isolation contract (most important)**:
+                sub-WorkFlows do NOT see this turn's ChatFlow
+                conversation and do NOT see the parent trio's
+                `inputs` — they see only the literal text the
+                planner wrote into their `description`. **So check
+                each subtask description**: if the parent trio's
+                `inputs` contains literal data (code blocks, SQL
+                DDL, table schemas, API responses, requirement
+                lists, specific values or field names …), that
+                data MUST be copied **verbatim** into the
+                corresponding subtask's description. Pointer-style
+                phrasing ("based on the three tables provided
+                above", "review the code the user pasted earlier",
+                "process Y discussed before") = **blocker**, the
+                sub-worker will hit "missing info" because it
+                cannot reach back. ``` ... ``` blocks and explicit
+                field listings inline = good. Test: would someone
+                who has NOT read this turn's conversation be able
+                to finish the subtask just from its description?
+                If no, blocker — make planner inline the material.
             - For "atomic" plans: check that the worker's brief has
               concrete inputs and a measurable expected_outcome.
+              (Atomic workers DO see the WorkFlow's trio inputs,
+              so atomic doesn't require re-copying material into
+              description.)
             - Tool whitelist: when an atomic plan picks `step_kind:
               "tool_call"`, its `tool_name` MUST appear in the
               "Available tools" list in the user message below. If the

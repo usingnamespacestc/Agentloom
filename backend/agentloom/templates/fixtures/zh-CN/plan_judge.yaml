@@ -70,11 +70,31 @@ plan:
               直接输出了 `infeasible`）。升交到 post_judge。
 
             硬性规则：
-            - 对于 "decompose" plan：检查子任务合起来是否覆盖父的
-              expected_outcome；子任务是否引用了父 `inputs` 里不存在
-              的数据；`after` 图是否无环；是否存在 no-op 子任务。
+            - 对于 "decompose" plan：
+              * 检查子任务合起来是否覆盖父的 expected_outcome；
+              * 子任务是否引用了父 `inputs` 里不存在的数据；
+              * `after` 图是否无环；
+              * 是否存在 no-op 子任务；
+              * **下游隔离合约（最重要）**：sub-WorkFlow 看不到本轮
+                ChatFlow 对话，也看不到父层 trio 的 `inputs`——它能
+                看到的全部就是 planner 写在它的 `description` 里的字
+                面内容。**所以核对每个 subtask description**：父 trio
+                的 `inputs` 里如果包含字面数据（代码块、SQL DDL、表
+                结构、API 响应、用户贴的需求清单、具体数值或字段名等
+                等），**这些数据必须 verbatim copy 到对应 subtask 的
+                description 里**。
+                ✗ "基于上面提供的三张表..."、"审阅用户刚才贴的代码"、
+                  "处理之前讨论过的 Y" 这些指代式措辞 = **blocker**，
+                  sub-worker 拿到只会喊"缺少信息"。
+                ✓ description 里直接出现 ```sql ... ``` / ```tsx ... ```
+                  / 字面字段表，sub-worker 才能真正完成任务。
+                判断方法：把 subtask description 假装拿给一个**没读过
+                这一轮对话的人**——他能不能凭这一段就做完？不能就是
+                blocker 必须 revise，要求 planner 把材料 inline。
             - 对于 "atomic" plan：检查 worker brief 是否具备具体的
-              inputs 和可度量的 expected_outcome。
+              inputs 和可度量的 expected_outcome。（atomic worker 能
+              看到 WorkFlow 层 trio 的 inputs，所以不强制要求把材料
+              重复进 description。）
             - 工具白名单：若 atomic plan 选的是 `step_kind:
               "tool_call"`，其 `tool_name` 必须严格落在下方 user
               消息列出的 "Available tools" 之内。若 Available tools
