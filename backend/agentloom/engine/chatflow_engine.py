@@ -4005,6 +4005,38 @@ class ChatFlowEngine:
         node = _single_node(templated)
         node.parent_ids = [parent_node.id]
         node.model_override = resolved_model
+        # Prong 6 (2026-04-30, see docs/backlog-decompose-fact-loss.md):
+        # if the WorkFlow carries an outer_user_message (set by
+        # ``_spawn_turn_node`` at the top of the chain and propagated
+        # through ``_build_sub_workflow_for_subtask``), prepend it to
+        # the planner's input_messages as a labeled context preamble.
+        # Reason: judge_pre's ``extracted_inputs`` is free-form text the
+        # judge LLM authored — it may have paraphrased instead of
+        # verbatim-copying the user's pasted data. The planner reading
+        # only the trio loses that data. By giving every planner call
+        # (including revise rounds) the outer user_message verbatim,
+        # the planner can fall back to the original even when judge_pre
+        # extracted a paraphrase. Same engine-mechanic family as prong 5
+        # (which protects the planner→sub-WorkFlow boundary); this one
+        # protects the judge_pre→planner boundary.
+        if inner.outer_user_message:
+            preamble = self._render_outer_user_message_preamble(
+                inner.outer_user_message
+            )
+            existing_inputs = list(node.input_messages or [])
+            # Append (not prepend) so the fixture's system → user
+            # ordering stays intact. The planner reads:
+            #   1. system: "you are a planner ..." (fixture)
+            #   2. user: "Here is the trio. Decide ..." (fixture)
+            #   3. user: "[Outer ChatFlow context] + verbatim user_message"
+            #      (this preamble — added by the engine)
+            # Two consecutive user messages are fine for all
+            # provider transports; the labeled preamble makes the
+            # role of this extra block unambiguous.
+            node.input_messages = [
+                *existing_inputs,
+                WireMessage(role="user", content=preamble),
+            ]
         return inner.add_node(node)
 
     def _spawn_planner_judge(
