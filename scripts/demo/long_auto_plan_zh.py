@@ -76,9 +76,18 @@ def _canvas_url(cf_id: str) -> str:
 
 # -------- Phase 1: plant facts + light reasoning chain (5 turns) --------
 PHASE1_TURNS = [
-    "我正在做一个个人理财 dashboard 项目。技术栈：前端用 React + TypeScript + "
-    "Tailwind，数据库用 PostgreSQL，部署到 Vercel。请把这些技术栈约束都"
-    "记下来——后面我会回来逐字问你。",
+    # NB: avoid wording like "请记下来" / "请保存" — 在 auto_plan 下会被
+    # planner 理解成"持久化到文件"，于是它会挑 Write 工具走 atomic
+    # step_kind=tool_call，结果 tool_args 里没 file_path → 调用失败 →
+    # turn 1 的 agent_response 变成"调用写入工具出错"。改用纯
+    # 上下文级措辞 + 显式说"不需要写入任何文件"。
+    "我正在做一个个人理财 dashboard 项目。请先确认你已经看到了我下面给出"
+    "的几条技术栈约束（不需要写入任何文件，只需要在对话上下文里收下，"
+    "稍后我会回来逐字问你具体用了什么）：\n"
+    "- 前端：React + TypeScript + Tailwind\n"
+    "- 数据库：PostgreSQL\n"
+    "- 部署：Vercel\n"
+    "请用一句话简短确认，并把这 3 条约束原样回读一遍即可。",
     "请先列出这个 dashboard 应该包含哪些核心功能模块，按重要性从高到低排序，"
     "每条用一句话说明。",
     "在你刚列出的功能模块里，挑出最重要的 3 个。**对这 3 个分别给出主要数据"
@@ -146,6 +155,21 @@ async def main() -> None:
                     # trigger doesn't fire mid-phase-1.
                     "compact_trigger_pct": 0.85,
                     "chatnode_compact_trigger_pct": None,
+                    # Block side-effect filesystem write tools
+                    # workflow-wide: this demo never wants the
+                    # planner to "persist" anything to disk in
+                    # response to a chat-level "记下来" prompt — and
+                    # if Write/Edit/Bash sit in the catalog, the
+                    # planner will eagerly atomic-tool_call them
+                    # with empty/wrong tool_args. Glob + Read +
+                    # get_node_context + memoryboard_lookup remain
+                    # available so phase 2's read-only tool calls
+                    # still demo cleanly.
+                    "disabled_tool_names": [
+                        "Write",
+                        "Edit",
+                        "Bash",
+                    ],
                 },
             )
             print(
