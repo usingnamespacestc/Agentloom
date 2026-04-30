@@ -230,3 +230,10 @@ frontend/tsconfig.tsbuildinfo
 backend/data/
 *.db
 *.sqlite
+
+# Agent-produced demo / analysis artifacts (not source — emitted by
+# agent runs that exercise the Write tool against the project root)
+/workspace/
+/Agentloom*分析报告.md
+/memoryboard_analysis_report.md
+/runs/

@@ -294,6 +294,40 @@ agent 答 `octarine` —— 一字不差，没废话，没 engine-speak。背后
 
 ---
 
+## 🩹 第七轮：连环跟修 + 长链 demo + 设计 backlog（commit `6d4c6b4..91830f8`）
+
+第六轮 ship 完后跑了一轮 doubao + 12 轮中文 smoke combo（[`scripts/smoke/combo_full_pipeline_zh.py`](scripts/smoke/combo_full_pipeline_zh.py)，2026-04-29）和一轮 13 轮 auto_plan 长 demo（[`scripts/demo/long_auto_plan_zh.py`](scripts/demo/long_auto_plan_zh.py)，面向 canvas 演示）。这一轮的发现以**新修引入下一个洞**和**判官 / planner 共有的认知盲点**为主——七连修 + 一份多 prong 设计 backlog 落到 `docs/backlog-decompose-fact-loss.md`。
+
+| Commit | 类别 | 修了什么 |
+|---|---|---|
+| `6d4c6b4` | 🟡 dev experience | **dev.sh Ctrl+C 不再卡死**：trap 重入 + uvicorn `--timeout-graceful-shutdown` 只管 HTTP 不管 background tasks 双重原因，让 N 次 ^C 叠 N 行 "shutting down..."。修：cleanup 一进就 `trap - INT TERM EXIT` 解掉自己，SIGTERM → 3s grace → SIGKILL 直接强杀。Linux WSL2 9p 挂死场景下也能杀干净 |
+| `130408a` | 🟢 lifespan audit | **lifespan 关闭时三处 untracked task 泄露**：(a) `_provider_call_from_settings` 每次 LLM call 漏一个 `httpx.AsyncClient` 池——一个 turn 几十次 LLM call 就堆几十个；(b) SQLAlchemy AsyncEngine 不 dispose，asyncpg `Connection._cancel` 永远挂 event loop；(c) `_active_judge_tasks` 不 drain。lifespan finally 加 drain + dispose，dev.sh 的 SIGKILL 兜底从此变保险 |
+| `2a346cc` | 🟢 docstring honesty | **`RecursivePlannerOutput.reasoning` 字段消费盲区**：planner 提到要 think first，但 reasoning 字段被 parser 解析后**全程没 reader**，docstring 说"user-visible trace"是空话。修：log.info 出来给 ops 看 + docstring 改诚实"presence drives schema discipline; value is logged, not user-visible"。schema 消费 audit 这一发的产物 |
+| `4359bd7` | 🟡 capability context | **`_spawn_atomic_tool_call` 跑出来的 TOOL_CALL caller 上下文退化**：刚修的 atomic-tool_call 路径下 TOOL_CALL parent 是 planner_judge（cognitive 节点 effective_tools=read-only / None），`_resolve_caller_effective_tools` 返回 frozenset()。同 chatflow get_node_context 不爆但是埋雷——以后加新 caller-context-gated 工具会失效。修：spawn 时 `effective_tools=[atomic.tool_name]`，resolver 优先读 tool_call 自己的、None 时才回 parent |
+| `541b1dd` | 🟢 schema audit | **WorkFlowNode + ChatFlowNode 字段消费穷举 audit**：扫了 9 个 schema 类，找到 3 个声明了但 reader 不存在的 stub 字段（`keyframe_origin_trio` / `PendingTurn.source_metadata` / `InboundContextSegment.synthetic`）。docstring 改诚实——schema slot 留着给未来用，但停止过度承诺。`#473 audit` 完成 |
+| `d6d4941` | 🔴 P1 catalog gap | **planner 看不到 tool 的 Parameters schema**：cognitive catalog 只渲染 `Name + Description`，planner 写 `tool_args` 全靠脑补字段名——demo 里 doubao 写出 `Write` 工具的 args 是 `"path"`（实际 schema 要 `"file_path"`），ToolError 失败。worker 看 catalog 走 LLM 的 `tools=` slot 含完整 schema 不会犯；只有 cognitive 路径漏。修：catalog 多渲染一行 `Parameters: {compact JSON schema}`，plan.yaml 加 ✗/✓ 反例（`Write` 要 `file_path` 不是 `path`） |
+| `91830f8` | 🔴 P1 prompt | **plan + plan_judge prompt 教下游隔离合约**：decompose 路径下 sub-WorkFlow 看不到父 ChatFlow 对话 + trio.inputs，**只看到 planner 写在 description 里的字面文字**。但这条引擎事实从来没明确告诉过 planner 或 plan_judge——doubao demo 里 planner 写"基于上面提供的三张表"，sub-worker 拿不到 SQL，rejected with "missing info"。两个判官都没拦下因为 prompt 里没有这条机制知识。修：plan.yaml + plan_judge.yaml（zh + en）专章"下游隔离硬性规则"，✗/✓ 例：`{description: "基于上面提供的三张表..."}` 是 blocker；`{description: "为以下 3 张表设计索引：```sql ... ```"}` 才合格 |
+
+### 这一轮的元教训
+
+- **判官的盲点跟 engine mechanics 重合**：从 #469 atomic step_kind 漏接到本轮的 `Parameters` schema 漏渲染、decompose 下游隔离不告诉判官——都属同一族"plan 合规但 engine / 下游会丢/漏，判官 prompt 没机制知识"。每次都是**plan_judge 通过 → engine 漏 → 用户层失败 → judge_post 兜住**。教训：每加一条引擎机制（capability filter / brief boundary / schema validation），都要明确 in-prompt 告知所有判官，让它们能审到这层
+- **新修一定连带踩出下一个洞**：atomic step_kind=tool_call (`70fec62`) 暴露 caller_effective_tools 退化 (`4359bd7`)，又暴露 catalog 没 Parameters (`d6d4941`)，又暴露 decompose 下游隔离 (`91830f8`)。修一个洞总能让下一层裸露。这是工程现实，不是错——但意味着**修完一个 commit 立即跑一次 e2e 验证比写完一批再跑**省时间
+- **dev experience 不修是慢性 tax**：dev.sh Ctrl+C 卡死和 lifespan 泄露互相叠（杀不掉的 worker 占着 port + 9p 挂死），demo 一次踩坑就是 30+ 分钟。两条 fix 单看都很小，叠在一起把"按 ^C 立刻干净退"这条最频繁动作收回来——值得早做
+
+### 一份多 prong backlog（面试后开工）
+
+doubao demo 里把 decompose fact-loss 完整复现了：用户贴 SQL → planner decompose → 子任务 description paraphrase 不带 SQL 字面量 → sub-worker "缺少表结构" → judge_post fail。**Prong 1 prompt 强化已 ship `91830f8`**，剩下 5 prong（`docs/backlog-decompose-fact-loss.md`，gitignored）：
+
+- **prong 2** `<missing_input>` worker marker（对称 capability_request）
+- **prong 3** engine missing-input feedback path → spawn fresh planner with handoff_notes
+- **prong 4** delegation-failure 走 re-plan 而非直接 fail
+- **prong 5** engine spawn sub_agent_delegation 时自动注入父 ChatNode.user_message
+- **prong 6** revise 边界: 同 WorkFlow 内 re-plan 也带 user_message verbatim
+
+prong 5+6 是同一族（engine 在 spawn 边界自动塞 user_message，不靠模型自觉）——根治"判官+planner 共同盲点"那套，不依赖任何 prompt 教育。
+
+---
+
 ## 为什么有意思
 
 常见的 "agent" UI 通常会退化成两种形态：一种是线性聊天框，一种是预先写死的静态
