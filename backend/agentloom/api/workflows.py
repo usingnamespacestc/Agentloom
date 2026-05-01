@@ -445,21 +445,27 @@ def _provider_call_from_settings():
                     model_id = fallback.id if fallback else None
 
                 # Look up model metadata to enforce output length limits.
-                # max_output_tokens is the precise cap; context_window is
-                # the total budget (prompt + completion) and serves as a
-                # generous fallback when the per-model output cap isn't set.
+                # ``max_output_tokens`` is the per-model completion cap. Pre-2026-05-01
+                # this fell back to ``context_window`` when ``max_output_tokens``
+                # wasn't set — but ``context_window`` is the *total prompt+completion*
+                # budget, not a valid completion cap. Volcengine ark silently
+                # accepted the inflated value; GLM (Zhipu BigModel) returns 400
+                # code 1210 ("API 调用参数有误") when ``max_tokens`` equals or
+                # exceeds the context window. The real-world surface was the
+                # tau-bench GLM resume run failing every task in <15s with that
+                # 400 — see ``test_provider_friendly_name_dispatch.py`` and the
+                # related debug capture under ``runs/tau-bench/2026-05-01-overnight/``.
+                # Now: fall back to the constant when ``max_output_tokens`` isn't
+                # set. Operators who want a higher per-call cap should set
+                # ``ModelInfo.max_output_tokens`` explicitly on the provider.
                 model_info = next(
                     (m for m in config.available_models if m.id == model_id),
                     None,
                 )
                 _FALLBACK_MAX_TOKENS = 8192
                 max_tokens: int = _FALLBACK_MAX_TOKENS
-                if model_info is not None:
-                    max_tokens = (
-                        model_info.max_output_tokens
-                        or model_info.context_window
-                        or _FALLBACK_MAX_TOKENS
-                    )
+                if model_info is not None and model_info.max_output_tokens:
+                    max_tokens = model_info.max_output_tokens
 
                 # Resolve structured-output discipline: per-model override
                 # wins; otherwise the provider-level default. ``"none"``
