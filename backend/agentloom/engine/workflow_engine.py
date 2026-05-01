@@ -2375,7 +2375,7 @@ class WorkflowEngine:
                 await asyncio.sleep(delay)
                 try:
                     await self._retry_judge_parse(
-                        workflow, node, parse_errors[-1]
+                        workflow, node, parse_errors[-1], attempt=attempt,
                     )
                     break
                 except JudgeParseError as retry_exc:
@@ -2433,16 +2433,27 @@ class WorkflowEngine:
         workflow: WorkFlow,
         node: WorkFlowNode,
         first_exc: JudgeParseError,
+        *,
+        attempt: int = 0,
     ) -> None:
         """Re-invoke the judge with a JSON-discipline reminder.
 
         On success, overwrites ``node.output_message`` and sets
         ``node.judge_verdict``. On failure, re-raises
         :class:`JudgeParseError` for the caller to surface.
+
+        ``attempt`` is the 0-indexed retry number — used by the
+        bug-B-layer-1 diversification (2026-04-30): doubao's
+        "empty response" failure mode is bias-stable across
+        identical prompts, so attempt 1 / 2 / 3 each escalate the
+        correction text rather than re-issuing byte-identical
+        retries (chatflow ``019de131`` T8 had three empty
+        responses in a row before the engine gave up).
         """
         assert node.output_message is not None  # _run_judge_call guarantees
         assert node.judge_variant is not None
         first_raw = node.output_message.content
+        is_empty_first = not (first_raw or "").strip()
 
         # If the first-attempt failure came from a tool_use whose
         # arguments could not be decoded as JSON (``{"_raw": "..."}``
@@ -2472,12 +2483,69 @@ class WorkflowEngine:
                 "judge_verdict tool call with strictly valid JSON "
                 "arguments matching the schema."
             )
+        elif is_empty_first:
+            # Bug B layer 1 (2026-04-30): doubao 偶发空响应。Prior
+            # behavior re-issued the same prompt and predictably hit
+            # the same empty result; per-attempt escalation gives the
+            # provider a different request shape each time, breaking
+            # the bias-stable failure mode. See
+            # docs/backlog-truth-vs-empty-judge.md.
+            if attempt == 0:
+                correction = (
+                    "Your previous reply was COMPLETELY EMPTY — no "
+                    "tool call, no content, nothing. The provider may "
+                    "have hit a content filter, response truncation, "
+                    "or an internal error. Please resubmit the "
+                    "`judge_verdict` tool call now with a valid JSON "
+                    "object matching the required schema. Even a "
+                    "minimal verdict — e.g. "
+                    "`{\"during_verdict\": \"continue\"}` for DURING "
+                    "or `{\"post_verdict\": \"accept\"}` for POST — "
+                    "is FAR better than another empty reply."
+                )
+            elif attempt == 1:
+                correction = (
+                    "Critical: your previous reply was EMPTY AGAIN. "
+                    "This is the second retry. The chain will FAIL "
+                    "if you don't emit a verdict on this attempt. "
+                    "Output ONLY the `judge_verdict` tool call right "
+                    "now with at least the discriminator field set "
+                    "(e.g. `during_verdict` or `post_verdict`). NO "
+                    "prose, NO code fences, NO empty content. If "
+                    "you genuinely cannot decide, default to "
+                    "``\"continue\"`` (DURING) or ``\"accept\"`` "
+                    "(POST) so the chain can proceed."
+                )
+            else:  # attempt >= 2 — final retry
+                correction = (
+                    "FINAL RETRY. Previous attempts were all empty. "
+                    "Emit literally one valid JSON tool call NOW with "
+                    "exactly one field: the variant's discriminator. "
+                    "The engine will accept that minimal verdict and "
+                    "move on rather than fail the entire ChatNode."
+                )
         else:
+            # Non-empty but malformed — original correction path.
+            # Add attempt-aware emphasis for late retries so a model
+            # that's repeating the same broken shape gets pushed
+            # harder on the third attempt.
+            attempt_emphasis = (
+                ""
+                if attempt == 0
+                else (
+                    f"\nThis is retry attempt {attempt + 1}. "
+                    "Previous attempts also failed JSON parse — "
+                    "if you need to simplify, drop optional fields "
+                    "and emit only the schema's required fields with "
+                    "valid values."
+                )
+            )
             correction = (
                 f"Your previous reply failed JSON parse: {first_exc}. "
                 "Reply with ONLY a valid JSON object matching the "
                 "required schema — no prose, no code fences, all "
                 "string values quoted."
+                + attempt_emphasis
             )
 
         # Build retry context: original input + the bad response + a
