@@ -3630,6 +3630,7 @@ class ChatFlowEngine:
                 "worknode_catalog": "",
                 "redo_eligible_catalog": "",
                 "tool_result_ledger": "",
+                "workflow_suspected_fabricated_failure": "",
             },
             includes=self._fixture_includes,
         )
@@ -3696,6 +3697,14 @@ class ChatFlowEngine:
         # ancestor tool_calls, so the ledger renders empty —
         # judge_post falls back to the existing trio-only review.
         tool_ledger = _render_tool_result_ledger(inner, parent_node)
+        # Bug A layer 2 (2026-04-30): union of engine-flagged
+        # fabricated-failure explanations across every WorkNode in
+        # this WorkFlow — judge_post is the workflow-wide exit gate
+        # so the broader scope (vs. worker_judge's single node) is
+        # right.
+        fabricated_flags = _render_fabricated_failure_flags(
+            _aggregate_workflow_fabricated_failures(inner)
+        )
         templated = instantiate_fixture(
             self._fixture_plans["judge_post"],
             {
@@ -3715,6 +3724,7 @@ class ChatFlowEngine:
                 # stops it from naming judge / planner / tool_call ids.
                 "redo_eligible_catalog": _format_redo_eligible(inner),
                 "tool_result_ledger": tool_ledger,
+                "workflow_suspected_fabricated_failure": fabricated_flags,
             },
             includes=self._fixture_includes,
         )
@@ -4373,6 +4383,14 @@ class ChatFlowEngine:
         # tool_result.is_error so judge can catch "Glob 失败 (lying)"
         # when the engine actually has is_error=False.
         tool_ledger = _render_tool_result_ledger(inner, worker_node)
+        # Bug A layer 2 (2026-04-30): engine-pre-flagged fabricated-
+        # failure explanations from the worker's own narrative scan.
+        # The fixture renders these as a "must-read engine red flag"
+        # section so weak judge models don't need to spot the lie
+        # from the ledger alone.
+        fabricated_flags = _render_fabricated_failure_flags(
+            worker_node.suspected_fabricated_failure or []
+        )
         templated = instantiate_fixture(
             self._fixture_plans["worker_judge"],
             {
@@ -4395,6 +4413,7 @@ class ChatFlowEngine:
                 "worker_capability_request": cap_req_str,
                 "worker_missing_input": missing_inputs_str,
                 "tool_result_ledger": tool_ledger,
+                "worker_suspected_fabricated_failure": fabricated_flags,
             },
             includes=self._fixture_includes,
         )
@@ -6786,6 +6805,44 @@ def _render_tool_result_ledger(
             outcome = f"is_error={tr.is_error}, content={content_preview!r}"
         rows.append(f"- `{n.tool_name}`({args_str}) → {outcome}")
     return "\n".join(rows)
+
+
+def _render_fabricated_failure_flags(entries: list[str]) -> str:
+    """Bug A layer 2 (2026-04-30) renderer.
+
+    Pre-formats the list of engine-detected fabricated-failure
+    explanations into the bullet-list shape the judge fixture
+    embeds. ``[]`` renders as the empty string so the fixture's
+    surrounding language ("if non-empty, …") works without needing
+    a separate Jinja conditional.
+
+    Each entry was authored by ``_scan_fabricated_failure`` and is
+    already a single line referencing one specific (tool_name,
+    matched_phrase, content_preview) triple. We render verbatim —
+    the scanner is the source of truth on phrasing.
+    """
+    if not entries:
+        return ""
+    return "\n".join(f"- {e}" for e in entries)
+
+
+def _aggregate_workflow_fabricated_failures(workflow: WorkFlow) -> list[str]:
+    """Union of every WorkNode's ``suspected_fabricated_failure`` list.
+
+    Used by ``_spawn_judge_post`` because the post-judge sees the
+    whole WorkFlow, not just one ancestor chain. Order is stable
+    (WorkFlow.nodes preserves insertion order), de-duplicated against
+    the running output. Empty list when no WorkNode in the WorkFlow
+    has any flag — typical for a happy-path run.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for n in workflow.nodes.values():
+        for desc in n.suspected_fabricated_failure or []:
+            if desc not in seen:
+                seen.add(desc)
+                out.append(desc)
+    return out
 
 
 def _compose_planner_retry_critique(

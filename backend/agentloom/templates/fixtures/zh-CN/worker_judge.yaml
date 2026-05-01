@@ -46,6 +46,16 @@ params_schema:
       引擎记录的 ``is_error`` 真值对账。worker 撒谎时（自称失败
       但 ``is_error=False`` 且 content 非空）必须判 revise，不能
       把谎话放行到下一轮。空串表示祖先链上没有 tool_call。
+  worker_suspected_fabricated_failure:
+    type: string
+    required: false
+    description: >
+      Bug A layer 2 引擎红旗：worker 草稿里"自述失败"的措辞跟
+      ``tool_result_ledger`` 里 ``is_error=False`` 的祖先 tool_call
+      在文字距离上紧邻，被引擎扫描器（``_scan_fabricated_failure``）
+      标记出来的可疑条目，每条一行，引用具体的工具名、命中的
+      失败短语、tool_result 内容预览。**不是判官自己读出来的**——
+      引擎已经替判官做了一次预筛。空串表示引擎没有检测到嫌疑。
   worker_missing_input:
     type: string
     required: false
@@ -92,6 +102,25 @@ plan:
             - 收敛压力：本轮是第 {{ round }} 轮，最多 {{ round_budget }}
               轮。到了后期，只要产出不是明显错的就该接受；nit 不算
               阻塞。
+
+            **引擎预先标记的伪造失败（必读，layer 2）**：
+            引擎已经在 worker 草稿里扫了一遍"自述工具失败"的措辞
+            和"实际成功的祖先 tool_call"是否撞到一起；下面这份是
+            引擎扫到的可疑清单（每条引用具体工具名 + 撞到的失败
+            短语 + 真实 content 预览）：
+
+                worker_suspected_fabricated_failure:
+                {{ worker_suspected_fabricated_failure }}
+
+            如果该字段非空，**说明引擎已经判定 worker 在谎报工具
+            失败**——不要再"凭文字感觉"自己判一次。直接：
+            - 设 ``during_verdict: "revise"``。
+            - 在 ``critiques`` 里加一条 severity ``blocker``，issue
+              引用引擎给的措辞，evidence 引用 ledger 里对应 tool_call
+              的真实 content 预览。
+            - 重写要求：worker 必须基于 ledger 里的真实工具结果重答，
+              不能再用"调用失败 / 没拿到"这一类托词。
+            如果该字段为空，按下面"工具结果真值核对"流程自查一遍。
 
             **工具结果真值核对（必查）**：
             引擎已经把 worker 这一轮可见的所有祖先 tool_call 的真实

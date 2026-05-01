@@ -168,6 +168,23 @@ class WorkFlowNode(NodeBase):
     #: spawn a fresh planner with handoff_notes describing what was
     #: missing — instead of going straight to retry / fail.
     missing_input: list[str] = Field(default_factory=list)
+    #: Bug A layer 2 (2026-04-30) — engine-detected fabricated tool
+    #: failure. The layer-1 truth ledger (``_render_tool_result_ledger``)
+    #: gives the judge a flat list of ancestor tool_call outcomes and
+    #: asks the judge to spot mismatches between worker narrative and
+    #: ``is_error`` truth; layer 2 closes the same loop on the engine
+    #: side so it doesn't depend on the judge correctly executing the
+    #: prompted cross-check. After a worker draft completes the engine
+    #: scans its narrative for failure-claiming phrases ("调用失败",
+    #: "tool returned nothing", "didn't get the data", etc.) located
+    #: within a tight window of an ancestor tool_call's name; for any
+    #: such match where that ancestor recorded ``is_error=False`` with
+    #: non-empty content, one human-readable explanation is appended
+    #: here. The judge fixture renders the field as an authoritative
+    #: red flag separate from the ledger so weak judge models can't
+    #: miss it. Empty list = no fabricated-failure suspicion (most
+    #: turns).
+    suspected_fabricated_failure: list[str] = Field(default_factory=list)
     #: Pin for the model this specific WorkNode's LLM call uses. Set by
     #: the engine at spawn time (from the enclosing ChatNode's
     #: ``resolved_model``) and propagated across retries/tool-call

@@ -1576,6 +1576,20 @@ class WorkflowEngine:
                 node.missing_input.extend(
                     desc for desc in missing if desc not in existing_missing
                 )
+            # Bug A layer 2 (2026-04-30): engine-side fabricated-failure
+            # cross-check. Scans the worker narrative for failure-claim
+            # phrases co-located with an ancestor tool name whose
+            # ``tool_result`` shows ``is_error=False`` with non-empty
+            # content. Each finding is one human-readable explanation.
+            # Same scope discipline as the markers above: workers only —
+            # judges and planners can't fabricate this signal because
+            # they don't run tools, so we skip the scan for them.
+            fabricated = _scan_fabricated_failure(workflow, node)
+            if fabricated:
+                existing_fab = set(node.suspected_fabricated_failure)
+                node.suspected_fabricated_failure.extend(
+                    desc for desc in fabricated if desc not in existing_fab
+                )
 
         # ------------------------------------------------------------- tool loop
         # If the model requested tool calls AND we have a registry
@@ -2907,6 +2921,170 @@ def _extract_missing_input(text: str) -> list[str]:
         for token in m.group("body").split(","):
             _emit(token)
     return found
+
+
+#: Bug A layer 2 (2026-04-30) — bilingual failure-claim phrases the
+#: scanner looks for in worker narrative. Each pattern is a regex
+#: (compiled below) intended to catch the *narrative shape* "this
+#: tool didn't work", not the *evidence shape* "I have data that
+#: shows X". Patterns are deliberately overlapping (e.g. "调用失败",
+#: "未成功", "执行失败") because real worker outputs in the wild
+#: paraphrase liberally.
+#:
+#: Scope discipline: phrases are limited to the explicit tool-call
+#: failure register. We do NOT include generic "this didn't work"
+#: ("不行", "no good") because legitimate narrative critique uses
+#: those without lying about a tool. The flag is only meant to
+#: catch the specific T6 failure mode (worker says "tool failed"
+#: while engine has is_error=False with non-empty content).
+_FABRICATED_FAILURE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # --- Chinese ---
+    re.compile(r"调用失败"),
+    re.compile(r"工具失败"),
+    re.compile(r"执行失败"),
+    re.compile(r"调用未成功"),
+    re.compile(r"调用没成功"),
+    re.compile(r"没拿到"),
+    re.compile(r"未拿到"),
+    re.compile(r"没获取到?"),
+    re.compile(r"未获取到?"),
+    re.compile(r"未返回"),
+    re.compile(r"没有返回"),
+    re.compile(r"没返回"),
+    re.compile(r"工具(?:[^\s]{0,6})报错"),
+    re.compile(r"返回(?:为)?空"),
+    # --- English (case-insensitive) ---
+    re.compile(r"\btool\s+(?:call\s+)?(?:failed|errored|crashed)\b", re.IGNORECASE),
+    re.compile(r"\bcall\s+failed\b", re.IGNORECASE),
+    re.compile(r"\bdid(?:n[' ’]?t|\s+not)\s+(?:return|get|fetch|find)\b", re.IGNORECASE),
+    re.compile(r"\bcould(?:n[' ’]?t|\s+not)\s+(?:fetch|find|access|retrieve)\b", re.IGNORECASE),
+    re.compile(r"\bunable\s+to\s+(?:fetch|find|access|retrieve|get)\b", re.IGNORECASE),
+    re.compile(r"\breturned\s+(?:nothing|empty|no\s+data|no\s+results?)\b", re.IGNORECASE),
+    re.compile(r"\bno\s+(?:results?|matches?|output|data\s+returned)\b", re.IGNORECASE),
+)
+
+#: Window (in characters) around a tool-name match within which a
+#: failure phrase is treated as referring to that tool. 80 chars =
+#: roughly a sentence — tight enough to filter out "Glob" appearing
+#: in a docstring while a separate sentence elsewhere mentions
+#: failure of an unrelated capability.
+_FABRICATED_FAILURE_WINDOW = 80
+
+
+def _scan_fabricated_failure(
+    workflow: WorkFlow,
+    node: WorkFlowNode,
+) -> list[str]:
+    """Bug A layer 2 (2026-04-30): engine-side cross-check between
+    worker narrative and ancestor ``tool_result.is_error`` truth.
+
+    Walks ancestor ``tool_call`` nodes; for each one whose
+    ``tool_result.is_error == False`` AND whose ``content`` is
+    non-empty, looks for the tool's name appearing in the worker's
+    ``output_message.content`` *within ~80 chars of* a failure-
+    claiming phrase from :data:`_FABRICATED_FAILURE_PATTERNS`. Each
+    such co-occurrence yields one explanation string referencing the
+    suspected tool and the matched phrase, so the worker_judge /
+    judge_post fixtures can render a per-call red flag.
+
+    Pure read — never mutates the workflow. Empty list on:
+    - no ancestor tool_calls
+    - no successful (is_error=False, non-empty content) ancestors
+    - worker text doesn't co-locate any tool name with any failure
+      phrase
+
+    False-positive tolerance: this is fed to the judge as a hint,
+    NOT a hard error. The judge already has the truth ledger; layer
+    2 just escalates the cross-check from "judge is asked to spot
+    it" to "engine pre-flagged it" so weak judge models can't miss
+    the T6 failure mode.
+    """
+    om = node.output_message
+    if om is None:
+        return []
+    text = om.content or ""
+    if not text.strip():
+        return []
+
+    ancestor_set = set(workflow.ancestors(node.id))
+    findings: list[str] = []
+    seen_tool_ids: set[str] = set()
+
+    for nid, n in workflow.nodes.items():
+        if nid not in ancestor_set:
+            continue
+        if n.step_kind != StepKind.TOOL_CALL:
+            continue
+        tool_name = (n.tool_name or "").strip()
+        if not tool_name:
+            continue
+        tr = n.tool_result
+        if tr is None:
+            # tool hasn't executed — can't reason about fabrication.
+            continue
+        if tr.is_error:
+            # legitimate failure — worker claiming "failed" is honest.
+            continue
+        if not (tr.content or "").strip():
+            # successful but empty (e.g. ``ls`` of empty dir): worker
+            # narrating "got nothing" is honest, not fabricated.
+            continue
+        if nid in seen_tool_ids:
+            continue
+
+        # Find every occurrence of the tool name in the worker text.
+        # Tool names are typically ASCII identifiers ("Glob", "Read",
+        # "Bash") so case-insensitive substring is the right granularity;
+        # for non-ASCII (rare custom tools) we still catch via the
+        # case-preserved scan since lower() is identity for those.
+        text_lower = text.lower()
+        name_lower = tool_name.lower()
+        starts = []
+        idx = 0
+        while True:
+            found_at = text_lower.find(name_lower, idx)
+            if found_at == -1:
+                break
+            starts.append(found_at)
+            idx = found_at + len(name_lower)
+        if not starts:
+            continue
+
+        # For each occurrence, look for a failure phrase within
+        # ±_FABRICATED_FAILURE_WINDOW characters.
+        matched_phrase: str | None = None
+        for occ in starts:
+            window_start = max(0, occ - _FABRICATED_FAILURE_WINDOW)
+            window_end = min(
+                len(text),
+                occ + len(tool_name) + _FABRICATED_FAILURE_WINDOW,
+            )
+            window = text[window_start:window_end]
+            for pat in _FABRICATED_FAILURE_PATTERNS:
+                m = pat.search(window)
+                if m:
+                    matched_phrase = m.group(0)
+                    break
+            if matched_phrase:
+                break
+        if not matched_phrase:
+            continue
+
+        # Truncate the tool_result content preview to ~80 chars; this
+        # explanation is rendered into the judge fixture, so it must
+        # stay one short line.
+        preview = (tr.content or "").replace("\n", " ⏎ ")
+        if len(preview) > 80:
+            preview = preview[:77] + "..."
+        findings.append(
+            f"Worker narrative mentions tool {tool_name!r} alongside "
+            f"failure phrase {matched_phrase!r}, but the engine "
+            f"recorded is_error=False with non-empty content "
+            f"(preview: {preview!r}). Suspected fabricated failure."
+        )
+        seen_tool_ids.add(nid)
+
+    return findings
 
 
 def _extract_capability_request(text: str) -> list[str]:

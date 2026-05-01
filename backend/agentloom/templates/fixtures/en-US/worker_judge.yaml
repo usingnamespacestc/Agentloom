@@ -50,6 +50,17 @@ params_schema:
       ledger shows ``is_error=False`` with non-empty content, it's
       a fabricated-failure case — judge MUST issue revise. Empty
       string when the ancestor chain has no tool_calls.
+  worker_suspected_fabricated_failure:
+    type: string
+    required: false
+    description: >
+      Bug A layer 2 engine red flag: pre-formatted bullet list of
+      explanations from the engine-side scanner
+      (``_scan_fabricated_failure``) that detected the worker's
+      narrative co-locating a "tool failed" phrase with an ancestor
+      tool_call whose ``tool_result.is_error=False``. **Not the
+      judge's own perception** — the engine has already pre-filtered.
+      Empty string when no suspicion was raised.
   worker_missing_input:
     type: string
     required: false
@@ -98,6 +109,27 @@ plan:
             - Convergence pressure: this is round {{ round }} of at
               most {{ round_budget }}. Late rounds should accept any
               output that is not actively wrong; nits are not blockers.
+
+            **Engine-pre-flagged fabricated failure (mandatory, layer 2)**:
+            The engine has already scanned the worker's draft for
+            "tool failed"-style phrasing co-located with an ancestor
+            tool_call that actually succeeded; pre-formatted findings:
+
+                worker_suspected_fabricated_failure:
+                {{ worker_suspected_fabricated_failure }}
+
+            If that field is non-empty, **the engine has already
+            judged the worker to be fabricating a tool failure** —
+            don't second-guess by reading the prose yourself. Do:
+            - Set ``during_verdict: "revise"``.
+            - In ``critiques`` add one entry of severity ``blocker``
+              whose ``issue`` quotes the engine's explanation and
+              whose ``evidence`` quotes the ledger's actual content
+              preview for that tool_call.
+            - Require the rewrite to be based on the ledger's real
+              tool_result — no more "tool failed / didn't get"
+              dodges.
+            If the field is empty, run the manual cross-check below.
 
             **Tool-result truth check (mandatory)**:
             The engine has compiled the authoritative outcome of every

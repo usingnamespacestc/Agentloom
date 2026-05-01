@@ -63,6 +63,19 @@ params_schema:
       worker is fabricating a tool failure and accepting would
       relay the lie to the user. Empty string when no ancestor
       tool_calls exist.
+  workflow_suspected_fabricated_failure:
+    type: string
+    required: false
+    description: >
+      Bug A layer 2 engine red flag: pre-formatted bullet list of
+      explanations from the engine's per-WorkNode scanner
+      (``_scan_fabricated_failure``), unioned across **every**
+      WorkNode in this WorkFlow. Each bullet quotes the suspected
+      tool, the matched failure phrase, and the real content
+      preview. **Not the judge's own perception** — non-empty means
+      the engine has already pre-judged the WorkFlow as containing
+      fabricated tool failure(s) and ``accept`` is forbidden.
+      Empty string when the scan found no suspicion.
 plan:
   description:
     text: "judge_post universal exit gate"
@@ -304,6 +317,27 @@ plan:
             cause specifically — vague "I had trouble" sentences
             are also bad. The aim is "actionable + persona-matched",
             not "polite engine error".
+
+            **Engine-pre-flagged fabricated failure (mandatory, layer 2)**:
+            The engine has already scanned every worker draft in this
+            WorkFlow for "tool failed"-style phrasing co-located with
+            an ancestor tool_call that actually succeeded; the union
+            of pre-formatted findings:
+
+                workflow_suspected_fabricated_failure:
+                {{ workflow_suspected_fabricated_failure }}
+
+            If that field is non-empty, **``accept`` is forbidden** —
+            the engine has already judged this WorkFlow to contain
+            fabricated tool failure(s):
+            - Default to ``retry``: ``user_message`` briefly states
+              that upstream misreported a tool result and the real
+              data is available; ``redo_targets`` lists the worker
+              node(s) that produced the lie for re-spawn.
+            - If a flagged worker isn't in ``redo_eligible_catalog``
+              (rare), switch to ``fail`` with ``user_message`` noting
+              the inconsistency. Do not relay the lie to the user.
+            If the field is empty, run the manual cross-check below.
 
             **Tool-result truth check (mandatory)**:
             The engine has compiled the authoritative outcome of every

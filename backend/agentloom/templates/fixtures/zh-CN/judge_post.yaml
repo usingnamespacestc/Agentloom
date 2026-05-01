@@ -57,6 +57,16 @@ params_schema:
       但 ``is_error=False`` 且 content 非空）必须判 ``retry``，不
       能 ``accept`` 把谎话写到 user_message 里。空串表示祖先链上
       没有 tool_call。
+  workflow_suspected_fabricated_failure:
+    type: string
+    required: false
+    description: >
+      Bug A layer 2 引擎红旗：把 WorkFlow 内**所有** WorkNode 的
+      ``suspected_fabricated_failure`` 求并集后预格式化的清单。
+      引擎已经针对每个 worker 的草稿做过"自述工具失败 vs 真实
+      ``is_error=False`` "对账，并把命中的可疑条目堆在这里。**不
+      是判官自己读出来的**——非空就直接走 retry / fail，不要
+      ``accept``。空串表示引擎扫了一圈没发现谎报失败。
 plan:
   description:
     text: "judge_post 通用出口闸"
@@ -256,6 +266,26 @@ plan:
             问回去的 missing input、没授权的工具），把那个原因点
             名说清楚——含糊的"我有点困难"也是不合格的。目标是
             "可执行 + 角色对得上"，而不是"礼貌的引擎错误"。
+
+            **引擎预先标记的伪造失败（必读，layer 2）**：
+            引擎已经在所有 worker 草稿里扫了一遍"自述工具失败"措辞
+            和"实际成功的祖先 tool_call"是否撞到一起；下面这份是
+            WorkFlow 全局的可疑清单（每条引用具体工具名 + 命中的
+            失败短语 + 真实 content 预览）：
+
+                workflow_suspected_fabricated_failure:
+                {{ workflow_suspected_fabricated_failure }}
+
+            如果该字段非空，**禁止 ``accept`` 把谎话写给用户**——
+            引擎已经判定 WorkFlow 内有 worker 在谎报工具失败：
+            - 默认走 ``retry``，``user_message`` 简短说明上游误报、
+              真实结果存在；``redo_targets`` 把生成谎话的 worker
+              节点列上要求重跑。
+            - 如果该 worker 节点不在 ``redo_eligible_catalog`` 里
+              （罕见——一般 worker 都可重做），改判 ``fail``，
+              ``user_message`` 告知用户系统检测到不一致，不要把
+              谎话当真信息发出去。
+            如果该字段为空，按下面"工具结果真值核对"流程自查一遍。
 
             **工具结果真值核对（必查）**：
             引擎已经把 WorkFlow 里所有祖先 tool_call 的真实结果总结
