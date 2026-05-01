@@ -398,7 +398,24 @@ def _provider_call_from_settings():
 
             chosen = None
             if provider_id:
-                chosen = next((p for p in providers if p["id"] == provider_id), None)
+                # Match either provider UUID (canonical) OR friendly_name.
+                # Some legacy paths (smoke scripts, manual API calls,
+                # tau-bench --agent-provider) pass the friendly_name; without
+                # this fallback the lookup misses and silently routes to
+                # ``providers[0]`` (typically volcengine), so a request for
+                # ``glm:glm-5-turbo`` ended up hitting ark/coding/v3 with
+                # the GLM model name → 404 UnsupportedModel from volcengine.
+                # Same root cause as the canvas TokenBar 44%-on-14k bug
+                # (read-time bandage shipped 2026-05-01); this is the
+                # call-dispatch counterpart.
+                chosen = next(
+                    (
+                        p for p in providers
+                        if p["id"] == provider_id
+                        or p.get("friendly_name") == provider_id
+                    ),
+                    None,
+                )
             if chosen is None:
                 chosen = providers[0]
 

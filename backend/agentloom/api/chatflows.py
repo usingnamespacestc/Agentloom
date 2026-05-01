@@ -82,8 +82,17 @@ async def _resolve_draft_model(
         return None
 
     if current is not None:
+        # Match either provider UUID (canonical) OR friendly_name —
+        # legacy callers wrote friendly_name into ProviderModelRef.provider_id,
+        # so a strict UUID-only check would treat those refs as stale
+        # and silently re-default. See bug fix in
+        # workflows._provider_call_from_settings (same friendly_name vs
+        # UUID asymmetry on the call-dispatch path).
         for p in providers:
-            if p["id"] != current.provider_id:
+            if (
+                p["id"] != current.provider_id
+                and p.get("friendly_name") != current.provider_id
+            ):
                 continue
             for m in p.get("available_models", []):
                 if m.get("id") == current.model_id:
