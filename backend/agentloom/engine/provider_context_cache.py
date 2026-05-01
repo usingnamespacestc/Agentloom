@@ -29,18 +29,31 @@ async def refresh(repo) -> None:  # type: ignore[no-untyped-def]
 
     Passes through ``list_all()`` which returns lightweight summaries
     — one select + payload deserialize per workspace.
+
+    Cache is keyed by BOTH ``(provider_uuid, model_id)`` and
+    ``(provider_friendly_name, model_id)`` so a ``ProviderModelRef``
+    written with the friendly name (legacy paths — smoke scripts,
+    manual API calls — wrote ``provider_id="volcengine"`` instead of
+    the provider UUID) still resolves. Without this fallback the
+    lookup misses → ``_context_window_for`` falls back to 32k → a
+    doubao 128K node's compact threshold fires at ~40% of its real
+    capacity. Same root bug as the canvas TokenBar 44%-on-14k
+    display issue (see ``frontend/src/canvas/contextWindowMap.test.ts``).
     """
     providers = await repo.list_all()
     new: dict[tuple[str, str], int | None] = {}
     for p in providers:
         pid = p.get("id")
-        if not pid:
-            continue
+        friendly = p.get("friendly_name")
         for m in p.get("available_models", []) or []:
             mid = m.get("id")
             if not mid:
                 continue
-            new[(pid, mid)] = m.get("context_window")
+            ctx = m.get("context_window")
+            if pid:
+                new[(pid, mid)] = ctx
+            if friendly:
+                new[(friendly, mid)] = ctx
     _cache.clear()
     _cache.update(new)
 

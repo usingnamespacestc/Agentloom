@@ -1036,7 +1036,15 @@ function resolveContextWindow(
 }
 
 /** Build ``"provider_id:model_id" → context_window`` from a providers
- * list, skipping models that don't declare a window. */
+ * list, skipping models that don't declare a window.
+ *
+ * Keyed by BOTH the provider UUID and ``friendly_name`` so a WorkNode
+ * whose ``model_override.provider_id`` happens to hold the friendly
+ * name (some legacy paths — smoke scripts, manual API calls — wrote
+ * ``"volcengine"`` instead of the UUID) still resolves to the right
+ * context window. Without the friendly_name fallback the bar falls
+ * back to ``DEFAULT_MAX_CONTEXT_TOKENS`` (32k) and a doubao 128K node
+ * showing 14k of context renders as 44% instead of ~11%. */
 export function contextWindowMap(
   providers: ProviderSummary[],
 ): Record<string, number> {
@@ -1045,6 +1053,9 @@ export function contextWindowMap(
     for (const m of p.available_models) {
       if (m.context_window != null) {
         map[`${p.id}:${m.id}`] = m.context_window;
+        if (p.friendly_name) {
+          map[`${p.friendly_name}:${m.id}`] = m.context_window;
+        }
       }
     }
   }
