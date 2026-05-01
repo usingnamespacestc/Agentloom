@@ -3629,6 +3629,7 @@ class ChatFlowEngine:
                 "upstream_summary": "",
                 "worknode_catalog": "",
                 "redo_eligible_catalog": "",
+                "tool_result_ledger": "",
             },
             includes=self._fixture_includes,
         )
@@ -3686,6 +3687,15 @@ class ChatFlowEngine:
         user-facing message in its own voice — see judge_post.yaml.
         """
         trio = _trio_params(inner)
+        # Bug A layer 1 (2026-04-30): tool-result truth ledger so
+        # judge_post can cross-check worker output against engine-
+        # recorded tool_result.is_error. ``parent_node`` is the
+        # node we're routing FROM into judge_post (a worker draft
+        # on the happy path; a judge_pre / planner_judge halt
+        # node on a halt path). For halt paths there are usually no
+        # ancestor tool_calls, so the ledger renders empty —
+        # judge_post falls back to the existing trio-only review.
+        tool_ledger = _render_tool_result_ledger(inner, parent_node)
         templated = instantiate_fixture(
             self._fixture_plans["judge_post"],
             {
@@ -3704,6 +3714,7 @@ class ChatFlowEngine:
                 # the retry halts. Giving the judge the list up-front
                 # stops it from naming judge / planner / tool_call ids.
                 "redo_eligible_catalog": _format_redo_eligible(inner),
+                "tool_result_ledger": tool_ledger,
             },
             includes=self._fixture_includes,
         )
@@ -4357,6 +4368,11 @@ class ChatFlowEngine:
         # _extract_missing_input).
         missing_inputs = worker_node.missing_input or []
         missing_inputs_str = json.dumps(missing_inputs, ensure_ascii=False)
+        # Bug A layer 1 (2026-04-30): tool-result truth ledger.
+        # Cross-checks worker narrative against engine-recorded
+        # tool_result.is_error so judge can catch "Glob 失败 (lying)"
+        # when the engine actually has is_error=False.
+        tool_ledger = _render_tool_result_ledger(inner, worker_node)
         templated = instantiate_fixture(
             self._fixture_plans["worker_judge"],
             {
@@ -4378,6 +4394,7 @@ class ChatFlowEngine:
                 "round_budget": str(inner.debate_round_budget),
                 "worker_capability_request": cap_req_str,
                 "worker_missing_input": missing_inputs_str,
+                "tool_result_ledger": tool_ledger,
             },
             includes=self._fixture_includes,
         )
@@ -6708,6 +6725,67 @@ def _render_critiques(verdict: JudgeVerdict) -> str:
         ensure_ascii=False,
         indent=2,
     )
+
+
+def _render_tool_result_ledger(
+    workflow: WorkFlow,
+    target_node: WorkFlowNode,
+) -> str:
+    """Bug A layer 1 (2026-04-30): compact ledger of every ancestor
+    tool_call's outcome, rendered into worker_judge / judge_post
+    fixtures so the judge can cross-check the worker's narrative
+    against engine-recorded truth.
+
+    Format (one bullet per ancestor tool_call, in topological order):
+
+        - Glob({"pattern": "**/*.tsx"}) → is_error=False, content="..."
+        - Read({"file_path": "/x.tsx"}) → is_error=True, content="..."
+
+    The judge prompt is updated to flag a specific failure mode:
+    when the worker's output_message claims a tool failed (e.g.
+    "Glob 调用失败", "未获取", "tool returned nothing") AND the
+    corresponding ledger entry shows ``is_error=False`` with
+    non-empty content, that's a **fabricated failure** and the
+    judge should issue revise / retry rather than passing the
+    lie downstream. Surfaced 2026-04-30 on chatflow ``019de131``
+    T6: worker said "Glob 失败" while the engine had a successful
+    tool_result with 100+ ``.tsx`` paths in content.
+
+    Returns the empty string when the target has no ancestor
+    tool_calls — the fixture renders this as the absence of any
+    tool history (judges judge on the trio + worker output alone,
+    same as before the ledger landed).
+
+    Content is truncated to ~140 chars per call to keep the ledger
+    cheap (a typical run with 3 tool_calls adds ~500 tokens to
+    each judge prompt).
+    """
+    ancestor_set = set(workflow.ancestors(target_node.id))
+    rows: list[str] = []
+    # Iterate in node-insertion order for stable, topology-respecting
+    # output (workflow.nodes is a dict preserving insertion order).
+    for nid, n in workflow.nodes.items():
+        if nid not in ancestor_set:
+            continue
+        if n.step_kind != StepKind.TOOL_CALL:
+            continue
+        args_str = (
+            json.dumps(n.tool_args, ensure_ascii=False)
+            if n.tool_args
+            else "{}"
+        )
+        if len(args_str) > 120:
+            args_str = args_str[:117] + "..."
+        tr = n.tool_result
+        if tr is None:
+            outcome = "(not yet executed)"
+        else:
+            content_preview = (tr.content or "").replace("\n", " ⏎ ")
+            if len(content_preview) > 140:
+                content_preview = content_preview[:137] + "..."
+            outcome = f"is_error={tr.is_error}, content={content_preview!r}"
+        rows.append(f"- `{n.tool_name}`({args_str}) → {outcome}")
+    return "\n".join(rows)
 
 
 def _compose_planner_retry_critique(

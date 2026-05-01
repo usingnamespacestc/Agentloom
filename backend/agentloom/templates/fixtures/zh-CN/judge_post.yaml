@@ -46,6 +46,17 @@ params_schema:
       ``redo_targets[].node_id`` 必须出现在这份名单里——不在名单中
       的 id（judges、planners、tool_calls）会被引擎静默丢弃，并导
       致本次重试直接 halt。
+  tool_result_ledger:
+    type: string
+    required: false
+    description: >
+      由引擎汇总的"祖先 tool_call 真值流水"——每条工具调用的
+      ``(tool_name, tool_args, is_error, content 摘要)``。让
+      judge_post 可以把 worker 的"工具失败 / 没拿到 / 未获取"叙述
+      跟引擎记录的 ``is_error`` 真值对账。worker 撒谎时（自称失败
+      但 ``is_error=False`` 且 content 非空）必须判 ``retry``，不
+      能 ``accept`` 把谎话写到 user_message 里。空串表示祖先链上
+      没有 tool_call。
 plan:
   description:
     text: "judge_post 通用出口闸"
@@ -245,6 +256,30 @@ plan:
             问回去的 missing input、没授权的工具），把那个原因点
             名说清楚——含糊的"我有点困难"也是不合格的。目标是
             "可执行 + 角色对得上"，而不是"礼貌的引擎错误"。
+
+            **工具结果真值核对（必查）**：
+            引擎已经把 WorkFlow 里所有祖先 tool_call 的真实结果总结
+            在下面字段里：
+
+                tool_result_ledger:
+                {{ tool_result_ledger }}
+
+            把它和 ``upstream_summary`` / 终末 worker 输出里的
+            "工具相关叙述"逐条对账：
+
+            - 若 worker / 上游消息说了"工具调用失败 / 调用未成功 /
+              没拿到 / 未获取 / 工具未返回"等，**对应 tool 在 ledger
+              里却是 ``is_error=False`` 且 content 非空**——这是上游
+              在撒谎（把成功的工具调用讲成了失败）。**禁止 accept
+              这条产出**。判 ``post_verdict: "retry"``，``user_message``
+              里向用户说明上游误报、引擎已检测到真实结果存在；
+              ``redo_targets`` 把生成谎话的 worker 节点列上要求重跑。
+              如果重跑节点不在 ``redo_eligible_catalog`` 里，改判
+              ``fail`` 并在 ``user_message`` 里告知用户系统检测到
+              不一致——不要把谎话当真信息发给用户。
+            - 若 ledger 里 ``is_error=True`` 跟上游叙述相符，那就是
+              真失败——按一般 retry / fail 流程处理。
+            - 若 ledger 为空（没有祖先 tool_call），跳过本规则。
 
             **可选的认知 ReAct DAG（recon_plan）**：当你的判定真的
             依赖于核实真实状态——比如 worker 声称改了订单 / 写了文件 /

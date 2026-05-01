@@ -49,6 +49,20 @@ params_schema:
       MUST appear in this list — ids outside it (judges, planners,
       tool_calls) will be silently dropped by the engine and the
       retry will halt.
+  tool_result_ledger:
+    type: string
+    required: false
+    description: >
+      Engine-rendered "tool_result truth ledger" — one bullet per
+      ancestor tool_call's outcome ``(tool_name, args, is_error,
+      content preview)``. Lets judge_post cross-check upstream
+      narrative ("Glob failed", "didn't get the data") against the
+      engine's authoritative record. When upstream claims failure
+      but ledger shows ``is_error=False`` with non-empty content,
+      judge_post MUST issue retry / fail rather than accept — the
+      worker is fabricating a tool failure and accepting would
+      relay the lie to the user. Empty string when no ancestor
+      tool_calls exist.
 plan:
   description:
     text: "judge_post universal exit gate"
@@ -290,6 +304,35 @@ plan:
             cause specifically — vague "I had trouble" sentences
             are also bad. The aim is "actionable + persona-matched",
             not "polite engine error".
+
+            **Tool-result truth check (mandatory)**:
+            The engine has compiled the authoritative outcome of every
+            ancestor tool_call in this WorkFlow:
+
+                tool_result_ledger:
+                {{ tool_result_ledger }}
+
+            Cross-check every claim in ``upstream_summary`` / the
+            terminal worker output that mentions a tool outcome:
+
+            - If the worker / upstream said "tool failed", "didn't get",
+              "couldn't fetch", "returned empty", "execution failed"
+              etc., AND the corresponding tool in the ledger shows
+              ``is_error=False`` with non-empty content, the upstream
+              is **fabricating a failure**. **DO NOT accept this
+              output.** Issue ``post_verdict: "retry"`` with a
+              ``user_message`` explaining that the engine detected
+              the inconsistency and the real tool result IS available;
+              list the worker node that produced the lie in
+              ``redo_targets`` for re-spawn. If that node isn't in
+              ``redo_eligible_catalog``, switch to ``fail`` with
+              ``user_message`` flagging the inconsistency — never
+              relay a fabricated failure to the user.
+            - If the ledger shows ``is_error=True`` and the upstream
+              narrative agrees, that's a genuine failure — handle
+              via the normal retry / fail flow.
+            - If the ledger is empty (no ancestor tool_call), skip
+              this rule.
 
             **Optional cognitive ReAct DAG (recon_plan)**: when your
             verdict genuinely depends on verifying real state — e.g.

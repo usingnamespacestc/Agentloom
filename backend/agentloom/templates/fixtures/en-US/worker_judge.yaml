@@ -38,6 +38,18 @@ params_schema:
       uses this to populate ``capability_escalation`` and trigger an
       escalation flow (engine widens ``WorkFlow.inheritable_tools``
       and re-runs the planner).
+  tool_result_ledger:
+    type: string
+    required: false
+    description: >
+      Engine-rendered "tool_result truth ledger" — one bullet per
+      ancestor tool_call's outcome ``(tool_name, args, is_error,
+      content preview)``. Lets the judge cross-check the worker's
+      narrative ("Glob failed", "didn't get the data") against the
+      engine's authoritative record. When worker claims failure but
+      ledger shows ``is_error=False`` with non-empty content, it's
+      a fabricated-failure case — judge MUST issue revise. Empty
+      string when the ancestor chain has no tool_calls.
   worker_missing_input:
     type: string
     required: false
@@ -86,6 +98,37 @@ plan:
             - Convergence pressure: this is round {{ round }} of at
               most {{ round_budget }}. Late rounds should accept any
               output that is not actively wrong; nits are not blockers.
+
+            **Tool-result truth check (mandatory)**:
+            The engine has compiled the authoritative outcome of every
+            ancestor tool_call visible to this worker, with the real
+            ``is_error`` flag and a content preview:
+
+                tool_result_ledger:
+                {{ tool_result_ledger }}
+
+            Cross-check every claim the worker makes about a tool
+            outcome against this ledger:
+
+            - If the worker says "the tool failed", "couldn't get",
+              "didn't return", "returned empty", "execution failed"
+              etc., AND the corresponding tool in the ledger shows
+              ``is_error=False`` with non-empty content, the worker
+              is **fabricating a failure** (calling a successful tool
+              call a failure). Issue ``during_verdict: "revise"``.
+              In ``critiques``, add one entry of severity ``blocker``
+              quoting the ledger's actual content as evidence and
+              instructing the worker to rewrite the output based on
+              the real tool result.
+            - If the worker says "tool failed" and the ledger ALSO
+              shows ``is_error=True``, that's a genuine failure —
+              handle via the normal revise / halt flow (worker may
+              apologize to user, planner may need to change tactic).
+            - If the ledger is empty (no ancestor tool_call), skip
+              this rule.
+            - This rule **outranks the convergence-pressure rule**:
+              don't pass through fabricated failures even at the
+              last round — downstream turns will compound the lie.
 
             **Capability escalation**:
             The worker may have emitted a ``<capability_request>`` marker

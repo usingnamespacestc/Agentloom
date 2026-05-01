@@ -36,6 +36,16 @@ params_schema:
       空串。判官读它来填 ``capability_escalation``，触发引擎扩展
       ``WorkFlow.inheritable_tools`` 并重 spawn planner，让 worker 下
       一轮拿到这些工具。
+  tool_result_ledger:
+    type: string
+    required: false
+    description: >
+      由引擎汇总的"祖先 tool_call 真值流水"——每条工具调用的
+      ``(tool_name, tool_args, is_error, content 摘要)``。让判官
+      可以把 worker 的"工具失败 / 没拿到 / 未获取"叙述跟
+      引擎记录的 ``is_error`` 真值对账。worker 撒谎时（自称失败
+      但 ``is_error=False`` 且 content 非空）必须判 revise，不能
+      把谎话放行到下一轮。空串表示祖先链上没有 tool_call。
   worker_missing_input:
     type: string
     required: false
@@ -82,6 +92,31 @@ plan:
             - 收敛压力：本轮是第 {{ round }} 轮，最多 {{ round_budget }}
               轮。到了后期，只要产出不是明显错的就该接受；nit 不算
               阻塞。
+
+            **工具结果真值核对（必查）**：
+            引擎已经把 worker 这一轮可见的所有祖先 tool_call 的真实
+            结果总结在下面字段里（每条带 ``is_error`` 真值 + content
+            预览）：
+
+                tool_result_ledger:
+                {{ tool_result_ledger }}
+
+            把它和 worker_output 里的"工具相关叙述"逐条对账：
+
+            - 若 worker 写了"工具调用失败 / 调用未成功 / 没拿到 /
+              未获取 / 工具未返回"等措辞，**对应 tool 在 ledger 里
+              是 ``is_error=False`` 且 content 非空**——这是 worker
+              撒谎（把成功的工具返回讲成了失败）。判
+              ``during_verdict: "revise"``，在 critiques 里加一条
+              severity ``blocker`` 条目，引用 ledger 里的真实
+              content 摘要作为 evidence，要求 worker 重写产出
+              并基于真实的工具结果作答。
+            - 若 worker 写"工具失败"且 ledger 也显示 ``is_error=True``，
+              是真失败——按一般 revise / halt 流程处理（例如让 worker
+              回复用户解释失败原因，或者 halt 让 planner 换路径）。
+            - 若 ledger 为空（没有祖先 tool_call），跳过本规则。
+            - 这条规则**比"轮次收敛压力"优先**：不能因为已经到末轮
+              就放过谎报失败——下游 turn 看到错信息会以错传错。
 
             **能力升级（capability escalation）**：
             worker 可能发出了 ``<capability_request>`` 标记，提示
