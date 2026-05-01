@@ -29,7 +29,6 @@ from agentloom.db.models.tenancy import DEFAULT_WORKSPACE_ID
 from agentloom.db.repositories.provider import ProviderRepository
 from agentloom.schemas.provider import (
     JsonMode,
-    ModelInfo,
     ProviderConfig,
     ProviderKind,
     ProviderSubKind,
@@ -53,6 +52,10 @@ async def main() -> int:
             print(f"provider '{FRIENDLY_NAME}' already registered — skipping")
             return 0
 
+        # Provider row only — no models attached. The user manages
+        # the model lineup through the settings UI afterwards (discover
+        # / pin / set per-model params there). available_models stays
+        # empty so the seeder doesn't second-guess the catalog.
         config = ProviderConfig(
             friendly_name=FRIENDLY_NAME,
             provider_kind=ProviderKind.OPENAI_COMPAT,
@@ -61,17 +64,6 @@ async def main() -> int:
             api_key_source="env_var",
             api_key_env_var=ENV_VAR,
             json_mode=JsonMode.OBJECT,
-            available_models=[
-                # Latest flagship. 200K context, strong tool-use.
-                ModelInfo(id="glm-4.6", pinned=True, context_window=200_000),
-                # Free-tier (rate-limited) cheap model — preferred for
-                # exploratory smoke runs (matches the free-tier-first
-                # cost hierarchy).
-                ModelInfo(id="glm-4-flash", pinned=True, context_window=128_000),
-                # Mid-tier alternative; left unpinned so it's available
-                # but doesn't crowd the picker.
-                ModelInfo(id="glm-4-plus", context_window=128_000),
-            ],
         )
         await repo.create(config)
         await session.commit()
@@ -80,9 +72,7 @@ async def main() -> int:
         print(f"  api key:     from env var {ENV_VAR}")
         print(f"  sub_kind:    {config.provider_sub_kind.value}")
         print(f"  json_mode:   {config.json_mode.value}")
-        print( "  pinned:")
-        for m in config.pinned_models():
-            print(f"    - {m.id} (ctx={m.context_window})")
+        print( "  models:      (none — add via settings UI)")
     return 0
 
 
