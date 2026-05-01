@@ -185,6 +185,18 @@ class WorkFlowNode(NodeBase):
     #: miss it. Empty list = no fabricated-failure suspicion (most
     #: turns).
     suspected_fabricated_failure: list[str] = Field(default_factory=list)
+    #: Bug B layer 3 (2026-04-30) — engine-synthesized fallback flag.
+    #: When every judge retry attempt (original + all
+    #: ``_JUDGE_PARSE_MAX_RETRIES`` retries) returned empty content,
+    #: the engine synthesizes a minimal "no-op" verdict (PRE: ok /
+    #: DURING: continue / POST: fail with generic user_message) so
+    #: the ChatNode finalizes gracefully instead of bubbling a
+    #: RuntimeError that fails the whole turn. This flag is set on
+    #: the judge_call WorkNode whose verdict was synthesized so
+    #: downstream observability (canvas, logs, metrics) can see
+    #: which judge calls were "rescued" by the fallback. ``False``
+    #: in the normal case where the judge returned a real verdict.
+    judge_engine_fallback: bool = False
     #: Pin for the model this specific WorkNode's LLM call uses. Set by
     #: the engine at spawn time (from the enclosing ChatNode's
     #: ``resolved_model``) and propagated across retries/tool-call

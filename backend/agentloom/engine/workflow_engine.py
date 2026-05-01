@@ -61,6 +61,7 @@ from agentloom.schemas.common import (
     EditableText,
     EditProvenance,
     JudgeVariant,
+    JudgeVerdict,
     NodeScope,
     NodeStatus,
     ProviderModelRef,
@@ -2368,6 +2369,12 @@ class WorkflowEngine:
         # sub-WorkFlow bubbling up a RuntimeError, which wastes
         # significantly more upstream work.
         parse_errors: list[JudgeParseError] = []
+        # Bug B layer 3 (2026-04-30): track whether each attempt's raw
+        # response was empty so we can decide on retry exhaustion
+        # whether to synthesize a fallback verdict (only fires when
+        # ALL attempts were empty — malformed-JSON failures still
+        # bubble up so prompt-engineering bugs aren't masked).
+        empty_response_chain: list[bool] = []
         try:
             if judge_tool is not None:
                 node.judge_verdict = parse_judge_from_tool_args(
@@ -2378,6 +2385,9 @@ class WorkflowEngine:
                     node.output_message.content, node.judge_variant,
                 )
         except JudgeParseError as first_exc:
+            empty_response_chain.append(
+                not (node.output_message.content or "").strip()
+            )
             parse_errors.append(first_exc)
             for attempt in range(_JUDGE_PARSE_MAX_RETRIES):
                 # Exponential backoff before each retry (0.5s, 1s, ...)
@@ -2393,8 +2403,35 @@ class WorkflowEngine:
                     )
                     break
                 except JudgeParseError as retry_exc:
+                    empty_response_chain.append(
+                        not (node.output_message.content or "").strip()
+                    )
                     parse_errors.append(retry_exc)
                     if attempt == _JUDGE_PARSE_MAX_RETRIES - 1:
+                        # Layer 3 (2026-04-30): all attempts exhausted.
+                        # If every single attempt returned empty, the
+                        # provider was non-responsive — synthesize a
+                        # minimal "no-op" verdict so the chain
+                        # gracefully exits instead of hard-failing
+                        # the ChatNode. Malformed JSON (any non-empty
+                        # response) still raises so prompt-engineering
+                        # bugs aren't silently masked.
+                        if all(empty_response_chain):
+                            node.judge_verdict = _synthesize_minimal_verdict(
+                                node.judge_variant
+                            )
+                            node.judge_engine_fallback = True
+                            log.warning(
+                                "judge accept-on-empty fallback engaged: "
+                                "workflow=%s node=%s variant=%s — "
+                                "%d empty responses in a row, "
+                                "synthesized minimal verdict.",
+                                workflow.id,
+                                node.id,
+                                node.judge_variant,
+                                len(empty_response_chain),
+                            )
+                            break
                         chain = "; ".join(
                             f"attempt{i}={str(e)[:200]}"
                             for i, e in enumerate(parse_errors)
@@ -3114,6 +3151,51 @@ def _scan_fabricated_failure(
         seen_tool_ids.add(nid)
 
     return findings
+
+
+#: Bug B layer 3 (2026-04-30) — generic user-facing message used as
+#: the synthesized POST-judge fallback when every retry returned
+#: empty. POST is the user-visible exit gate, so we can't accept
+#: silently (would relay junk content) and we can't crash; the
+#: middle path is a friendly "verification step couldn't run, please
+#: retry" message routed via ``post_verdict='fail'`` so the standard
+#: halt-prompt machinery picks it up. PRE/DURING failures don't need
+#: this — they short-circuit to "ok"/"continue" and let downstream
+#: judges catch real issues.
+_JUDGE_FALLBACK_POST_USER_MESSAGE = (
+    "I wasn't able to verify the response — the verification step "
+    "didn't return a usable result after several retries. Could you "
+    "rephrase or retry the request?"
+)
+
+
+def _synthesize_minimal_verdict(variant: JudgeVariant | None) -> JudgeVerdict:
+    """Bug B layer 3: build the minimal-impact verdict for the given
+    judge variant when retries exhausted on empty responses.
+
+    PRE → ``feasibility="ok"``: lets the WorkFlow proceed; the planner
+    and downstream judges will catch infeasibility.
+
+    DURING → ``during_verdict="continue"``: the worker's draft passes
+    this gate; judge_post will still inspect the final output.
+
+    POST → ``post_verdict="fail"`` with a generic user-facing message.
+    Cannot use ``accept`` (would relay potentially-junk content
+    verbatim) and the schema doesn't support a "the engine doesn't
+    know" verdict, so a graceful fail is the safest landing.
+
+    Defensive: ``None`` variant (shouldn't happen — judge_call nodes
+    always have a variant set) defaults to a DURING-shaped verdict
+    so the engine doesn't crash on a malformed node.
+    """
+    if variant == JudgeVariant.PRE:
+        return JudgeVerdict(feasibility="ok")
+    if variant == JudgeVariant.POST:
+        return JudgeVerdict(
+            post_verdict="fail",
+            user_message=_JUDGE_FALLBACK_POST_USER_MESSAGE,
+        )
+    return JudgeVerdict(during_verdict="continue")
 
 
 def _extract_capability_request(text: str) -> list[str]:
