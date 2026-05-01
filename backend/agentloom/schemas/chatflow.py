@@ -317,6 +317,16 @@ class ChatFlow(BaseModel):
     #: for the main LLM step.
     default_judge_model: ProviderModelRef | None = None
     default_tool_call_model: ProviderModelRef | None = None
+    #: Bug B layer 2 (2026-04-30) — fallback judge model used by
+    #: :meth:`_retry_judge_parse` when its **last** retry would
+    #: otherwise re-call the same primary judge model that's already
+    #: failed parse twice. Motivated by chatflow ``019de131`` T8 where
+    #: doubao judge_post returned empty 3× in a row: bias-stable empty
+    #: responses don't break by repeating the same prompt against the
+    #: same model. Snapshotted onto every WorkFlow as
+    #: ``judge_fallback_model``; ``None`` (default) keeps the existing
+    #: behavior of using the primary model on the final retry too.
+    default_judge_fallback_model: ProviderModelRef | None = None
     #: Optional pin for ``StepKind.BRIEF`` WorkNodes (MemoryBoard
     #: producer — see design doc 2026-04-20). When set, every brief
     #: call in this chatflow's WorkFlows runs on this model regardless

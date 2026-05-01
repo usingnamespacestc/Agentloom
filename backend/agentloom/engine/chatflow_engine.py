@@ -3208,6 +3208,11 @@ class ChatFlowEngine:
                 or chatflow.default_tool_call_model
                 or resolved
             ),
+            # Bug B layer 2 (2026-04-30): no per-turn override path —
+            # the fallback is a chatflow-wide setting, snapshotted as
+            # ``None`` when not configured so the retry path keeps
+            # the primary model.
+            judge_fallback_model=chatflow.default_judge_fallback_model,
             # MemoryBoard brief pin (PR 1). brief is always on when a
             # board writer is wired; the pin is a *quality override*,
             # not an on/off switch. Fall back to ``draft_model`` when
@@ -4164,6 +4169,7 @@ class ChatFlowEngine:
             judge_retry_budget=parent.judge_retry_budget,
             judge_model_override=parent.judge_model_override,
             tool_call_model_override=parent.tool_call_model_override,
+            judge_fallback_model=parent.judge_fallback_model,
             # Inherit the MemoryBoard brief pin so nested sub-WorkFlows
             # honor the enclosing ChatFlow's brief_model.
             brief_model_override=parent.brief_model_override,

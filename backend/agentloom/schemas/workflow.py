@@ -425,6 +425,16 @@ class WorkFlow(BaseModel):
     #: so the whole nested tree honors the same defaults.
     judge_model_override: ProviderModelRef | None = None
     tool_call_model_override: ProviderModelRef | None = None
+    #: Bug B layer 2 (2026-04-30) — snapshot of the enclosing
+    #: ``ChatFlow.default_judge_fallback_model``. Read by
+    #: :meth:`_retry_judge_parse` on its **last** retry attempt:
+    #: when set and distinct from the primary judge model, the
+    #: retry routes to this fallback so a bias-stable failure mode
+    #: on one model (e.g. doubao returning empty under schema
+    #: pressure) gets a different provider's chance before giving
+    #: up. ``None`` = no fallback, retries stick with the primary
+    #: model — preserves pre-2026-04-30 behavior.
+    judge_fallback_model: ProviderModelRef | None = None
     #: Snapshotted MemoryBoard brief pin. The engine stamps every
     #: ``StepKind.BRIEF`` WorkNode's ``model_override`` from this field
     #: so brief runs go to the ChatFlow's brief_model regardless of the

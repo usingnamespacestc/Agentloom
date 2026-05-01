@@ -2572,7 +2572,36 @@ class WorkflowEngine:
             UserMessage(content=correction),
         ]
 
-        ref = effective_model_for(workflow, node.id)
+        # Bug B layer 2 (2026-04-30): on the FINAL retry, swap to the
+        # configured fallback judge model when set and distinct from
+        # the primary. Doubao judge_post in chatflow ``019de131`` T8
+        # returned empty 3× in a row — bias-stable empty responses
+        # don't break by repeating the same prompt against the same
+        # model, but a different provider gets a fresh chance.
+        # ``attempt`` is 0-indexed, so the final retry is
+        # ``_JUDGE_PARSE_MAX_RETRIES - 1``. We require an explicit
+        # fallback config and that it's distinct from the primary —
+        # otherwise the swap is a no-op and we save the user surprise.
+        primary_ref = effective_model_for(workflow, node.id)
+        ref = primary_ref
+        is_final_retry = attempt >= _JUDGE_PARSE_MAX_RETRIES - 1
+        if is_final_retry and workflow.judge_fallback_model is not None:
+            fb = workflow.judge_fallback_model
+            if primary_ref is None or (
+                fb.provider_id != primary_ref.provider_id
+                or fb.model_id != primary_ref.model_id
+            ):
+                ref = fb
+                log.info(
+                    "judge fallback engaged: workflow=%s node=%s "
+                    "attempt=%d primary=%s fallback=%s",
+                    workflow.id,
+                    node.id,
+                    attempt,
+                    f"{primary_ref.provider_id}:{primary_ref.model_id}"
+                    if primary_ref else "None",
+                    f"{fb.provider_id}:{fb.model_id}",
+                )
         model = (
             f"{ref.provider_id}:{ref.model_id}" if ref and ref.provider_id
             else (ref.model_id if ref else None)
