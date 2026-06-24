@@ -7560,18 +7560,23 @@ def _judge_post_response_text(workflow: WorkFlow) -> str | None:
     Priority for an ``accept`` verdict:
 
     - ``merged_response`` (decompose-accept aggregation).
-    - ``user_message`` (atomic-accept override). The judge_post prompt
-      nominally tells atomic-accept not to write ``user_message`` and
-      to let the worker's draft reach the user verbatim, but in
-      practice judges sometimes overwrite when the worker's draft is
-      unusable (tool-loop artifacts, raw planner JSON leaks). The judge
-      is the universal exit gate — trust its final word over a suspect
-      terminal llm_call.
+    - For a decompose WorkFlow (has ``sub_agent_delegation`` nodes):
+      ``user_message`` as a last resort. Decompose has no single
+      terminal llm_call to fall back to, so a judge-written
+      ``user_message`` is better than nothing.
+    - For an atomic-completed WorkFlow (no delegations): return
+      ``None`` so the terminal llm_call's own output reaches the user
+      verbatim. The judge_post fixture explicitly instructs atomic-
+      accept ``do not write a user_message or merged_response``;
+      honoring a (mistaken) preamble ``user_message`` here would
+      override the worker's actual deliverable. Observed on chatflow
+      ``019efa1c`` (2026-06-24, qwen36-27b): an atomic worker produced
+      a 16k-char review, judge_post accepted but emitted a one-line
+      preamble ``"收到，我将为您审阅..."`` — the preamble became the
+      agent_response and the review was discarded.
 
-    Returns ``None`` for atomic accepts where the judge left both
-    fields empty (worker's draft is the reply) and for halt paths
-    (``pending_user_prompt`` is already set via
-    ``judge_post_needs_user_input``).
+    Returns ``None`` for halt paths (``pending_user_prompt`` is already
+    set via ``judge_post_needs_user_input``).
 
     Also returns ``None`` when both fields are *fake nulls* — the
     literal string ``"null"`` / ``"none"`` / etc. that some models
@@ -7580,6 +7585,9 @@ def _judge_post_response_text(workflow: WorkFlow) -> str | None:
     user_message = ``"null"``; without this filter the user got
     that 4-byte string as the agent's reply.
     """
+    is_decompose = any(
+        n.step_kind == StepKind.DELEGATE for n in workflow.nodes.values()
+    )
     for n in reversed(list(workflow.nodes.values())):
         if (
             n.step_kind != StepKind.JUDGE_CALL
@@ -7594,8 +7602,12 @@ def _judge_post_response_text(workflow: WorkFlow) -> str | None:
             return None
         if not _is_fake_null(v.merged_response):
             return v.merged_response
-        if not _is_fake_null(v.user_message):
+        if is_decompose and not _is_fake_null(v.user_message):
+            # Decompose has no single terminal llm_call, so a judge-
+            # written user_message is the best available reply.
             return v.user_message
+        # Atomic-completed accept: let the terminal llm_call's output
+        # bubble up verbatim (the fixture forbids user_message here).
         return None
     return None
 
