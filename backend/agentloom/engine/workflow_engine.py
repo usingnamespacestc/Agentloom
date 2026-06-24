@@ -1379,6 +1379,18 @@ class WorkflowEngine:
         else:
             messages = _build_context_from_ancestors(workflow, node)
 
+        # Atomic-tool-call follow-up: a node that carries its own
+        # ``input_messages`` (e.g. the worker-seeded follow-up DRAFT from
+        # ``_spawn_atomic_tool_call``) bypasses the ancestor walk above,
+        # so a direct TOOL_CALL parent's result never gets spliced in.
+        # Without this the follow-up would never see the tool's output
+        # and reply empty. The ancestor-walk path handles the same
+        # splice in ``_build_tagged_context_from_ancestors``; this covers
+        # the explicit-seed path. Idempotent: only direct TOOL_CALL
+        # parents whose result exists are appended.
+        if node.input_messages:
+            messages = _splice_direct_tool_call_results(workflow, node, messages)
+
         if not messages:
             raise ValueError(
                 f"{node.step_kind.value} node {node.id} has no input_messages "
@@ -3395,6 +3407,58 @@ def _build_context_from_ancestors(workflow: WorkFlow, node: WorkFlowNode) -> lis
     return [m for _, m in _build_tagged_context_from_ancestors(workflow, node)]
 
 
+def _splice_direct_tool_call_results(
+    workflow: WorkFlow, node: WorkFlowNode, messages: list[Message]
+) -> list[Message]:
+    """Append ``[assistant tool_call, tool result]`` for any direct
+    TOOL_CALL parent whose result isn't already represented.
+
+    A node that carries its own ``input_messages`` (e.g. the worker-seeded
+    follow-up DRAFT from
+    :func:`agentloom.engine.chatflow_engine.ChatFlowEngine._spawn_atomic_tool_call`)
+    bypasses :func:`_build_tagged_context_from_ancestors`, so a direct
+    TOOL_CALL parent's result never gets spliced. Without this the
+    follow-up never sees the tool's output and replies empty. Mirrors the
+    splice the ancestor walk performs; kept as a separate helper because
+    the explicit-seed path doesn't walk the full chain.
+
+    For atomic tool calls (``source_tool_use_id is None``) a matching
+    assistant tool_call is synthesized so the trailing ``tool`` message is
+    well-formed for every provider (otherwise strict providers reject a
+    ``tool`` message with no preceding tool_call).
+    """
+    for pid in node.parent_ids:
+        p = workflow.nodes.get(pid)
+        if p is None or p.step_kind != StepKind.TOOL_CALL:
+            continue
+        if p.tool_result is None:
+            continue
+        if p.source_tool_use_id is not None:
+            tool_use_id = p.source_tool_use_id
+        else:
+            tool_use_id = f"atomic_{p.id}"
+            messages.append(
+                AssistantMessage(
+                    tool_uses=[
+                        ProviderToolUse(
+                            id=tool_use_id,
+                            name=p.tool_name or "",
+                            arguments=dict(p.tool_args or {}),
+                        )
+                    ],
+                )
+            )
+        messages.append(
+            ToolMessage(
+                tool_use_id=tool_use_id,
+                content=_maybe_truncate_tool_result(
+                    p.tool_result.content, p.id, p.tool_name
+                ),
+            )
+        )
+    return messages
+
+
 def _build_tagged_context_from_ancestors(
     workflow: WorkFlow, node: WorkFlowNode
 ) -> list[tuple[str | None, Message]]:
@@ -3481,12 +3545,45 @@ def _build_tagged_context_from_ancestors(
                 for m in _wire_to_provider([a.output_message]):
                     tagged.append((a.id, m))
         elif a.step_kind == StepKind.TOOL_CALL:
-            if a.tool_result is not None and a.source_tool_use_id is not None:
+            if a.tool_result is not None:
+                if a.source_tool_use_id is not None:
+                    # Normal tool loop: the preceding assistant (the seed
+                    # ancestor's ``output_message``) already carries the
+                    # matching tool_use, so splice only the tool result.
+                    tool_use_id = a.source_tool_use_id
+                else:
+                    # Atomic tool call (``_spawn_atomic_tool_call``): the
+                    # planner committed ``tool_name + tool_args`` directly
+                    # with no LLM-emitted tool_use, so ``source_tool_use_id``
+                    # is None. Without a matching assistant tool_call the
+                    # result was dropped here, leaving the follow-up DRAFT's
+                    # message list ending on the planner's assistant output —
+                    # an assistant prefill that strict providers reject (e.g.
+                    # Qwen3 thinking mode: "Assistant response prefill is
+                    # incompatible with enable_thinking") and starving the
+                    # worker of the tool result regardless of provider.
+                    # Synthesize a well-formed assistant tool_call + tool
+                    # result pair so the wire is valid for every provider.
+                    tool_use_id = f"atomic_{a.id}"
+                    tagged.append(
+                        (
+                            a.id,
+                            AssistantMessage(
+                                tool_uses=[
+                                    ProviderToolUse(
+                                        id=tool_use_id,
+                                        name=a.tool_name or "",
+                                        arguments=dict(a.tool_args or {}),
+                                    )
+                                ],
+                            ),
+                        )
+                    )
                 tagged.append(
                     (
                         a.id,
                         ToolMessage(
-                            tool_use_id=a.source_tool_use_id,
+                            tool_use_id=tool_use_id,
                             content=_maybe_truncate_tool_result(
                                 a.tool_result.content, a.id, a.tool_name
                             ),

@@ -4347,10 +4347,35 @@ class ChatFlowEngine:
             effective_tools=[atomic.tool_name],
         )
         inner.add_node(tc)
+        # Seed the follow-up DRAFT with the worker fixture's
+        # input_messages (worker system prompt + the brief trio) instead
+        # of leaving it bare. A bare role-less DRAFT's ancestor-walk seed
+        # fell on the PLANNER — whose system prompt tells the model to
+        # emit decompose JSON — so the follow-up produced empty/confused
+        # output and the turn's agent_response came back blank even
+        # though the tool ran fine (observed on chatflow 019efa1c,
+        # 2026-06-24, qwen36-27b: pwd returned the cwd but the worker
+        # reply was ''). The tool result is spliced onto these
+        # input_messages at run time by ``_run_llm_call`` (see
+        # ``_splice_direct_tool_call_results``) since the ancestor walk
+        # is bypassed when a node carries its own input_messages.
+        worker_template = instantiate_fixture(
+            self._fixture_plans["worker"],
+            {
+                "description": atomic.description,
+                "inputs": atomic.inputs,
+                "expected_outcome": atomic.expected_outcome,
+                "prior_output": "",
+                "critique": "",
+            },
+            includes=self._fixture_includes,
+        )
+        worker_seed = _single_node(worker_template)
         follow_up = WorkFlowNode(
             step_kind=StepKind.DRAFT,
             parent_ids=[tc.id],
             model_override=inner.tool_call_model_override or resolved_model,
+            input_messages=worker_seed.input_messages,
         )
         inner.add_node(follow_up)
         return follow_up
